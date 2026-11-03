@@ -80,7 +80,8 @@ impl App {
         }
         if self.drag.is_none() {
             let (tx, ty) = self.cursor_tile(size);
-            if self.buttons[0] {
+            let w = self.screen_to_world(self.cursor, size);
+            if self.buttons[0] && !self.game.attack(w.x, w.y, self.free) {
                 self.game.dig(tx, ty, self.free);
             }
             if self.buttons[1] {
@@ -113,6 +114,11 @@ impl App {
                 }
             }
         }
+        // Health under the hotbar.
+        let width = HOTBAR as f32 * (SLOT + 4.0) - 4.0;
+        rects.push(rect(10.0, 56.0, width, 8.0, [0.1, 0.1, 0.15, 0.6]));
+        let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
+        rects.push(rect(11.0, 57.0, (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
         rects
     }
 
