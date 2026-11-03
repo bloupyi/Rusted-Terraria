@@ -13,7 +13,7 @@ const WALL_BIT: u32 = 1 << 30;
 const LIQUID_BIT: u32 = 1 << 31;
 
 /// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30 | liquid << 31.
-/// `b`: atlas u (12) | atlas v (12) << 12 | layer (8) << 24,
+/// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29,
 /// or for a liquid: amount (8) | kind (8) << 8.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -198,20 +198,19 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
             if let Some(Some(s)) = atlas.walls.get(wall as usize).filter(|_| wall != 0) {
                 let n = |dx, dy| world.wall(xi + dx, yi + dy) != 0;
                 let (fx, fy) = block_frame(n(0, -1), n(0, 1), n(-1, 0), n(1, 0), variant(x, y));
-                if let Some(inst) = instance(s, x, y, fx * 36, fy * 36, 32, true) {
+                if let Some(inst) = instance(s, x, y, fx * 36, fy * 36, 32, true, 0) {
                     walls.push(inst);
                 }
             }
             let t = c.tile[i];
             if let Some(Some(s)) = atlas.tiles.get(t as usize).filter(|_| t != NO_TILE) {
                 let (fx, fy) = if is_block(t) {
-                    let n = |dx, dy| is_block(world.tile(xi + dx, yi + dy));
-                    let (fx, fy) = block_frame(n(0, -1), n(0, 1), n(-1, 0), n(1, 0), variant(x, y));
-                    (fx * 18, fy * 18)
+                    world::frame::block(world, xi, yi, variant(x, y) as usize)
                 } else {
                     (c.frame_x[i].max(0) as u32, c.frame_y[i].max(0) as u32)
                 };
-                if let Some(inst) = instance(s, x, y, fx, fy, 16, false) {
+                let shape = if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
+                if let Some(inst) = instance(s, x, y, fx, fy, 16, false, shape as u32) {
                     tiles.push(inst);
                 }
             }
@@ -221,14 +220,15 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
 }
 
 #[inline]
-fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, size: u32, wall: bool) -> Option<Instance> {
+#[allow(clippy::too_many_arguments)]
+fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, size: u32, wall: bool, shape: u32) -> Option<Instance> {
     let (fx, fy) = if s.fallback { (0, 0) } else { (fx, fy) };
     if fx + size > s.w || fy + size > s.h {
         return None;
     }
     Some(Instance {
         a: x | (y << 15) | if wall { WALL_BIT } else { 0 },
-        b: (s.x + fx) | ((s.y + fy) << 12) | (s.layer << 24),
+        b: (s.x + fx) | ((s.y + fy) << 12) | (s.layer << 24) | (shape << 29),
     })
 }
 

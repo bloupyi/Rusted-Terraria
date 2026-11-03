@@ -10,10 +10,12 @@ use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
 pub mod body;
+pub mod frame;
 pub mod light;
 pub mod liquid;
 pub mod mob;
 pub mod player;
+pub mod tile_sets;
 
 pub use formats::wld::{flags, Liquid, NO_TILE};
 
@@ -142,6 +144,16 @@ impl World {
         self.chunk(x / CHUNK, y / CHUNK).liquid[Chunk::index(x % CHUNK, y % CHUNK)]
     }
 
+    /// Wiring, actuator, paint-visibility and shape bits (`flags::*`); 0 out of bounds.
+    #[inline]
+    pub fn flags(&self, x: i64, y: i64) -> u16 {
+        if !self.in_bounds(x, y) {
+            return 0;
+        }
+        let (c, i) = self.cell(x as u32, y as u32);
+        c.flags[i]
+    }
+
     /// Stored frame of a frame-important tile; out of bounds reads as `(-1, -1)`.
     pub fn frame(&self, x: i64, y: i64) -> (i16, i16) {
         if !self.in_bounds(x, y) {
@@ -177,9 +189,9 @@ impl World {
         *d |= bits;
     }
 
-    /// Block framing reads neighbours, so edits on a chunk edge dirty the next chunk too.
+    /// Block framing reads all eight neighbours, so edits on a chunk edge dirty the next chunks too.
     fn mark_around(&mut self, x: u32, y: u32, bits: u8) {
-        for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+        for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
             let (nx, ny) = (x as i64 + dx, y as i64 + dy);
             if self.in_bounds(nx, ny) {
                 self.mark(nx as u32, ny as u32, bits);

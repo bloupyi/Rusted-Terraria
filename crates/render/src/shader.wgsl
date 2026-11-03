@@ -25,6 +25,9 @@ struct VOut {
     @location(2) tile: vec2<f32>,
     // Liquid kind + 1, 0 for sheets.
     @location(3) @interpolate(flat) liquid: u32,
+    // Top-left texel of the frame, and the block shape (0 full, 1 half, 2..5 slopes).
+    @location(4) @interpolate(flat) base: vec2<u32>,
+    @location(5) @interpolate(flat) shape: u32,
 }
 
 fn corner(vi: u32) -> vec2<f32> {
@@ -50,14 +53,18 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
         let v = select((1.0 - top) * 16.0 * c.y, 8.0 + 8.0 * c.y, amount >= 1.0);
         out.texel = vec2<f32>(c.x * 16.0, v);
         out.liquid = ((b >> 8u) & 0xffu) + 1u;
+        out.base = vec2<u32>(0u);
+        out.shape = 0u;
         return out;
     }
     let wall = ((a >> 30u) & 1u) != 0u;
     let size = select(16.0, 32.0, wall);
     let pad = select(0.0, -8.0, wall);
     out.pos = vec4<f32>((tile * 16.0 + pad + c * size) * cam.scale + cam.offset, 0.0, 1.0);
-    out.texel = vec2<f32>(f32(b & 0xfffu), f32((b >> 12u) & 0xfffu)) + c * size;
-    out.layer = b >> 24u;
+    out.base = vec2<u32>(b & 0xfffu, (b >> 12u) & 0xfffu);
+    out.texel = vec2<f32>(out.base) + c * size;
+    out.layer = (b >> 24u) & 31u;
+    out.shape = b >> 29u;
     out.tile = tile + (pad + c * size) / 16.0;
     out.liquid = 0u;
     return out;
@@ -86,11 +93,43 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
         }
         return vec4<f32>(c.rgb * smooth_light(in.tile), c.a);
     }
-    let c = textureLoad(atlas, vec2<i32>(floor(in.texel)), i32(in.layer), 0);
+    var t = vec2<i32>(floor(in.texel));
+    if in.shape != 0u {
+        let local = t - vec2<i32>(in.base);
+        let y = shaped_row(in.shape, local);
+        if y < 0 {
+            discard;
+        }
+        t.y = i32(in.base.y) + y;
+    }
+    let c = textureLoad(atlas, t, i32(in.layer), 0);
     if c.a == 0.0 {
         discard;
     }
     return c * vec4<f32>(smooth_light(in.tile), 1.0);
+}
+
+// Sheet row shown at `local` (pixels in the tile) for a half block or slope,
+// -1 where the shape leaves the cell empty. Slopes are 2-pixel columns of the
+// frame slid along the diagonal, with the flat edge kept whole.
+fn shaped_row(shape: u32, local: vec2<i32>) -> i32 {
+    let y = local.y;
+    if shape == 1u {
+        return select(-1, y - 8, y >= 8);
+    }
+    // Shapes 2 and 4 rise to the left, 3 and 5 to the right.
+    let col = local.x / 2;
+    let i = select(7 - col, col, shape == 2u || shape == 4u);
+    if shape <= 3u {
+        if y >= 14 {
+            return y;
+        }
+        return select(-1, y - 2 * i, y >= 2 * i);
+    }
+    if y < 2 {
+        return y;
+    }
+    return select(-1, y + 2 * i, y < 16 - 2 * i);
 }
 
 const PAGE: f32 = 2048.0;
@@ -129,6 +168,8 @@ fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) page: u32) ->
     out.layer = page;
     out.tile = vec2<f32>(0.0);
     out.liquid = 0u;
+    out.base = vec2<u32>(0u);
+    out.shape = 0u;
     return out;
 }
 
