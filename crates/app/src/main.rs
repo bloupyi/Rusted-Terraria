@@ -1,4 +1,5 @@
 mod audio;
+mod backdrop;
 mod game;
 mod inventory;
 mod items;
@@ -339,7 +340,10 @@ impl ApplicationHandler for App {
                 let t1 = Instant::now();
                 self.game.sync(renderer, view);
                 let t2 = Instant::now();
-                let (under, mut over) = self.game.sprites(view, Some(cursor), self.free);
+                let (mut under, mut over) = self.game.sprites(view, Some(cursor), self.free);
+                let ticks = (self.camera.time * 60.0) as u32;
+                let center = self.camera.center.to_array();
+                under.splice(0..0, self.game.backdrop(center, self.camera.zoom, (size.x as u32, size.y as u32), ticks));
                 over.extend(hud);
                 let t3 = Instant::now();
                 let stats = renderer.render(&self.camera, &under, &over);
@@ -407,6 +411,7 @@ fn main() {
     let mut free = false;
     let mut host = None;
     let mut join = None;
+    let mut at = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -417,12 +422,17 @@ fn main() {
             "--host" => host = Some(net::DEFAULT_PORT),
             "--port" => host = args.next().and_then(|p| p.parse().ok()),
             "--join" => join = args.next(),
+            "--at" => {
+                at = args.next().and_then(|s| {
+                    s.split_once(',').and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?)))
+                })
+            }
             _ => path = Some(PathBuf::from(a)),
         }
     }
     let usage = || -> ! {
         eprintln!(
-            "usage: rusted-terraria [--vsync] [--profile] [--zoom <z>] [--free] [--host | --port <port>] <world.wld>"
+            "usage: rusted-terraria [--vsync] [--profile] [--zoom <z>] [--free] [--at <x,y>] [--host | --port <port>] <world.wld>"
         );
         eprintln!("       rusted-terraria [--vsync] [--free] --join <host[:port]>");
         std::process::exit(2);
@@ -462,7 +472,9 @@ fn main() {
         Some(d) => println!("assets: {}", d.display()),
         None => println!("assets: Terraria install not found (set {}), using placeholders", formats::install::ENV_VAR),
     }
-    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &game::sprite_sheets());
+    let mut sheets = game::sprite_sheets();
+    sheets.extend(backdrop::sheets(&world.header.env.clone().unwrap_or_default()));
+    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
         world.header.name,
@@ -479,7 +491,7 @@ fn main() {
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
     let mut game = Game::new(world, scene);
     game.client = net.as_ref().is_some_and(|n| !n.host);
-    let (cx, cy) = game.player.center();
+    let (cx, cy) = at.map_or(game.player.center(), |(x, y)| (x * 16.0, y * 16.0));
     let mut app = App {
         name: game.world.header.name.clone(),
         world_px,

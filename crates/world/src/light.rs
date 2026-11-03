@@ -1,79 +1,170 @@
-//! Per-tile light, row-major over the whole world. RGB is light from tiles and
-//! lava, alpha is skylight (scaled by the time of day at draw time, so the day
-//! cycle needs no recompute).
+//! Per-tile light, row-major over the whole world, following the game's
+//! light map. RGB is light from tiles, liquids and the underworld, alpha is
+//! sunlight (scaled by the sky colour at draw time, so the day cycle needs no
+//! recompute). Values are stored at `ONE` per unit, so sources brighter than
+//! 1 (white torches...) reach as far as in the game.
 //!
-//! Sources: open sky (columns down to the first block or wall), light-emitting
-//! tiles and liquids. Propagation: directional sweeps (right, left, down, up)
-//! where light leaving a cell is multiplied by that cell's transmission (so a
-//! block facing the sky is fully lit), repeated so light can turn two corners.
-//! Sweeps run in parallel over rows or bands of columns.
+//! Sources: above the surface line, every cell whose wall lets light through
+//! and whose block does not stop sunlight; light-emitting tiles (generated
+//! table, `tile_light`) and liquids; open cells of the underworld.
+//! Propagation as in the game: per column down and up, then per row right
+//! and left, twice; light leaving a cell is multiplied by that cell's decay
+//! (air, block, water, honey) and stops below the game's cut-off.
 //!
 //! Edits relight a window: the edited rect plus `REACH` tiles on each side,
 //! beyond which any source has faded out.
 
 use rayon::prelude::*;
 
-use crate::{Chunk, Liquid, World, CHUNK, NO_TILE};
+use crate::tile_light::{RULES, TORCH};
+use crate::tile_sets::{BLOCK_LIGHT, CRACKED_BRICKS, NO_SUN_LIGHT, WALL_LIGHT};
+use crate::{flags, Chunk, Liquid, World, CHUNK, NO_TILE};
 
-/// Transmission per tile, out of 256.
-const AIR: u16 = 228;
-const LIQUID: u16 = 205;
-const SOLID: u16 = 140;
+/// Stored value of a light of 1.
+pub const ONE: f32 = 128.0;
+/// The game stops carrying light below 0.0185.
+const CUTOFF: u16 = 3;
 const ROUNDS: usize = 2;
-/// 255 * (AIR / 256)^REACH < 1.
+/// 255 * 0.91^REACH < CUTOFF.
 pub const REACH: u32 = 50;
+/// Rows above the bottom where the underworld glow starts.
+const UNDERWORLD: u32 = 200;
 
-/// Light a tile emits. Torch colours per style (frame_y / 22), ordered as the
-/// item list of the public wiki.
-pub fn emission(tile: u16, frame_y: i16) -> Option<[u8; 3]> {
-    const TORCH: [[u8; 3]; 24] = [
-        [255, 200, 140], // torch
-        [80, 120, 255],  // blue
-        [255, 60, 60],   // red
-        [80, 255, 80],   // green
-        [200, 80, 255],  // purple
-        [255, 255, 255], // white
-        [255, 255, 80],  // yellow
-        [200, 80, 255],  // demon
-        [160, 255, 40],  // cursed
-        [140, 220, 255], // ice
-        [255, 150, 40],  // orange
-        [255, 230, 60],  // ichor
-        [220, 240, 255], // ultrabright
-        [255, 180, 120], // bone
-        [255, 160, 220], // rainbow
-        [255, 120, 220], // pink
-        [255, 210, 130], // desert
-        [80, 200, 255],  // coral
-        [180, 120, 255], // corrupt
-        [255, 110, 80],  // crimson
-        [255, 200, 255], // hallowed
-        [160, 255, 120], // jungle
-        [70, 100, 255],  // mushroom
-        [255, 140, 255], // aether
-    ];
-    Some(match tile {
-        4 => TORCH[(frame_y.max(0) / 22) as usize % TORCH.len()],
-        33 | 34 | 42 | 93 | 100 => [240, 210, 160], // candle, chandelier, lantern, lamp, candelabra
-        35 => [255, 160, 60],                       // jack 'o lantern
-        92 | 95 => [255, 200, 140],                 // lamp post, chinese lantern
-        215 => [255, 170, 100],                     // campfire
-        270 => [190, 255, 120],                     // firefly in a bottle
-        271 => [120, 220, 255],                     // lightning bug in a bottle
-        37 => [130, 70, 50],                        // meteorite
-        58 => [200, 70, 30],                        // hellstone
-        70 => [40, 70, 200],                        // mushroom grass
-        _ => return None,
-    })
+/// Cell kinds for propagation, and their decay per channel out of 256 (RGB, sun).
+const AIR: u8 = 0;
+const SOLID: u8 = 1;
+const CRACKED: u8 = 2;
+const WATER: u8 = 3;
+const HONEY: u8 = 4;
+const DECAY: [[u16; 4]; 5] = [
+    [233, 233, 233, 233],
+    [143, 143, 143, 143],
+    [205, 205, 205, 205],
+    // 0.91 * (0.88, 0.96, 1.015) at the mean of the game's 0.98..1.00 ripple.
+    [203, 221, 234, 219],
+    // 0.91 * (0.75, 0.7, 0.6).
+    [175, 163, 140, 159],
+];
+
+/// What a frame comparison in a light rule looks at.
+#[derive(Clone, Copy)]
+pub enum Field {
+    X,
+    Y,
 }
 
-fn liquid_emission(kind: u8) -> Option<[u8; 3]> {
+#[derive(Clone, Copy)]
+pub enum Op {
+    Eq,
+    Ne,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+}
+
+/// Light of a tile type: lit when every guard holds, colour by style
+/// (`frame_y / div`, or style -1 when `div` is 0; -1 also stands for any other style).
+pub struct Rule {
+    pub tile: u16,
+    pub guards: &'static [(Field, Op, i16)],
+    pub div: i16,
+    pub styles: &'static [(i16, [f32; 3])],
+}
+
+/// Middle of the game's pulsing text colour (190..255), used where light pulses with it.
+const PULSE: f32 = 270.0 - 222.0;
+
+/// Light a tile emits, 1 = full.
+pub fn emission(tile: u16, frame_x: i16, frame_y: i16) -> Option<[f32; 3]> {
+    let fixed = |r: f32, g: f32, b: f32| Some([r, g, b]);
+    match tile {
+        4 if frame_x < 66 => {
+            let style = (frame_y.max(0) / 22) as usize;
+            return match style {
+                7 => fixed(0.75, 0.3, 0.75),
+                14 => fixed(1.0, 1.0, 1.0),
+                23 => {
+                    let (a, b) = ((0.9 + PULSE / 900.0).min(1.0), (0.9 + PULSE / 125.0).min(1.0));
+                    fixed(a * 0.9, b * 0.55, a * 1.2)
+                }
+                _ => TORCH.get(style).copied().flatten(),
+            };
+        }
+        37 => return fixed(0.56, 0.43, 0.15),
+        70 | 71 | 72 | 190 | 348 | 528 | 578 => return fixed(0.0, 0.2 + (0.175 + PULSE / 1000.0) / 2.0, 1.0),
+        349 if frame_x >= 36 => return fixed(0.0, 0.2 + (0.175 + PULSE / 1000.0) / 2.0, 1.0),
+        61 | 703 if frame_x == 144 => {
+            let (a, b) = (1.0 + PULSE / 400.0, 0.8 - PULSE / 400.0);
+            return fixed(0.42 * b, 0.81 * a, 0.52 * b);
+        }
+        26 | 695 if frame_x >= 54 => return fixed(0.5, 0.2, 0.1),
+        31 | 696 if frame_x >= 36 => return fixed(0.5, 0.2, 0.1),
+        26 | 31 | 695 | 696 => return fixed(0.31, 0.1, 0.44),
+        215 if frame_y < 36 => {
+            let base = match frame_x / 54 {
+                1 => [0.7, 1.0, 0.5],
+                2 => [0.75, 0.3, 0.75],
+                3 => [0.45, 0.75, 1.0],
+                4 => [1.15, 1.15, 0.5],
+                5 => [1.0, 1.0, 1.0],
+                6 => [0.75, 1.2825, 1.2],
+                7 => [0.95, 0.65, 1.3],
+                8 => [1.4, 0.85, 0.55],
+                9 => [0.25, 1.3, 0.8],
+                10 => [0.95, 0.4, 1.4],
+                11 => [1.4, 0.7, 0.5],
+                12 => [1.25, 0.6, 1.2],
+                13 => [0.75, 1.45, 0.9],
+                14 => [0.25, 0.65, 1.0],
+                _ => [0.9, 0.3, 0.1],
+            };
+            let flicker = 0.175 + PULSE / 700.0;
+            return Some(base.map(|c| c + flicker));
+        }
+        _ => {}
+    }
+    let i = RULES.binary_search_by_key(&tile, |r| r.tile).ok()?;
+    let r = &RULES[i];
+    let holds = |&(f, op, v): &(Field, Op, i16)| {
+        let a = match f {
+            Field::X => frame_x,
+            Field::Y => frame_y,
+        };
+        match op {
+            Op::Eq => a == v,
+            Op::Ne => a != v,
+            Op::Lt => a < v,
+            Op::Le => a <= v,
+            Op::Gt => a > v,
+            Op::Ge => a >= v,
+        }
+    };
+    if !r.guards.iter().all(holds) {
+        return None;
+    }
+    let style = if r.div == 0 { -1 } else { frame_y.max(0) / r.div };
+    let pick = |s: i16| r.styles.iter().find(|e| e.0 == s).map(|e| e.1);
+    pick(style).or_else(|| pick(-1))
+}
+
+/// Light from liquid in a cell, 1 = full.
+fn liquid_emission(kind: u8) -> Option<[f32; 3]> {
     match kind {
-        k if k == Liquid::Lava as u8 => Some([255, 120, 40]),
-        k if k == Liquid::Honey as u8 => Some([60, 40, 0]),
-        k if k == Liquid::Shimmer as u8 => Some([120, 90, 160]),
+        k if k == Liquid::Lava as u8 => {
+            let n = 0.55 + PULSE / 900.0;
+            Some([n, n * 0.6, n * 0.2])
+        }
+        k if k == Liquid::Shimmer as u8 => {
+            let (a, b) = (0.7 + PULSE / 900.0, 0.7 + PULSE / 125.0);
+            Some([a * 0.6, b * 0.25, a * 0.9])
+        }
         _ => None,
     }
+}
+
+fn store(c: f32) -> u8 {
+    (c * ONE).clamp(0.0, 255.0) as u8
 }
 
 pub struct LightMap {
@@ -133,84 +224,90 @@ impl LightMap {
 /// Light of every tile of `win`, row-major, from the sources inside it.
 fn window(world: &World, win: Rect) -> Vec<[u8; 4]> {
     let (w, h) = (win.width() as usize, (win.y1 - win.y0) as usize);
-    let important = &world.header.frame_important;
-    let solid = |t: u16| t != NO_TILE && !important.get(t as usize).copied().unwrap_or(false);
-
-    // Sky reaches down each column until the first block or wall.
-    let sky: Vec<u32> = (win.x0..win.x1)
-        .into_par_iter()
-        .map(|x| {
-            (0..win.y1)
-                .find(|&y| {
-                    let c = world.chunk(x / CHUNK, y / CHUNK);
-                    let i = Chunk::index(x % CHUNK, y % CHUNK);
-                    solid(c.tile[i]) || c.wall[i] != 0
-                })
-                .unwrap_or(win.y1)
-        })
-        .collect();
+    // Worlds without saved flags (generated ones) get a surface line and no underworld.
+    let surface = world.header.env.as_ref().map_or(world.height as f64 * 0.3, |e| e.world_surface) as u32;
+    let underworld = if world.header.env.is_some() { world.height.saturating_sub(UNDERWORLD) } else { u32::MAX };
 
     let mut light = vec![[0u8; 4]; w * h];
-    let mut pass = vec![0u16; w * h];
-    light.par_chunks_mut(w).zip(pass.par_chunks_mut(w)).enumerate().for_each(|(row, (lrow, prow))| {
+    let mut kind = vec![AIR; w * h];
+    light.par_chunks_mut(w).zip(kind.par_chunks_mut(w)).enumerate().for_each(|(row, (lrow, krow))| {
         let y = win.y0 + row as u32;
         let (cy, ly) = (y / CHUNK, y % CHUNK);
-        for (col, (l, p)) in lrow.iter_mut().zip(prow.iter_mut()).enumerate() {
+        for (col, (l, k)) in lrow.iter_mut().zip(krow.iter_mut()).enumerate() {
             let x = win.x0 + col as u32;
             let c = world.chunk(x / CHUNK, cy);
             let i = Chunk::index(x % CHUNK, ly);
-            let t = c.tile[i];
-            let wet = c.liquid[i] != 0;
-            *p = if solid(t) {
-                SOLID
-            } else if wet {
-                LIQUID
+            let (t, f, liquid, lk) = (c.tile[i], c.flags[i], c.liquid[i], c.liquid_kind[i]);
+            let active = t != NO_TILE && f & flags::INACTIVE == 0;
+            let sloped = (f & flags::SHAPE_MASK) >> flags::SHAPE_SHIFT >= 2;
+            *k = if active && BLOCK_LIGHT.has(t) && !sloped && t != 131 {
+                if CRACKED_BRICKS.has(t) {
+                    CRACKED
+                } else {
+                    SOLID
+                }
+            } else if liquid > 128 && lk != Liquid::Lava as u8 {
+                if lk == Liquid::Honey as u8 {
+                    HONEY
+                } else {
+                    WATER
+                }
             } else {
                 AIR
             };
-            let e = if wet { liquid_emission(c.liquid_kind[i]) } else { None };
-            if let Some([r, g, b]) = e.or_else(|| emission(t, c.frame_y[i])) {
-                *l = [r, g, b, 0];
+
+            let open = WALL_LIGHT.has(c.wall[i]) && (!active || !NO_SUN_LIGHT.has(t) || sloped);
+            if y <= surface && open && liquid < 200 {
+                l[3] = store(1.0);
             }
-            if y < sky[col] {
-                l[3] = 255;
+            let mut rgb = [0.0f32; 3];
+            if y > underworld && open && liquid < 200 {
+                rgb = [0.55, 0.33, 0.11];
+            }
+            let tile_light = if active { emission(t, c.frame_x[i], c.frame_y[i]) } else { None };
+            let liquid_light = if liquid > 0 { liquid_emission(lk) } else { None };
+            for e in [tile_light, liquid_light].into_iter().flatten() {
+                rgb = [0, 1, 2].map(|n| rgb[n].max(e[n]));
+            }
+            for n in 0..3 {
+                l[n] = store(rgb[n]);
             }
         }
     });
 
     for _ in 0..ROUNDS {
-        light.par_chunks_mut(w).zip(pass.par_chunks(w)).for_each(|(l, p)| {
-            sweep(l.iter_mut().zip(p));
-            sweep(l.iter_mut().zip(p).rev());
+        vertical(&mut light, &kind, w);
+        light.par_chunks_mut(w).zip(kind.par_chunks(w)).for_each(|(l, k)| {
+            sweep(l.iter_mut().zip(k));
+            sweep(l.iter_mut().zip(k).rev());
         });
-        vertical(&mut light, &pass, w);
     }
     light
 }
 
-fn sweep<'a>(cells: impl Iterator<Item = (&'a mut [u8; 4], &'a u16)>) {
+fn sweep<'a>(cells: impl Iterator<Item = (&'a mut [u8; 4], &'a u8)>) {
     let mut carry = [0; 4];
-    for (l, &p) in cells {
-        carry = step(l, carry, p);
+    for (l, &k) in cells {
+        carry = step(l, carry, k);
     }
 }
 
 /// Down then up, in parallel over bands of columns.
-fn vertical(light: &mut [[u8; 4]], pass: &[u16], w: usize) {
+fn vertical(light: &mut [[u8; 4]], kind: &[u8], w: usize) {
     const BAND: usize = 64;
     let mut bands: Vec<Vec<_>> = (0..w.div_ceil(BAND)).map(|_| Vec::new()).collect();
-    for (l, p) in light.chunks_mut(w).zip(pass.chunks(w)) {
-        for (b, lp) in bands.iter_mut().zip(l.chunks_mut(BAND).zip(p.chunks(BAND))) {
-            b.push(lp);
+    for (l, k) in light.chunks_mut(w).zip(kind.chunks(w)) {
+        for (b, lk) in bands.iter_mut().zip(l.chunks_mut(BAND).zip(k.chunks(BAND))) {
+            b.push(lk);
         }
     }
     bands.into_par_iter().for_each(|mut rows| {
         let mut acc = [[0u8; 4]; BAND];
         for _ in 0..2 {
             acc.fill([0; 4]);
-            for (l, p) in rows.iter_mut() {
-                for ((c, a), &p) in l.iter_mut().zip(&mut acc).zip(p.iter()) {
-                    *a = step(c, *a, p);
+            for (l, k) in rows.iter_mut() {
+                for ((c, a), &k) in l.iter_mut().zip(&mut acc).zip(k.iter()) {
+                    *a = step(c, *a, k);
                 }
             }
             rows.reverse();
@@ -220,11 +317,13 @@ fn vertical(light: &mut [[u8; 4]], pass: &[u16], w: usize) {
 
 /// Takes the light arriving in `cell`, returns what leaves it.
 #[inline]
-fn step(cell: &mut [u8; 4], arriving: [u8; 4], pass: u16) -> [u8; 4] {
+fn step(cell: &mut [u8; 4], arriving: [u8; 4], kind: u8) -> [u8; 4] {
+    let decay = &DECAY[kind as usize];
     let mut out = [0; 4];
     for c in 0..4 {
         cell[c] = cell[c].max(arriving[c]);
-        out[c] = ((cell[c] as u16 * pass) >> 8) as u8;
+        let v = (cell[c] as u16 * decay[c]) >> 8;
+        out[c] = if v < CUTOFF { 0 } else { v as u8 };
     }
     out
 }
@@ -255,14 +354,26 @@ mod tests {
     #[test]
     fn sky_torch_and_falloff() {
         let l = LightMap::compute(&cave_world(true));
-        assert_eq!(l.get(5, 9), [0, 0, 0, 255]);
-        assert!(l.get(5, 10)[3] > 220, "block facing the sky is lit");
+        assert_eq!(l.get(5, 9), [0, 0, 0, 128]);
+        assert!(l.get(5, 10)[3] > 110, "block facing the sky is lit");
         assert!(l.get(5, 14)[3] < 30, "{:?}", l.get(5, 14));
         assert_eq!(l.get(5, 40), [0; 4]);
-        assert_eq!(&l.get(21, 33)[..3], &[255, 200, 140]);
+        // The game's torch colour (1, 0.95, 0.8).
+        assert_eq!(&l.get(21, 33)[..3], &[128, 121, 102]);
         let (near, far) = (l.get(25, 33)[0], l.get(38, 30)[0]);
         assert!(near > far && far > 0, "{near} {far}");
         assert!(l.get(30, 40)[0] < far);
+    }
+
+    #[test]
+    fn emission_follows_the_game() {
+        // Torch style by frame_y, unlit past frame_x 66.
+        assert_eq!(emission(4, 0, 22 * 5), Some([1.4, 1.4, 1.4]));
+        assert_eq!(emission(4, 66, 0), None);
+        // Generated rules: candle lit only on its first frame column.
+        assert!(emission(33, 0, 0).is_some());
+        assert_eq!(emission(33, 18, 0), None);
+        assert_eq!(emission(1, 0, 0), None);
     }
 
     #[test]
