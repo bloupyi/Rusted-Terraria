@@ -53,7 +53,20 @@ impl LiquidSim {
     }
 
     pub fn tick(&mut self, world: &mut World) {
-        let mut list = std::mem::take(&mut self.list);
+        self.tick_near(world, &[(0, 0, world.chunks_x, world.chunks_y)]);
+    }
+
+    /// One step of the active chunks inside these chunk rectangles (`x0, y0, x1, y1`,
+    /// ends excluded); the others wait, still active, until a rectangle covers them.
+    pub fn tick_near(&mut self, world: &mut World, near: &[(u32, u32, u32, u32)]) {
+        let cxs = world.chunks_x;
+        let inside = |ci: u32| {
+            let (cx, cy) = (ci % cxs, ci / cxs);
+            near.iter().any(|&(x0, y0, x1, y1)| cx >= x0 && cx < x1 && cy >= y0 && cy < y1)
+        };
+        let (mut list, waiting): (Vec<u32>, Vec<u32>) =
+            std::mem::take(&mut self.list).into_iter().partition(|&ci| inside(ci));
+        self.list = waiting;
         // Bottom chunks first so liquid falls through chunk borders in one pass.
         list.sort_unstable_by_key(|&ci| std::cmp::Reverse(ci / world.chunks_x));
         for &ci in &list {
@@ -215,6 +228,28 @@ mod tests {
         // Only the dried-up film may be lost.
         assert!(start - total(&world) < 40, "{} -> {}", start, total(&world));
         assert_eq!(liquid_at(&world, 5, 2).0, 0);
+    }
+
+    #[test]
+    fn far_liquid_waits() {
+        // Two drops in chunks 0 and 1 of a 64x64 world; only chunk 0 is near.
+        let mut world = World::parse(&formats::synth::write_world("n", 64, 64, &[], |x, y| Tile {
+            tile: if y == 20 { 1 } else { crate::NO_TILE },
+            liquid: if (x == 5 || x == 40) && y == 2 { 255 } else { 0 },
+            ..Tile::default()
+        }))
+        .unwrap();
+        let mut sim = LiquidSim::new(&world);
+        for _ in 0..200 {
+            sim.tick_near(&mut world, &[(0, 0, 1, 2)]);
+        }
+        assert_eq!(liquid_at(&world, 5, 2).0, 0, "the near drop fell");
+        assert_eq!(liquid_at(&world, 40, 2).0, 255, "the far one waits");
+        assert!(sim.active() > 0);
+        for _ in 0..200 {
+            sim.tick(&mut world);
+        }
+        assert_eq!(liquid_at(&world, 40, 2).0, 0);
     }
 
     #[test]

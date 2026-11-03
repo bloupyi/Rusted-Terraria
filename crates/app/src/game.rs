@@ -15,6 +15,8 @@ use world::player::{self, Input, Player};
 use world::{Liquid, World, CHUNK, NO_TILE};
 
 pub const LIQUID_TICK: f32 = 1.0 / 30.0;
+/// Liquids flow within this many chunks of a player, across and down.
+const LIQUID_RANGE: (u32, u32) = (8, 6);
 /// Seconds for a full day: 15 minutes of day, 9 of night.
 pub const DAY_LENGTH: f32 = 24.0 * 60.0;
 const DAYTIME: f32 = 15.0 / 24.0;
@@ -22,6 +24,9 @@ const DAYTIME: f32 = 15.0 / 24.0;
 const REACH: f32 = 10.0;
 const STALE_LIGHT: u8 = 1;
 const STALE_LOD: u8 = 2;
+/// Light out of date from flowing liquid only, refreshed at most every `LIQUID_LIGHT_EVERY`.
+const STALE_LIQUID_LIGHT: u8 = 4;
+const LIQUID_LIGHT_EVERY: std::time::Duration = std::time::Duration::from_millis(100);
 const LIGHT_BUDGET: usize = 64;
 const LOD_BUDGET: usize = 256;
 /// Off-screen chunks remeshed per frame; on-screen ones always are.
@@ -152,6 +157,9 @@ pub struct Game {
     lod_queue: Vec<u32>,
     /// Per chunk, `DIRTY_*` bits not yet remeshed.
     mesh_pending: Vec<u8>,
+    /// Per chunk, the tree cells with a top or a branch; filled for visible chunks in `sync`.
+    tree_cells: Vec<Option<Vec<(u32, u32)>>>,
+    liquid_light_at: std::time::Instant,
     mesh_queue: std::collections::VecDeque<u32>,
     liquid_acc: f32,
 }
@@ -198,6 +206,8 @@ impl Game {
             surface,
             stale,
             lod_queue: Vec::new(),
+            tree_cells: vec![None; mesh_pending.len()],
+            liquid_light_at: std::time::Instant::now(),
             mesh_pending,
             mesh_queue: Default::default(),
             liquid_acc: 0.0,
@@ -219,7 +229,23 @@ impl Game {
         self.liquid_acc = (self.liquid_acc + dt).min(LIQUID_TICK);
         if self.liquid_acc >= LIQUID_TICK {
             self.liquid_acc -= LIQUID_TICK;
-            self.sim.tick(&mut self.world);
+            // Only around players: far liquid waits until someone comes near.
+            let w = &self.world;
+            let near: Vec<_> = std::iter::once(&self.player)
+                .chain(self.others.iter().map(|(_, p)| p))
+                .map(|p| {
+                    let (x, y) = p.center();
+                    let (cx, cy) = ((x / 16.0) as u32 / CHUNK, (y / 16.0).max(0.0) as u32 / CHUNK);
+                    let (rx, ry) = LIQUID_RANGE;
+                    (
+                        cx.saturating_sub(rx),
+                        cy.saturating_sub(ry),
+                        (cx + rx + 1).min(w.chunks_x),
+                        (cy + ry + 1).min(w.chunks_y),
+                    )
+                })
+                .collect();
+            self.sim.tick_near(&mut self.world, &near);
         }
     }
 
@@ -984,26 +1010,25 @@ impl Game {
     /// Leafy tops and branches, drawn from the tree's top and branch cells.
     fn tree_tops(&self, view: Rect, out: &mut Vec<Sprite>) {
         let (Some(tops), Some(branches)) = (self.sheet("Tree_Tops_0"), self.sheet("Tree_Branches_0")) else { return };
-        // Tops reach 5 tiles over their cell, branches 2 to the side.
-        for y in view.y0..(view.y1 + 5).min(self.world.height) {
-            for x in view.x0.saturating_sub(2)..(view.x1 + 2).min(self.world.width) {
-                if self.world.tile(x as i64, y as i64) != TREE {
-                    continue;
-                }
-                let (fx, fy) = self.world.frame(x as i64, y as i64);
-                if fy < 198 {
-                    continue;
-                }
-                let style = ((fy - 198) / 22).clamp(0, 2) as u32;
-                let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
-                let s = match fx {
-                    22 => Sprite::sheet([px - 32.0, py + 16.0 - 80.0], tops, [style * 82, 0, 80, 80], SPRITE_LIT),
-                    44 => Sprite::sheet([px - 24.0, py - 12.0], branches, [0, style * 42, 40, 40], SPRITE_LIT),
-                    66 => Sprite::sheet([px, py - 12.0], branches, [42, style * 42, 40, 40], SPRITE_LIT),
-                    _ => continue,
-                };
-                out.push(s);
-            }
+        // Tops reach 5 tiles over their cell, branches 2 to the side: one chunk around covers them.
+        let (cx0, cy0) = ((view.x0 / CHUNK).saturating_sub(1), (view.y0 / CHUNK).saturating_sub(1));
+        let cx1 = (view.x1.div_ceil(CHUNK) + 1).min(self.world.chunks_x);
+        let cy1 = (view.y1.div_ceil(CHUNK) + 1).min(self.world.chunks_y);
+        let cells = (cy0..cy1)
+            .flat_map(|cy| (cx0..cx1).map(move |cx| (cy * self.world.chunks_x + cx) as usize))
+            .filter_map(|ci| self.tree_cells[ci].as_ref())
+            .flatten();
+        for &(x, y) in cells {
+            let (fx, fy) = self.world.frame(x as i64, y as i64);
+            let style = ((fy - 198) / 22).clamp(0, 2) as u32;
+            let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
+            let s = match fx {
+                22 => Sprite::sheet([px - 32.0, py + 16.0 - 80.0], tops, [style * 82, 0, 80, 80], SPRITE_LIT),
+                44 => Sprite::sheet([px - 24.0, py - 12.0], branches, [0, style * 42, 40, 40], SPRITE_LIT),
+                66 => Sprite::sheet([px, py - 12.0], branches, [42, style * 42, 40, 40], SPRITE_LIT),
+                _ => continue,
+            };
+            out.push(s);
         }
     }
 
@@ -1087,10 +1112,11 @@ impl Game {
         let cxs = self.world.chunks_x;
         for (cx, cy, bits) in self.world.take_dirty() {
             let ci = (cy * cxs + cx) as usize;
+            self.tree_cells[ci] = None;
             if self.stale[ci] & STALE_LOD == 0 {
                 self.lod_queue.push(ci as u32);
             }
-            self.stale[ci] |= STALE_LIGHT | STALE_LOD;
+            self.stale[ci] |= STALE_LOD | if bits & world::DIRTY_TILES != 0 { STALE_LIGHT } else { STALE_LIQUID_LIGHT };
             if self.mesh_pending[ci] == 0 {
                 self.mesh_queue.push_back(ci as u32);
             }
@@ -1101,6 +1127,15 @@ impl Game {
         let (cx0, cy0) = ((view.x0 / CHUNK).saturating_sub(1), (view.y0 / CHUNK).saturating_sub(1));
         let cx1 = (view.x1.div_ceil(CHUNK) + 1).min(self.world.chunks_x);
         let cy1 = (view.y1.div_ceil(CHUNK) + 1).min(self.world.chunks_y);
+
+        for cy in cy0..cy1 {
+            for cx in cx0..cx1 {
+                let ci = (cy * cxs + cx) as usize;
+                if self.tree_cells[ci].is_none() {
+                    self.tree_cells[ci] = Some(tree_cells(&self.world, cx, cy));
+                }
+            }
+        }
 
         // Meshes: everything pending on screen, then a budget of the oldest off screen.
         let mut remesh = Vec::new();
@@ -1127,10 +1162,15 @@ impl Game {
             renderer.update_rows(self.scene.mesher.update(&self.world, &remesh));
         }
 
+        let mut light_bits = STALE_LIGHT;
+        if self.liquid_light_at.elapsed() >= LIQUID_LIGHT_EVERY {
+            self.liquid_light_at = std::time::Instant::now();
+            light_bits |= STALE_LIQUID_LIGHT;
+        }
         let mut relight = Vec::new();
         'scan: for cy in cy0..cy1 {
             for cx in cx0..cx1 {
-                if self.stale[(cy * self.world.chunks_x + cx) as usize] & STALE_LIGHT != 0 {
+                if self.stale[(cy * self.world.chunks_x + cx) as usize] & light_bits != 0 {
                     relight.push((cx, cy));
                     if relight.len() == LIGHT_BUDGET {
                         break 'scan;
@@ -1140,16 +1180,24 @@ impl Game {
         }
         if !relight.is_empty() {
             let rects: Vec<Rect> = relight.iter().map(|&(cx, cy)| Rect::of_chunk(cx, cy, &self.world)).collect();
-            let bbox = rects.iter().fold(rects[0], |a, r| Rect {
-                x0: a.x0.min(r.x0),
-                y0: a.y0.min(r.y0),
-                x1: a.x1.max(r.x1),
-                y1: a.y1.max(r.y1),
-            });
-            self.scene.light.update(&self.world, bbox);
+            // Neighbouring chunks share one window; scattered ones get their own
+            // instead of one box spanning everything between them.
+            let area = |r: &Rect| r.width() as u64 * (r.y1 - r.y0) as u64;
+            let mut boxes: Vec<(Rect, u64)> = Vec::new();
+            for r in &rects {
+                let merged =
+                    |b: &Rect| Rect { x0: b.x0.min(r.x0), y0: b.y0.min(r.y0), x1: b.x1.max(r.x1), y1: b.y1.max(r.y1) };
+                match boxes.iter_mut().find(|(b, sum)| area(&merged(b)) <= (sum + area(r)) * 2) {
+                    Some((b, sum)) => (*b, *sum) = (merged(b), *sum + area(r)),
+                    None => boxes.push((*r, area(r))),
+                }
+            }
+            for (b, _) in boxes {
+                self.scene.light.update(&self.world, b);
+            }
             for (r, (cx, cy)) in rects.into_iter().zip(relight) {
                 renderer.update_light(&self.scene.light, r);
-                self.stale[(cy * self.world.chunks_x + cx) as usize] &= !STALE_LIGHT;
+                self.stale[(cy * self.world.chunks_x + cx) as usize] &= !(STALE_LIGHT | STALE_LIQUID_LIGHT);
             }
         }
 
@@ -1162,6 +1210,15 @@ impl Game {
             self.stale[ci as usize] &= !STALE_LOD;
         }
     }
+}
+
+/// Tree cells of a chunk that carry a top or a branch.
+fn tree_cells(world: &World, cx: u32, cy: u32) -> Vec<(u32, u32)> {
+    let r = Rect::of_chunk(cx, cy, world);
+    (r.y0..r.y1)
+        .flat_map(|y| (r.x0..r.x1).map(move |x| (x, y)))
+        .filter(|&(x, y)| world.tile(x as i64, y as i64) == TREE && world.frame(x as i64, y as i64).1 >= 198)
+        .collect()
 }
 
 /// Per column, the first block from the top as the world was loaded, a couple of rows down.

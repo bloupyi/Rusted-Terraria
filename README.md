@@ -28,7 +28,9 @@ Dossier Terraria, dans l'ordre :
 
 Sans installation trouvee, les tuiles sont affichees avec des couleurs de
 remplacement. `--vsync` active la synchro verticale (desactivee par defaut pour
-mesurer les FPS).
+mesurer les FPS). `--profile` affiche chaque seconde le temps CPU par phase (mise a
+jour, synchro des chunks, sprites, envoi du rendu) et `--zoom <z>` fixe le zoom de
+depart (1/64 a 8), pour mesurer.
 
 Controles :
 
@@ -184,6 +186,15 @@ Terraria 1.4.5 et un vrai monde (6400x1800, version 326) :
 - WLD : version 326 lue avec la meme disposition ; bit shimmer confirme.
 - Chargement : lecture 0.25 s, scene 0.4 s, envoi GPU 0.5 a 1.2 s.
 - 40 a 47 FPS en 800x600 avec le rendu logiciel lavapipe (pas de vrai GPU teste).
+- Profilage (`--profile`, 1600x900) : sur un monde de 8400x2400 avec beaucoup d'eau,
+  la mise a jour passait de 6 a 18 ms a 0,15 ms (les liquides ne coulent plus qu'a
+  8x6 chunks autour des joueurs ; le reste attend qu'on approche) et les sprites en
+  zoom arriere maximal de 12 ms a 0,06 ms (cimes d'arbres en cache par chunk). La
+  lumiere des liquides qui coulent est recalculee au plus 10 fois par seconde, et
+  les fenetres de lumiere ne couvrent plus tout l'espace entre deux editions
+  eloignees. Sur le vrai monde, le CPU prend environ 0,3 ms par image a tous les
+  zooms ; le reste est le rendu GPU, mesure ici seulement avec lavapipe (20 a 26
+  FPS) : les 144 FPS en zoom arriere restent a verifier sur une vraie carte.
 
 ## Limites connues
 

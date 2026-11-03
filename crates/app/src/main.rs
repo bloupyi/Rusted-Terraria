@@ -81,6 +81,8 @@ struct App {
     last: Instant,
     frames: u32,
     frame_time: Duration,
+    /// `--profile`: time per phase (update, sync, sprites, render), printed with the title.
+    profile: Option<[Duration; 4]>,
     title_at: Instant,
 }
 
@@ -328,15 +330,24 @@ impl ApplicationHandler for App {
                 let dt = now - self.last;
                 self.last = now;
                 let size = renderer.size();
+                let t0 = Instant::now();
                 self.update(dt.as_secs_f32().min(0.1), size);
                 let view = self.view(size);
                 let cursor = self.cursor_tile(size);
                 let hud = self.hotbar(size);
                 let Some(renderer) = &mut self.renderer else { return };
+                let t1 = Instant::now();
                 self.game.sync(renderer, view);
+                let t2 = Instant::now();
                 let (under, mut over) = self.game.sprites(view, Some(cursor), self.free);
                 over.extend(hud);
+                let t3 = Instant::now();
                 let stats = renderer.render(&self.camera, &under, &over);
+                if let Some(p) = &mut self.profile {
+                    for (acc, d) in p.iter_mut().zip([t1 - t0, t2 - t1, t3 - t2, t3.elapsed()]) {
+                        *acc += d;
+                    }
+                }
                 self.frames += 1;
                 self.frame_time += dt;
                 if now - self.title_at >= TITLE_EVERY {
@@ -366,6 +377,14 @@ impl ApplicationHandler for App {
                             self.game.others.len() + 1,
                         ));
                     }
+                    if let Some(p) = &mut self.profile {
+                        let ms = p.map(|d| d.as_secs_f64() * 1000.0 / self.frames as f64);
+                        println!(
+                            "{fps:.0} FPS, zoom {:.3}: update {:.2} ms, sync {:.2} ms, sprites {:.2} ms, render {:.2} ms, {} draws, {mode}",
+                            self.camera.zoom, ms[0], ms[1], ms[2], ms[3], stats.draws
+                        );
+                        *p = [Duration::ZERO; 4];
+                    }
                     (self.frames, self.frame_time, self.title_at) = (0, Duration::ZERO, now);
                 }
             }
@@ -383,6 +402,8 @@ impl ApplicationHandler for App {
 fn main() {
     let mut path = None;
     let mut vsync = false;
+    let mut profile = false;
+    let mut zoom = 1.0;
     let mut free = false;
     let mut host = None;
     let mut join = None;
@@ -390,6 +411,8 @@ fn main() {
     while let Some(a) = args.next() {
         match a.as_str() {
             "--vsync" => vsync = true,
+            "--profile" => profile = true,
+            "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()).unwrap_or(1.0f32).clamp(1.0 / 64.0, 8.0),
             "--free" => free = true,
             "--host" => host = Some(net::DEFAULT_PORT),
             "--port" => host = args.next().and_then(|p| p.parse().ok()),
@@ -398,7 +421,9 @@ fn main() {
         }
     }
     let usage = || -> ! {
-        eprintln!("usage: rusted-terraria [--vsync] [--free] [--host | --port <port>] <world.wld>");
+        eprintln!(
+            "usage: rusted-terraria [--vsync] [--profile] [--zoom <z>] [--free] [--host | --port <port>] <world.wld>"
+        );
         eprintln!("       rusted-terraria [--vsync] [--free] --join <host[:port]>");
         std::process::exit(2);
     };
@@ -466,7 +491,7 @@ fn main() {
         renderer: None,
         camera: Camera {
             center: Vec2::new(cx, cy),
-            zoom: 1.0,
+            zoom,
             lighting: true,
             sky: [1.0; 3],
             background: [0.0; 3],
@@ -483,6 +508,7 @@ fn main() {
         last: Instant::now(),
         frames: 0,
         frame_time: Duration::ZERO,
+        profile: profile.then_some([Duration::ZERO; 4]),
         title_at: Instant::now(),
     };
     let event_loop = EventLoop::new().expect("event loop");
