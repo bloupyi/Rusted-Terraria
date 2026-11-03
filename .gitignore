@@ -31,3 +31,4 @@ rusted-terraria.cfg
 *.exe
 *.dll
 *.pdb
+__pycache__/
