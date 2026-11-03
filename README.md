@@ -99,14 +99,19 @@ Choix de rendu :
 
 Eclairage :
 
-- Une valeur RGBA par tuile (`world::light`) : RGB pour les tuiles lumineuses (24
-  styles de torches, lampes, champignons, pierre infernale...) et les liquides
-  (lave, miel, shimmer), alpha pour le ciel ouvert (chaque colonne jusqu'au premier
-  bloc ou mur). Le shader multiplie l'alpha par la couleur du ciel selon l'heure :
-  le cycle jour/nuit (15 min de jour, 9 de nuit, a l'heure sauvegardee) ne recalcule rien.
-- Propagation par balayages droite, gauche, bas, haut, repetes deux fois ; la
-  lumiere qui sort d'une case est attenuee selon la case (air, liquide, bloc).
-  Lignes et bandes de colonnes en parallele, environ 300 ms sur 8400x2400 et 4 coeurs.
+- Une valeur RGBA par tuile (`world::light`), selon la carte de lumiere du jeu :
+  RGB pour les tuiles lumineuses (couleurs generees depuis la decompilation locale
+  par `tools/gen_tile_light.py`, torches par style), la lave, le shimmer et la lueur
+  des enfers ; alpha pour le soleil, sur chaque case au-dessus de la ligne de surface
+  dont le mur laisse passer la lumiere. Le shader multiplie l'alpha par la couleur
+  du ciel selon l'heure : le cycle jour/nuit (15 min de jour, 9 de nuit, a l'heure
+  sauvegardee) ne recalcule rien. 1 est stocke a 128 pour garder les sources plus
+  fortes que 1.
+- Propagation comme le jeu : colonnes vers le bas et le haut puis lignes vers la
+  droite et la gauche, deux fois ; la lumiere qui sort d'une case est attenuee
+  selon la case (air 0,91, bloc 0,56, eau et miel par canal) et s'arrete sous le
+  seuil du jeu. Lignes et bandes de colonnes en parallele, environ 300 ms sur
+  8400x2400 et 4 coeurs.
 - Envoyee au GPU dans des pages 2048x2048 comme la carte ; le shader interpole
   entre les centres des tuiles.
 - Apres une edition, seule une fenetre autour des chunks modifies est recalculee
