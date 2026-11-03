@@ -1,0 +1,15 @@
+[package]
+name = "render"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+[dependencies]
+world.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+rayon.workspace = true
+wgpu.workspace = true
+formats.workspace = true
+pollster.workspace = true
