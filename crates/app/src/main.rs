@@ -98,6 +98,9 @@ impl App {
                 a.play(sfx, 0.6);
             }
         }
+        if let Some(a) = &mut self.audio {
+            a.music(self.game.music());
+        }
         (self.camera.sky, self.camera.background) = self.game.sky();
         self.camera.time += dt;
     }
@@ -389,7 +392,7 @@ fn main() {
         scene.mesher.atlas.missing
     );
 
-    let audio = images.as_deref().and_then(|d| d.parent()).and_then(|c| audio::Audio::new(c.join("Sounds")));
+    let audio = images.as_deref().and_then(|d| d.parent()).and_then(|c| audio::Audio::new(c.to_path_buf()));
     println!("audio: {}", if audio.is_some() { "on" } else { "off (no output device or no install)" });
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;

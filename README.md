@@ -117,8 +117,11 @@ Son (`app/src/audio.rs`) : effets `Content/Sounds/*.xnb` (SoundEffect PCM 16 bit
 les 527 fichiers de 1.4.5 sont lus) charges a la demande, reechantillonnes a la
 frequence de sortie et mixes dans le callback cpal. Creuser, poser, seaux,
 ramassage, coups, monstres touches ou tues, gemissements de zombies. Sans sortie
-audio ou sans installation, le jeu reste muet. La musique (`Wave Bank.xwb`, XACT)
-n'est pas lue.
+audio ou sans installation, le jeu reste muet. Musique (`formats::xact`) : la banque de sons `Sound Bank.xsb` donne la piste de
+chaque cue `Music_N`, la banque d'ondes `Wave Bank.xwb` est lue entree par entree
+(MS-ADPCM stereo, decode dans un thread a la premiere demande, boucle et fondu
+enchaine de 2 s). Jour `Music_1`, nuit `Music_3`, souterrain `Music_4` (plus de 30
+tuiles sous la surface).
 
 Multijoueur (`app/src/net.rs`, protocole maison sur TCP, port 7777 par defaut) :
 `rusted-terraria --host monde.wld` (ou `--port <port>`) heberge, et

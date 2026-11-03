@@ -35,6 +35,8 @@ const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 2
 /// Objects that hang from the tile above them.
 const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
+/// Tiles under the ground line where the underground music starts.
+const UNDERGROUND_DEPTH: u32 = 30;
 /// Stone, ores and obsidian ring instead of thudding when broken.
 const HARD: [u16; 7] = [1, 6, 7, 8, 9, 25, 56];
 pub const MAX_HP: i32 = 100;
@@ -395,6 +397,20 @@ impl Game {
             }
             true
         });
+    }
+
+    /// Music cue for where the player is: underground (4), night (3) or day (1).
+    /// Cue names are the sound bank's; which is which follows the public soundtrack list.
+    pub fn music(&self) -> &'static str {
+        let (x, y) = self.player.center();
+        let column = ((x / 16.0) as usize).min(self.surface.len() - 1);
+        if (y / 16.0) as u32 > self.surface[column] + UNDERGROUND_DEPTH {
+            "Music_4"
+        } else if self.time >= DAYTIME {
+            "Music_3"
+        } else {
+            "Music_1"
+        }
     }
 
     /// Hours on a 24 h clock, dawn at 4:30.
@@ -977,6 +993,16 @@ mod tests {
         // Digging the floor under the other bench breaks it too.
         g.dig(12, 20, false);
         assert_eq!((g.world.tile(12, 19), g.world.tile(13, 19)), (NO_TILE, NO_TILE));
+    }
+
+    #[test]
+    fn music_follows_depth_and_time() {
+        let mut g = game();
+        assert_eq!(g.music(), "Music_1");
+        g.time = 0.9;
+        assert_eq!(g.music(), "Music_3");
+        g.player.y += 60.0 * 16.0;
+        assert_eq!(g.music(), "Music_4");
     }
 
     #[test]

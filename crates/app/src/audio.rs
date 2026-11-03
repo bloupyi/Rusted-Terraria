@@ -1,8 +1,11 @@
-//! Sound effects: `Content/Sounds/*.xnb` decoded once, resampled to the output
-//! rate and mixed in the device callback. Silent when there is no device or no
-//! game install.
+//! Sound effects and music. Effects (`Content/Sounds/*.xnb`) are decoded once,
+//! resampled to the output rate and mixed in the device callback. Music tracks
+//! come from the XACT banks, decoded on a thread when first asked for, and
+//! cross-fade when the cue changes. Silent when there is no device or no game
+//! install.
 
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
@@ -50,37 +53,113 @@ struct Voice {
     volume: f32,
 }
 
+/// A looping music track at its own rate, read with linear interpolation.
+struct Track {
+    samples: Arc<Vec<i16>>,
+    channels: usize,
+    /// Source frames per output frame.
+    step: f64,
+    pos: f64,
+    gain: f32,
+    target: f32,
+}
+
+#[derive(Default)]
+struct Mixer {
+    voices: Vec<Voice>,
+    music: Vec<Track>,
+}
+
+/// Seconds for a full cross-fade between tracks.
+const FADE: f32 = 2.0;
+pub const MUSIC_VOLUME: f32 = 0.5;
+
+/// The music banks: cue names and the wave bank entries.
+struct Banks {
+    path: PathBuf,
+    cues: HashMap<String, u16>,
+    waves: Vec<formats::xact::Wave>,
+}
+
+impl Banks {
+    fn open(content: &std::path::Path) -> Option<Self> {
+        let cues = formats::xact::sound_bank(&std::fs::read(content.join("Sound Bank.xsb")).ok()?).ok()?;
+        let path = content.join("Wave Bank.xwb");
+        let mut head = vec![0; 64 * 1024];
+        std::fs::File::open(&path).ok()?.read_exact(&mut head).ok()?;
+        let waves = formats::xact::wave_bank(&head).ok()?;
+        Some(Self { path, cues, waves })
+    }
+}
+
 pub struct Audio {
     dir: PathBuf,
     rate: u32,
     clips: HashMap<String, Option<Clip>>,
-    voices: Arc<Mutex<Vec<Voice>>>,
+    mixer: Arc<Mutex<Mixer>>,
+    banks: Option<Arc<Banks>>,
+    cue: String,
     seed: u32,
     _stream: cpal::Stream,
 }
 
 impl Audio {
-    /// `sounds`: `<Terraria>/Content/Sounds`.
-    pub fn new(sounds: PathBuf) -> Option<Self> {
+    /// `content`: `<Terraria>/Content`.
+    pub fn new(content: PathBuf) -> Option<Self> {
         let device = cpal::default_host().default_output_device()?;
         let supported = device.default_output_config().ok()?;
         let config = supported.config();
-        let voices = Arc::new(Mutex::new(Vec::new()));
+        let mixer = Arc::new(Mutex::new(Mixer::default()));
         let stream = match supported.sample_format() {
-            cpal::SampleFormat::F32 => stream::<f32>(&device, &config, voices.clone()),
-            cpal::SampleFormat::I16 => stream::<i16>(&device, &config, voices.clone()),
-            cpal::SampleFormat::U16 => stream::<u16>(&device, &config, voices.clone()),
+            cpal::SampleFormat::F32 => stream::<f32>(&device, &config, mixer.clone()),
+            cpal::SampleFormat::I16 => stream::<i16>(&device, &config, mixer.clone()),
+            cpal::SampleFormat::U16 => stream::<u16>(&device, &config, mixer.clone()),
             _ => None,
         }?;
         stream.play().ok()?;
         Some(Self {
-            dir: sounds,
+            dir: content.join("Sounds"),
             rate: config.sample_rate,
             clips: HashMap::new(),
-            voices,
+            mixer,
+            banks: Banks::open(&content).map(Arc::new),
+            cue: String::new(),
             seed: 0x2545_F491,
             _stream: stream,
         })
+    }
+
+    /// Switches the music to `cue` (`Music_3`...), fading out the current track.
+    pub fn music(&mut self, cue: &str) {
+        if self.cue == cue {
+            return;
+        }
+        self.cue = cue.to_string();
+        let Some(banks) = self.banks.clone() else { return };
+        let Some(&wave) = banks.cues.get(cue).and_then(|&t| banks.waves.get(t as usize)) else { return };
+        let (mixer, rate, cue) = (self.mixer.clone(), self.rate, cue.to_string());
+        std::thread::spawn(move || {
+            let samples = std::fs::File::open(&banks.path)
+                .map_err(formats::Error::from)
+                .and_then(|mut f| formats::xact::read_wave(&mut f, &wave));
+            let samples = match samples {
+                Ok(s) if !s.is_empty() => s,
+                Ok(_) => return,
+                Err(e) => return eprintln!("music {cue}: {e}"),
+            };
+            let mut m = mixer.lock().unwrap();
+            for t in &mut m.music {
+                t.target = 0.0;
+            }
+            m.music.push(Track {
+                samples: Arc::new(samples),
+                channels: wave.channels.max(1) as usize,
+                step: wave.rate as f64 / rate as f64,
+                pos: 0.0,
+                gain: 0.0,
+                target: MUSIC_VOLUME,
+            });
+        });
     }
 
     pub fn play(&mut self, sfx: Sfx, volume: f32) {
@@ -96,7 +175,7 @@ impl Audio {
             Some(Arc::new(resample(&sound, rate)))
         });
         if let Some(clip) = clip.clone() {
-            let mut voices = self.voices.lock().unwrap();
+            let voices = &mut self.mixer.lock().unwrap().voices;
             if voices.len() < 32 {
                 voices.push(Voice { clip, pos: 0, volume });
             }
@@ -107,33 +186,58 @@ impl Audio {
 fn stream<T: SizedSample + FromSample<f32>>(
     device: &cpal::Device,
     config: &cpal::StreamConfig,
-    voices: Arc<Mutex<Vec<Voice>>>,
+    mixer: Arc<Mutex<Mixer>>,
 ) -> Option<cpal::Stream> {
     let channels = config.channels as usize;
+    let fade = MUSIC_VOLUME / (FADE * config.sample_rate as f32);
     device
         .build_output_stream(
             *config,
             move |out: &mut [T], _| {
-                let mut voices = voices.lock().unwrap();
+                let m = &mut *mixer.lock().unwrap();
                 for frame in out.chunks_mut(channels) {
                     let mut mix = [0.0f32; 2];
-                    for v in voices.iter_mut() {
+                    for v in m.voices.iter_mut() {
                         if let Some(s) = v.clip.get(v.pos) {
                             mix[0] += s[0] * v.volume;
                             mix[1] += s[1] * v.volume;
                             v.pos += 1;
                         }
                     }
+                    for t in m.music.iter_mut() {
+                        let s = t.next();
+                        t.gain += (t.target - t.gain).clamp(-fade, fade);
+                        mix[0] += s[0] * t.gain;
+                        mix[1] += s[1] * t.gain;
+                    }
                     for (c, o) in frame.iter_mut().enumerate() {
                         *o = T::from_sample(mix[c.min(1)].clamp(-1.0, 1.0));
                     }
                 }
-                voices.retain(|v| v.pos < v.clip.len());
+                m.voices.retain(|v| v.pos < v.clip.len());
+                m.music.retain(|t| t.target > 0.0 || t.gain > 0.0);
             },
             |e| eprintln!("audio: {e}"),
             None,
         )
         .ok()
+}
+
+impl Track {
+    /// The next output frame, looping at the end.
+    fn next(&mut self) -> [f32; 2] {
+        let frames = self.samples.len() / self.channels;
+        let i = self.pos as usize;
+        let f = self.pos.fract() as f32;
+        let k = (i + 1) % frames;
+        let at = |i: usize, c: usize| self.samples[i * self.channels + c.min(self.channels - 1)] as f32 / 32768.0;
+        let out = [0, 1].map(|c| at(i, c) + (at(k, c) - at(i, c)) * f);
+        self.pos += self.step;
+        if self.pos >= frames as f64 {
+            self.pos -= frames as f64;
+        }
+        out
+    }
 }
 
 /// To stereo f32 at `rate`, by linear interpolation.
@@ -158,6 +262,24 @@ fn resample(sound: &formats::xnb::Sound, rate: u32) -> Vec<[f32; 2]> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn music_loops_and_interpolates() {
+        let mut t = Track {
+            samples: Arc::new(vec![0, 0, 16384, -16384]),
+            channels: 2,
+            step: 0.5,
+            pos: 0.0,
+            gain: 1.0,
+            target: 1.0,
+        };
+        assert_eq!(t.next(), [0.0, 0.0]);
+        assert_eq!(t.next(), [0.25, -0.25]);
+        assert_eq!(t.next(), [0.5, -0.5]);
+        // Between the last frame and the first again.
+        assert_eq!(t.next(), [0.25, -0.25]);
+        assert_eq!(t.pos, 0.0);
+    }
 
     #[test]
     fn resample_doubles_mono_to_stereo() {
