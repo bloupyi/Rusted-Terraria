@@ -1,7 +1,10 @@
+mod game;
+
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use game::{Game, Tool};
 use glam::Vec2;
 use render::{Camera, Renderer, Scene};
 use winit::application::ApplicationHandler;
@@ -9,21 +12,40 @@ use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
+use world::light::Rect;
+use world::player::Input;
+use world::Liquid;
 
 const TITLE_EVERY: Duration = Duration::from_millis(500);
 const PAN_SPEED: f32 = 1200.0;
 const ZOOM_STEP: f32 = 1.15;
+/// Holding T runs the day this much faster.
+const FAST_TIME: f32 = 120.0;
+
+#[derive(Default)]
+struct Keys {
+    left: bool,
+    right: bool,
+    up: bool,
+    down: bool,
+    shift: bool,
+    jump: bool,
+    fast_time: bool,
+}
 
 struct App {
     name: String,
     world_px: Vec2,
     vsync: bool,
-    scene: Option<Scene>,
+    game: Game,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     camera: Camera,
-    keys: [bool; 5],
+    /// Free camera (phase 1 behaviour) instead of following the player.
+    free: bool,
+    keys: Keys,
     cursor: Vec2,
+    buttons: [bool; 2],
     drag: Option<Vec2>,
     last: Instant,
     frames: u32,
@@ -36,11 +58,44 @@ impl App {
         self.camera.center + (p - size * 0.5) / self.camera.zoom
     }
 
-    fn update(&mut self, dt: f32) {
-        let [l, r, u, d, fast] = self.keys;
-        let dir = Vec2::new((r as i32 - l as i32) as f32, (d as i32 - u as i32) as f32);
-        let speed = PAN_SPEED * if fast { 4.0 } else { 1.0 } / self.camera.zoom;
-        self.camera.center = (self.camera.center + dir * speed * dt).clamp(Vec2::ZERO, self.world_px);
+    fn cursor_tile(&self, size: Vec2) -> (i64, i64) {
+        let w = self.screen_to_world(self.cursor, size) / 16.0;
+        (w.x.floor() as i64, w.y.floor() as i64)
+    }
+
+    fn update(&mut self, dt: f32, size: Vec2) {
+        let k = &self.keys;
+        let time_scale = if k.fast_time { FAST_TIME } else { 1.0 };
+        if self.free {
+            let dir = Vec2::new((k.right as i32 - k.left as i32) as f32, (k.down as i32 - k.up as i32) as f32);
+            let speed = PAN_SPEED * if k.shift { 4.0 } else { 1.0 } / self.camera.zoom;
+            self.camera.center = (self.camera.center + dir * speed * dt).clamp(Vec2::ZERO, self.world_px);
+            self.game.update(None, dt, time_scale);
+        } else {
+            let input = Input { left: k.left, right: k.right, jump: k.jump || k.up, down: k.down };
+            self.game.update(Some(input), dt, time_scale);
+            let (cx, cy) = self.game.player.center();
+            self.camera.center = Vec2::new(cx, cy);
+        }
+        if self.drag.is_none() {
+            let (tx, ty) = self.cursor_tile(size);
+            if self.buttons[0] {
+                self.game.dig(tx, ty, self.free);
+            }
+            if self.buttons[1] {
+                self.game.place(tx, ty, self.free);
+            }
+        }
+        (self.camera.sky, self.camera.background) = self.game.sky();
+        self.camera.time += dt;
+    }
+
+    fn view(&self, size: Vec2) -> Rect {
+        let half = size / (2.0 * self.camera.zoom * 16.0);
+        let lo = ((self.camera.center / 16.0) - half).floor().max(Vec2::ZERO);
+        let hi = ((self.camera.center / 16.0) + half).ceil();
+        let (w, h) = (self.game.world.width, self.game.world.height);
+        Rect { x0: (lo.x as u32).min(w), y0: (lo.y as u32).min(h), x1: (hi.x as u32).min(w), y1: (hi.y as u32).min(h) }
     }
 }
 
@@ -59,8 +114,8 @@ impl ApplicationHandler for App {
         let surface = instance.create_surface(window.clone()).expect("surface");
         let size = window.inner_size();
         let t = Instant::now();
-        let scene = self.scene.take().expect("scene");
-        self.renderer = Some(Renderer::new(&instance, surface, (size.width, size.height), self.vsync, scene));
+        self.renderer =
+            Some(Renderer::new(&instance, surface, (size.width, size.height), self.vsync, &mut self.game.scene));
         println!("gpu upload: {:.2?}", t.elapsed());
         self.window = Some(window);
         self.last = Instant::now();
@@ -74,21 +129,37 @@ impl ApplicationHandler for App {
             WindowEvent::Resized(s) => renderer.resize(s.width, s.height),
             WindowEvent::KeyboardInput { event, .. } => {
                 let down = event.state == ElementState::Pressed;
+                let press = down && !event.repeat;
                 let PhysicalKey::Code(code) = event.physical_key else { return };
-                let slot = match code {
-                    KeyCode::KeyA | KeyCode::ArrowLeft => 0,
-                    KeyCode::KeyD | KeyCode::ArrowRight => 1,
-                    KeyCode::KeyW | KeyCode::ArrowUp => 2,
-                    KeyCode::KeyS | KeyCode::ArrowDown => 3,
-                    KeyCode::ShiftLeft | KeyCode::ShiftRight => 4,
-                    KeyCode::Escape => return el.exit(),
-                    KeyCode::KeyL if down && !event.repeat => {
-                        self.camera.lighting = !self.camera.lighting;
-                        return;
+                let k = &mut self.keys;
+                match code {
+                    KeyCode::KeyA | KeyCode::ArrowLeft => k.left = down,
+                    KeyCode::KeyD | KeyCode::ArrowRight => k.right = down,
+                    KeyCode::KeyW | KeyCode::ArrowUp => k.up = down,
+                    KeyCode::KeyS | KeyCode::ArrowDown => k.down = down,
+                    KeyCode::Space => k.jump = down,
+                    KeyCode::ShiftLeft | KeyCode::ShiftRight => k.shift = down,
+                    KeyCode::KeyT => k.fast_time = down,
+                    KeyCode::Escape => el.exit(),
+                    KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
+                    KeyCode::KeyF if press => {
+                        self.free = !self.free;
+                        if !self.free {
+                            // Drop the player where the camera is.
+                            let c = self.camera.center;
+                            (self.game.player.x, self.game.player.y) = (c.x, c.y);
+                            (self.game.player.vx, self.game.player.vy) = (0.0, 0.0);
+                        }
                     }
-                    _ => return,
-                };
-                self.keys[slot] = down;
+                    KeyCode::KeyQ if press => self.game.cycle_block(-1),
+                    KeyCode::KeyE if press => self.game.cycle_block(1),
+                    KeyCode::Digit1 if press => self.game.tool = Tool::Block,
+                    KeyCode::Digit2 if press => self.game.tool = Tool::Liquid(Liquid::Water),
+                    KeyCode::Digit3 if press => self.game.tool = Tool::Liquid(Liquid::Lava),
+                    KeyCode::Digit4 if press => self.game.tool = Tool::Liquid(Liquid::Honey),
+                    KeyCode::Digit5 if press => self.game.tool = Tool::Liquid(Liquid::Shimmer),
+                    _ => {}
+                }
             }
             WindowEvent::CursorMoved { position, .. } => {
                 let p = Vec2::new(position.x as f32, position.y as f32);
@@ -98,8 +169,14 @@ impl ApplicationHandler for App {
                 }
                 self.cursor = p;
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left | MouseButton::Middle, .. } => {
-                self.drag = (state == ElementState::Pressed).then_some(self.cursor);
+            WindowEvent::MouseInput { state, button, .. } => {
+                let down = state == ElementState::Pressed;
+                match button {
+                    MouseButton::Left => self.buttons[0] = down,
+                    MouseButton::Right => self.buttons[1] = down,
+                    MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
+                    _ => {}
+                }
             }
             WindowEvent::MouseWheel { delta, .. } => {
                 let steps = match delta {
@@ -116,19 +193,33 @@ impl ApplicationHandler for App {
                 let now = Instant::now();
                 let dt = now - self.last;
                 self.last = now;
-                self.update(dt.as_secs_f32().min(0.1));
+                let size = renderer.size();
+                self.update(dt.as_secs_f32().min(0.1), size);
+                let view = self.view(size);
+                let cursor = self.cursor_tile(size);
                 let Some(renderer) = &mut self.renderer else { return };
-                let stats = renderer.render(&self.camera);
+                self.game.sync(renderer, view);
+                let rects = self.game.player_rects(Some(cursor), self.free);
+                let stats = renderer.render(&self.camera, &rects);
                 self.frames += 1;
                 self.frame_time += dt;
                 if now - self.title_at >= TITLE_EVERY {
                     let fps = self.frames as f32 / (now - self.title_at).as_secs_f32();
                     let ms = self.frame_time.as_secs_f64() * 1000.0 / self.frames as f64;
                     let mode = if stats.lod { "map".to_string() } else { format!("{} inst", stats.instances) };
+                    let clock = self.game.clock();
+                    let tool = match self.game.tool {
+                        Tool::Block => format!("block {}", self.game.block()),
+                        Tool::Liquid(l) => format!("{l:?}"),
+                    };
                     if let Some(window) = &self.window {
                         window.set_title(&format!(
-                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode}",
-                            self.name, stats.draws
+                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode} - {:02}:{:02} - {tool} - {} liquid chunks",
+                            self.name,
+                            stats.draws,
+                            clock as u32,
+                            (clock.fract() * 60.0) as u32,
+                            self.game.sim.active(),
                         ));
                     }
                     (self.frames, self.frame_time, self.title_at) = (0, Duration::ZERO, now);
@@ -148,14 +239,16 @@ impl ApplicationHandler for App {
 fn main() {
     let mut path = None;
     let mut vsync = false;
+    let mut free = false;
     for a in std::env::args().skip(1) {
         match a.as_str() {
             "--vsync" => vsync = true,
+            "--free" => free = true,
             _ => path = Some(PathBuf::from(a)),
         }
     }
     let Some(path) = path else {
-        eprintln!("usage: rusted-terraria [--vsync] <world.wld>");
+        eprintln!("usage: rusted-terraria [--vsync] [--free] <world.wld>");
         std::process::exit(2);
     };
 
@@ -170,7 +263,7 @@ fn main() {
         Some(d) => println!("assets: {}", d.display()),
         None => println!("assets: Terraria install not found (set {}), using placeholders", formats::install::ENV_VAR),
     }
-    let scene = Scene::build(&world, images.as_deref());
+    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
         world.header.name,
@@ -178,27 +271,37 @@ fn main() {
         world.height,
         world.header.version,
         start.elapsed() - parsed,
-        scene.atlas.missing
+        scene.mesher.atlas.missing
     );
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
+    let game = Game::new(world, scene);
+    let (cx, cy) = game.player.center();
     let mut app = App {
-        name: world.header.name.clone(),
+        name: game.world.header.name.clone(),
         world_px,
         vsync,
-        scene: Some(scene),
+        game,
         window: None,
         renderer: None,
-        camera: Camera { center: world_px * Vec2::new(0.5, 0.3), zoom: 1.0, lighting: true },
-        keys: [false; 5],
+        camera: Camera {
+            center: Vec2::new(cx, cy),
+            zoom: 1.0,
+            lighting: true,
+            sky: [1.0; 3],
+            background: [0.0; 3],
+            time: 0.0,
+        },
+        free,
+        keys: Keys::default(),
         cursor: Vec2::ZERO,
+        buttons: [false; 2],
         drag: None,
         last: Instant::now(),
         frames: 0,
         frame_time: Duration::ZERO,
         title_at: Instant::now(),
     };
-    drop(world);
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);
     event_loop.run_app(&mut app).expect("event loop");

@@ -3,7 +3,9 @@ use glam::Vec2;
 use wgpu::util::DeviceExt;
 
 use crate::atlas::LAYER_SIZE;
-use crate::mesh::{Instance, Scene, LOD_PAGE};
+use world::light::{LightMap, Rect};
+
+use crate::mesh::{Instance, RowUpdate, Scene, LOD_PAGE};
 
 /// Below this many screen pixels per tile, the map texture replaces tile instances.
 const LOD_PIXELS_PER_TILE: f32 = 2.0;
@@ -15,7 +17,23 @@ pub struct Camera {
     /// Screen pixels per world pixel.
     pub zoom: f32,
     pub lighting: bool,
+    /// Skylight colour for the time of day, and the background behind the world.
+    pub sky: [f32; 3],
+    pub background: [f32; 3],
+    /// Seconds, for animated liquid surfaces.
+    pub time: f32,
 }
+
+/// A flat rectangle in world pixels, colour premultiplied (player, cursor).
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+pub struct ColorRect {
+    pub pos: [f32; 2],
+    pub size: [f32; 2],
+    pub color: [f32; 4],
+}
+
+const MAX_RECTS: u64 = 64;
 
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
@@ -32,11 +50,13 @@ struct CameraUniform {
     lod_pages_x: u32,
     lighting: u32,
     world: [u32; 2],
+    sky: [f32; 4],
 }
 
 struct Row {
-    buffer: Option<wgpu::Buffer>,
-    /// Walls, liquids, tiles.
+    statics: Option<wgpu::Buffer>,
+    liquids: Option<wgpu::Buffer>,
+    /// Walls and tiles index `statics`, liquids index `liquids`.
     offsets: [Vec<u32>; 3],
 }
 
@@ -47,6 +67,10 @@ pub struct Renderer {
     config: wgpu::SurfaceConfiguration,
     tile_pipeline: wgpu::RenderPipeline,
     lod_pipeline: wgpu::RenderPipeline,
+    rect_pipeline: wgpu::RenderPipeline,
+    rects: wgpu::Buffer,
+    light_tex: wgpu::Texture,
+    lod_tex: wgpu::Texture,
     bind_group: wgpu::BindGroup,
     camera: wgpu::Buffer,
     rows: Vec<Row>,
@@ -61,9 +85,12 @@ impl Renderer {
         surface: wgpu::Surface<'static>,
         (width, height): (u32, u32),
         vsync: bool,
-        scene: Scene,
+        scene: &mut Scene,
     ) -> Self {
-        let Scene { atlas, rows, chunks_x, lod_pages_x: pages_x, lod_pages_y: pages_y, lod: pages, light } = scene;
+        let (pages_x, pages_y, chunks_x) = (scene.lod_pages_x, scene.lod_pages_y, scene.chunks_x);
+        let (rows, pages) = (std::mem::take(&mut scene.rows), std::mem::take(&mut scene.lod));
+        let atlas = &mut scene.mesher.atlas;
+        let light = &scene.light;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -93,7 +120,7 @@ impl Renderer {
         surface.configure(&device, &config);
 
         let atlas_tex = texture_array(&device, "atlas", LAYER_SIZE, atlas.layers);
-        for (r, tex) in &atlas.uploads {
+        for (r, tex) in std::mem::take(&mut atlas.uploads) {
             queue.write_texture(
                 wgpu::TexelCopyTextureInfo {
                     texture: &atlas_tex,
@@ -142,7 +169,6 @@ impl Renderer {
             );
         }
         let world = [light.width, light.height];
-        drop(light);
 
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
@@ -239,17 +265,24 @@ impl Renderer {
         };
         let tile_pipeline = pipeline("vs_tile", "fs_tile", &[Some(instance_layout)]);
         let lod_pipeline = pipeline("vs_lod", "fs_lod", &[]);
+        let rect_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<ColorRect>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+        };
+        let rect_pipeline = pipeline("vs_rect", "fs_rect", &[Some(rect_layout)]);
+        let rects = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rects"),
+            size: MAX_RECTS * std::mem::size_of::<ColorRect>() as u64,
+            usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
 
         let rows = rows
             .into_iter()
             .map(|r| Row {
-                buffer: (!r.instances.is_empty()).then(|| {
-                    device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: None,
-                        contents: bytemuck::cast_slice(&r.instances),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    })
-                }),
+                statics: vertex_buffer(&device, &r.statics),
+                liquids: vertex_buffer(&device, &r.liquids),
                 offsets: [r.wall_off, r.liquid_off, r.tile_off],
             })
             .collect();
@@ -261,6 +294,10 @@ impl Renderer {
             config,
             tile_pipeline,
             lod_pipeline,
+            rect_pipeline,
+            rects,
+            light_tex,
+            lod_tex,
             bind_group,
             camera,
             rows,
@@ -268,6 +305,52 @@ impl Renderer {
             lod_pages: (pages_x, pages_y),
             world,
         }
+    }
+
+    pub fn update_rows(&mut self, updates: Vec<RowUpdate>) {
+        for u in updates {
+            let row = &mut self.rows[u.cy as usize];
+            if let Some((v, wall_off, tile_off)) = u.statics {
+                row.statics = vertex_buffer(&self.device, &v);
+                (row.offsets[0], row.offsets[2]) = (wall_off, tile_off);
+            }
+            if let Some((v, off)) = u.liquids {
+                row.liquids = vertex_buffer(&self.device, &v);
+                row.offsets[1] = off;
+            }
+        }
+    }
+
+    /// Re-uploads the light of `r`, which must lie within one page (a chunk does).
+    pub fn update_light(&self, light: &LightMap, r: Rect) {
+        let (px, py) = (r.x0 / LOD_PAGE, r.y0 / LOD_PAGE);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.light_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: r.x0 % LOD_PAGE, y: r.y0 % LOD_PAGE, z: py * self.lod_pages.0 + px },
+                aspect: wgpu::TextureAspect::All,
+            },
+            bytemuck::cast_slice(&light.rgba[(r.y0 * light.width + r.x0) as usize..]),
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(light.width * 4), rows_per_image: None },
+            wgpu::Extent3d { width: r.width(), height: r.y1 - r.y0, depth_or_array_layers: 1 },
+        );
+    }
+
+    /// Re-uploads `size`² map texels at `(ox, oy)`, within one page.
+    pub fn update_lod(&self, ox: u32, oy: u32, size: u32, texels: &[u8]) {
+        let (px, py) = (ox / LOD_PAGE, oy / LOD_PAGE);
+        self.queue.write_texture(
+            wgpu::TexelCopyTextureInfo {
+                texture: &self.lod_tex,
+                mip_level: 0,
+                origin: wgpu::Origin3d { x: ox % LOD_PAGE, y: oy % LOD_PAGE, z: py * self.lod_pages.0 + px },
+                aspect: wgpu::TextureAspect::All,
+            },
+            texels,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * 4), rows_per_image: None },
+            wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+        );
     }
 
     pub fn resize(&mut self, width: u32, height: u32) {
@@ -282,7 +365,7 @@ impl Renderer {
         Vec2::new(self.config.width as f32, self.config.height as f32)
     }
 
-    pub fn render(&mut self, cam: &Camera) -> Stats {
+    pub fn render(&mut self, cam: &Camera, rects: &[ColorRect]) -> Stats {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -299,8 +382,11 @@ impl Renderer {
             lod_pages_x: self.lod_pages.0,
             lighting: cam.lighting as u32,
             world: self.world,
+            sky: [cam.sky[0], cam.sky[1], cam.sky[2], cam.time],
         };
         self.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
+        let rects = &rects[..rects.len().min(MAX_RECTS as usize)];
+        self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(rects));
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -313,7 +399,12 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color { r: 0.10, g: 0.12, b: 0.18, a: 1.0 }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: cam.background[0] as f64,
+                            g: cam.background[1] as f64,
+                            b: cam.background[2] as f64,
+                            a: 1.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -339,7 +430,8 @@ impl Renderer {
                 for layer in 0..3 {
                     for row in self.rows.get(y0..y1).unwrap_or(&[]) {
                         let off = &row.offsets[layer];
-                        let Some(buf) = &row.buffer else { continue };
+                        let buf = if layer == 1 { &row.liquids } else { &row.statics };
+                        let Some(buf) = buf else { continue };
                         if x0 >= x1 || off[x0] == off[x1] {
                             continue;
                         }
@@ -350,11 +442,27 @@ impl Renderer {
                     }
                 }
             }
+            if !rects.is_empty() {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, self.rects.slice(..));
+                pass.draw(0..4, 0..rects.len() as u32);
+                stats.draws += 1;
+            }
         }
         self.queue.submit([encoder.finish()]);
         self.queue.present(frame);
         stats
     }
+}
+
+fn vertex_buffer(device: &wgpu::Device, v: &[Instance]) -> Option<wgpu::Buffer> {
+    (!v.is_empty()).then(|| {
+        device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: None,
+            contents: bytemuck::cast_slice(v),
+            usage: wgpu::BufferUsages::VERTEX,
+        })
+    })
 }
 
 fn texture_array(device: &wgpu::Device, label: &str, size: u32, layers: u32) -> wgpu::Texture {

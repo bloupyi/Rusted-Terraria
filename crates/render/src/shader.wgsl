@@ -5,6 +5,8 @@ struct Camera {
     lod_pages_x: u32,
     lighting: u32,
     world: vec2<u32>,
+    // Skylight colour for the time of day, seconds in w.
+    sky: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -34,7 +36,11 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
     let tile = vec2<f32>(f32(a & 0x7fffu), f32((a >> 15u) & 0x7fffu));
     if (a >> 31u) != 0u {
         // Liquid: fills the bottom `amount / 255` of its tile.
-        let top = 1.0 - f32(b & 0xffu) / 255.0;
+        let amount = f32(b & 0xffu) / 255.0;
+        // Surface cells ripple; the wave follows world x so neighbours line up.
+        let wx = tile.x + c.x;
+        let ripple = select(0.0, 0.07 * sin(1.7 * wx + 2.2 * cam.sky.w) + 0.04 * sin(0.6 * wx - 1.3 * cam.sky.w), amount < 1.0);
+        let top = clamp(1.0 - amount + ripple, 0.0, 1.0);
         let local = vec2<f32>(c.x, mix(top, 1.0, c.y));
         out.pos = vec4<f32>((tile + local) * 16.0 * cam.scale + cam.offset, 0.0, 1.0);
         out.tile = tile + local;
@@ -80,7 +86,12 @@ const PAGE: f32 = 2048.0;
 fn light_at(t: vec2<i32>) -> vec3<f32> {
     let p = clamp(t, vec2<i32>(0), vec2<i32>(cam.world) - 1);
     let page = p / 2048;
-    return textureLoad(light, p % 2048, page.y * i32(cam.lod_pages_x) + page.x, 0).rgb;
+    return combine(textureLoad(light, p % 2048, page.y * i32(cam.lod_pages_x) + page.x, 0));
+}
+
+// RGB: tiles and liquids, alpha: skylight scaled by the time of day.
+fn combine(l: vec4<f32>) -> vec3<f32> {
+    return max(l.rgb, l.a * cam.sky.rgb);
 }
 
 // Bilinear between tile centres.
@@ -116,5 +127,28 @@ fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
     if cam.lighting == 0u {
         return c;
     }
-    return c * vec4<f32>(textureLoad(light, p, i32(in.layer), 0).rgb, 1.0);
+    return c * vec4<f32>(combine(textureLoad(light, p, i32(in.layer), 0)), 1.0);
+}
+
+struct RectOut {
+    @builtin(position) pos: vec4<f32>,
+    @location(0) color: vec4<f32>,
+}
+
+@vertex
+fn vs_rect(
+    @builtin(vertex_index) vi: u32,
+    @location(0) pos: vec2<f32>,
+    @location(1) size: vec2<f32>,
+    @location(2) color: vec4<f32>,
+) -> RectOut {
+    var out: RectOut;
+    out.pos = vec4<f32>((pos + corner(vi) * size) * cam.scale + cam.offset, 0.0, 1.0);
+    out.color = color;
+    return out;
+}
+
+@fragment
+fn fs_rect(in: RectOut) -> @location(0) vec4<f32> {
+    return in.color;
 }
