@@ -33,14 +33,22 @@ mesurer les FPS).
 Controles :
 
 - ZQSD/WASD ou fleches : marcher, sauter (haut ou Espace), descendre des plateformes.
-- Clic gauche : creuser. Un meuble ou une torche part en entier et donne un objet
+- Clic gauche : utiliser l'objet en main. Pioche pour les blocs (plus ou moins de
+  coups selon la pioche et la durete : pierre et minerais en demandent deux fois
+  plus), hache pour les arbres, marteau pour les murs, epee ou outil pour frapper
+  les monstres (a mains nues, 2 degats). Un voile sombre montre l'avancee. Un meuble ou une torche part en entier et donne un objet
   qui le repose a l'identique ; un arbre tombe en entier et donne du bois ; ce qui
   reposait sur le bloc casse tombe aussi. Les objets ramasses vont dans
   l'inventaire en passant pres. Clic droit : utiliser l'objet choisi (poser un bloc
   ou un objet, vider ou remplir un seau). Portee de 10 tuiles.
 - 1 a 0 ou Q/E : choisir l'emplacement de la barre d'objets (en haut a gauche ;
-  la barre blanche sous un objet donne la taille de la pile). Depart : seaux d'eau,
-  de lave, de miel, de shimmer et un seau vide.
+  la barre blanche sous un objet donne la taille de la pile). Depart : epee, pioche
+  et hache en cuivre, seaux d'eau, de lave, de miel, de shimmer et un seau vide.
+- C : ouvrir l'artisanat. Sous la barre, les recettes faisables avec ce qu'on porte
+  et les stations a 4 tuiles ; clic pour fabriquer. Etabli (10 bois), torches
+  (bois et gel des slimes), outils en bois a l'etabli, fourneau (pierre et bois),
+  lingots de cuivre et de fer au fourneau, enclume (5 lingots de fer), outils et
+  epees en cuivre et en fer a l'enclume.
 - F : camera libre (deplacement au clavier, Maj pour accelerer, clic milieu pour
   glisser, edition sans limite de portee ni consommation d'objets) ; `--free` pour
   demarrer ainsi.

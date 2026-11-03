@@ -1,6 +1,7 @@
 mod audio;
 mod game;
 mod inventory;
+mod items;
 mod net;
 
 use std::path::PathBuf;
@@ -18,6 +19,25 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use world::light::Rect;
 use world::player::Input;
+
+/// Screen pixels of a hotbar or crafting slot, and the gap after it.
+const SLOT: f32 = 40.0;
+const SLOT_GAP: f32 = 4.0;
+/// Top of the crafting rows, under the health bar.
+const CRAFT_Y: f32 = 72.0;
+
+/// Top-left of slot `i` of a row of ten starting at `y`.
+fn slot_at(i: usize, y: f32) -> Vec2 {
+    Vec2::new(10.0 + (i % HOTBAR) as f32 * (SLOT + SLOT_GAP), y + (i / HOTBAR) as f32 * (SLOT + SLOT_GAP))
+}
+
+/// Which slot of rows starting at `y` holds screen point `p`, among `n`.
+fn slot_under(p: Vec2, y: f32, n: usize) -> Option<usize> {
+    (0..n).find(|&i| {
+        let o = slot_at(i, y);
+        p.x >= o.x && p.x < o.x + SLOT && p.y >= o.y && p.y < o.y + SLOT
+    })
+}
 
 const TITLE_EVERY: Duration = Duration::from_millis(500);
 const PAN_SPEED: f32 = 1200.0;
@@ -51,6 +71,11 @@ struct App {
     keys: Keys,
     cursor: Vec2,
     buttons: [bool; 2],
+    /// The left button went down on the interface: no digging until it is released.
+    ui_click: bool,
+    crafting: bool,
+    /// Craftable recipes and what each makes, while the crafting rows are open.
+    recipes: Vec<(usize, Item)>,
     drag: Option<Vec2>,
     last: Instant,
     frames: u32,
@@ -82,7 +107,12 @@ impl App {
             let (cx, cy) = self.game.player.center();
             self.camera.center = Vec2::new(cx, cy);
         }
-        if self.drag.is_none() {
+        self.recipes = if self.crafting {
+            self.game.craftable().into_iter().map(|i| (i, self.game.recipe_item(i))).collect()
+        } else {
+            Vec::new()
+        };
+        if self.drag.is_none() && !self.ui_click {
             let (tx, ty) = self.cursor_tile(size);
             let w = self.screen_to_world(self.cursor, size);
             if self.buttons[0] && !self.game.attack(w.x, w.y, self.free) {
@@ -105,34 +135,52 @@ impl App {
         self.camera.time += dt;
     }
 
-    /// Hotbar in the top-left corner, as world sprites under the current camera.
-    /// Each slot shows its item, with a bar for the stack size.
+    /// Hotbar in the top-left corner, health under it, then the crafting rows if
+    /// open, as world sprites under the current camera.
     fn hotbar(&self, size: Vec2) -> Vec<Sprite> {
-        const SLOT: f32 = 40.0;
         let z = self.camera.zoom;
-        let at = |x: f32, y: f32| -> [f32; 2] { self.screen_to_world(Vec2::new(x, y), size).into() };
-        let rect = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(x, y), [w / z, h / z], color);
+        let at = |p: Vec2| -> [f32; 2] { self.screen_to_world(p, size).into() };
+        let rect = |p: Vec2, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(p), [w / z, h / z], color);
+        let slot = |rects: &mut Vec<Sprite>, o: Vec2, frame: [f32; 4], item: Option<(Item, u16)>| {
+            rects.push(rect(o, SLOT, SLOT, frame));
+            rects.push(rect(o + 3.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
+            if let Some((item, count)) = item {
+                rects.extend(self.game.item_icon(item, at(o + 8.0), (SLOT - 16.0) / z, 0));
+                if count > 1 {
+                    let w = (SLOT - 8.0) * (count as f32 / 99.0).min(1.0);
+                    rects.push(rect(o + Vec2::new(4.0, SLOT - 7.0), w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
+                }
+            }
+        };
         let inv = &self.game.inventory;
         let mut rects = Vec::new();
         for i in 0..HOTBAR {
-            let x = 10.0 + i as f32 * (SLOT + 4.0);
             let frame = if i == inv.selected { [0.9, 0.8, 0.3, 0.9] } else { [0.1, 0.1, 0.15, 0.6] };
-            rects.push(rect(x, 10.0, SLOT, SLOT, frame));
-            rects.push(rect(x + 3.0, 13.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
-            if let Some(s) = inv.slots[i] {
-                rects.extend(self.game.item_icon(s.item, at(x + 8.0, 16.0), (SLOT - 16.0) / z, 0));
-                if s.count > 1 {
-                    let w = (SLOT - 8.0) * s.count as f32 / inventory::MAX_STACK as f32;
-                    rects.push(rect(x + 4.0, 10.0 + SLOT - 7.0, w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
-                }
-            }
+            slot(&mut rects, slot_at(i, 10.0), frame, inv.slots[i].map(|s| (s.item, s.count)));
         }
-        // Health under the hotbar.
-        let width = HOTBAR as f32 * (SLOT + 4.0) - 4.0;
-        rects.push(rect(10.0, 56.0, width, 8.0, [0.1, 0.1, 0.15, 0.6]));
+        let width = HOTBAR as f32 * (SLOT + SLOT_GAP) - SLOT_GAP;
+        rects.push(rect(Vec2::new(10.0, 56.0), width, 8.0, [0.1, 0.1, 0.15, 0.6]));
         let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
-        rects.push(rect(11.0, 57.0, (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
+        rects.push(rect(Vec2::new(11.0, 57.0), (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
+        for (k, &(r, item)) in self.recipes.iter().enumerate() {
+            let hover = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) == Some(k);
+            let frame = if hover { [0.4, 0.8, 0.5, 0.9] } else { [0.2, 0.35, 0.25, 0.7] };
+            slot(&mut rects, slot_at(k, CRAFT_Y), frame, Some((item, items::RECIPES[r].count)));
+        }
         rects
+    }
+
+    /// A left press on the interface: picks a hotbar slot or crafts. True if it hit one.
+    fn click_ui(&mut self) -> bool {
+        if let Some(i) = slot_under(self.cursor, 10.0, HOTBAR) {
+            self.game.inventory.selected = i;
+            return true;
+        }
+        if let Some(k) = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) {
+            self.game.craft(self.recipes[k].0);
+            return true;
+        }
+        false
     }
 
     /// Applies what other players sent, then sends our player, edits and, as host, the world
@@ -213,6 +261,7 @@ impl ApplicationHandler for App {
                     KeyCode::KeyT => k.fast_time = down,
                     KeyCode::Escape => el.exit(),
                     KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
+                    KeyCode::KeyC if press => self.crafting = !self.crafting,
                     KeyCode::KeyF if press => {
                         self.free = !self.free;
                         if !self.free {
@@ -248,7 +297,10 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
                 match button {
-                    MouseButton::Left => self.buttons[0] = down,
+                    MouseButton::Left => {
+                        self.buttons[0] = down;
+                        self.ui_click = down && self.click_ui();
+                    }
                     MouseButton::Right => self.buttons[1] = down,
                     MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
                     _ => {}
@@ -293,6 +345,8 @@ impl ApplicationHandler for App {
                             Item::Bucket(None) => "empty bucket".to_string(),
                             Item::Bucket(Some(l)) => format!("{l:?} bucket"),
                             Item::Object(i) => format!("object {} x{}", self.game.templates[i as usize].tile, s.count),
+                            Item::Tool(t) => format!("{t:?}"),
+                            Item::Material(m) => format!("{m:?} x{}", s.count),
                         },
                     };
                     if let Some(window) = &self.window {
@@ -420,6 +474,9 @@ fn main() {
         keys: Keys::default(),
         cursor: Vec2::ZERO,
         buttons: [false; 2],
+        ui_click: false,
+        crafting: false,
+        recipes: Vec::new(),
         drag: None,
         last: Instant::now(),
         frames: 0,

@@ -46,6 +46,12 @@ pub enum Msg {
     /// A client hit the monster at this index of the last snapshot.
     Hit {
         index: u16,
+        damage: u16,
+    },
+    Wall {
+        x: u32,
+        y: u32,
+        wall: u16,
     },
     Leave {
         id: u8,
@@ -129,8 +135,11 @@ impl Msg {
                     o.u8(m.kind).f32(m.x).f32(m.y).u8(m.facing_left as u8 | (m.hurt as u8) << 1);
                 }
             }
-            Msg::Hit { index } => {
-                o.u8(5).u16(*index);
+            Msg::Hit { index, damage } => {
+                o.u8(5).u16(*index).u16(*damage);
+            }
+            Msg::Wall { x, y, wall } => {
+                o.u8(8).u32(*x).u32(*y).u16(*wall);
             }
             Msg::Leave { id } => {
                 o.u8(6).u8(*id);
@@ -171,7 +180,8 @@ impl Msg {
                 }
                 Msg::Mobs(mobs)
             }
-            5 => Msg::Hit { index: i.u16()? },
+            5 => Msg::Hit { index: i.u16()?, damage: i.u16()? },
+            8 => Msg::Wall { x: i.u32()?, y: i.u32()?, wall: i.u16()? },
             6 => Msg::Leave { id: i.u8()? },
             7 => Msg::Time(i.f32()?),
             _ => return None,
@@ -330,7 +340,8 @@ mod tests {
             Msg::Tile { x: 10, y: 20, tile: u16::MAX, fx: -1, fy: 36 },
             Msg::Liquid { x: 1, y: 2, amount: 200, kind: 1 },
             Msg::Mobs(vec![MobState { kind: 1, x: 5.0, y: 6.0, facing_left: false, hurt: true }]),
-            Msg::Hit { index: 7 },
+            Msg::Hit { index: 7, damage: 12 },
+            Msg::Wall { x: 3, y: 4, wall: 0 },
             Msg::Leave { id: 2 },
             Msg::Time(0.5),
         ];
@@ -360,7 +371,7 @@ mod tests {
         host.send_to(id, &Msg::Welcome { id, world: vec![9; 100_000] });
         let (client, world) = client.join().unwrap();
         assert_eq!((client.id, world.len()), (1, 100_000));
-        client.send(&Msg::Hit { index: 4 }, None);
+        client.send(&Msg::Hit { index: 4, damage: 9 }, None);
         let got = loop {
             if let Some(m) = host.poll().into_iter().next() {
                 break m;
@@ -368,7 +379,7 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(5));
         };
-        assert_eq!(got, (1, Msg::Hit { index: 4 }));
+        assert_eq!(got, (1, Msg::Hit { index: 4, damage: 9 }));
         drop(client);
         let left = loop {
             if let Some(m) = host.poll().into_iter().next() {

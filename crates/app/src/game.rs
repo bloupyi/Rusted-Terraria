@@ -6,6 +6,7 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::inventory::{Inventory, Item};
+use crate::items::{self, Furniture, Material, Out, Tool, RECIPES, USE_TIME};
 use crate::net::{MobState, Msg};
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -26,7 +27,8 @@ const LOD_BUDGET: usize = 256;
 /// Off-screen chunks remeshed per frame; on-screen ones always are.
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
-pub const EXTRA_TILES: [u16; 2] = [OBSIDIAN, WOOD];
+/// Obsidian from liquids, wood from trees, and the craftable furniture.
+pub const EXTRA_TILES: [u16; 6] = [OBSIDIAN, WOOD, 4, items::WORK_BENCH, items::FURNACE, items::ANVIL];
 pub const TREE: u16 = 5;
 pub const WOOD: u16 = 30;
 const TORCH: u16 = 4;
@@ -37,8 +39,6 @@ const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
-/// Stone, ores and obsidian ring instead of thudding when broken.
-const HARD: [u16; 7] = [1, 6, 7, 8, 9, 25, 56];
 pub const MAX_HP: i32 = 100;
 /// Seconds without damage after a hit.
 const INVULNERABLE: f32 = 0.67;
@@ -47,7 +47,10 @@ const SPAWN_EVERY: f32 = 2.0;
 /// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
 const SPAWN_DIST: (i64, i64) = (35, 55);
 const DESPAWN: f32 = 100.0 * 16.0;
-const ATTACK_DAMAGE: i32 = 10;
+/// Damage with no weapon in hand.
+const FIST_DAMAGE: i32 = 2;
+/// Crafting stations count within this many tiles of the player.
+const STATION_REACH: i64 = 4;
 const ATTACK_EVERY: f32 = 0.35;
 /// Dirt-brown backdrop under the surface, lit like the tiles.
 const UNDERGROUND: [f32; 4] = [0.30, 0.21, 0.15, 1.0];
@@ -76,6 +79,7 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Tree_Tops_0", "Tree_Branches_0", "Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_3"]
             .map(String::from),
     );
+    v.extend(items::sheets());
     v
 }
 
@@ -123,6 +127,10 @@ pub struct Game {
     pub hp: i32,
     invulnerable: f32,
     attack_cd: f32,
+    /// Seconds before the held tool can be used again.
+    use_cd: f32,
+    /// Tile being mined and how far, out of 100.
+    mining: Option<(i64, i64, f32)>,
     spawn_acc: f32,
     spawn_x: u32,
     rng: u64,
@@ -151,6 +159,9 @@ impl Game {
             player,
             time: 0.25,
             inventory: Inventory::new(&[
+                Item::Tool(Tool::Sword(items::Tier::Copper)),
+                Item::Tool(Tool::Pickaxe(items::Tier::Copper)),
+                Item::Tool(Tool::Axe(items::Tier::Copper)),
                 Item::Bucket(Some(Liquid::Water)),
                 Item::Bucket(Some(Liquid::Lava)),
                 Item::Bucket(Some(Liquid::Honey)),
@@ -167,6 +178,8 @@ impl Game {
             hp: MAX_HP,
             invulnerable: 0.0,
             attack_cd: 0.0,
+            use_cd: 0.0,
+            mining: None,
             spawn_acc: 0.0,
             spawn_x,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -205,6 +218,7 @@ impl Game {
     fn update_mobs(&mut self, dt: f32, fight: bool) {
         self.invulnerable -= dt;
         self.attack_cd -= dt;
+        self.use_cd -= dt;
         self.spawn_acc += dt;
         if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
             self.spawn_acc = 0.0;
@@ -270,21 +284,40 @@ impl Game {
         }) else {
             return false;
         };
+        let damage = self.weapon_damage();
         if self.attack_cd <= 0.0 && self.client {
             self.attack_cd = ATTACK_EVERY;
             self.sfx.extend([Sfx::Swing, Sfx::MobHit]);
-            self.outbox.push(Msg::Hit { index: i as u16 });
+            self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
         } else if self.attack_cd <= 0.0 {
             self.attack_cd = ATTACK_EVERY;
             self.sfx.push(Sfx::Swing);
-            if self.mobs[i].hit(ATTACK_DAMAGE, self.player.center().0) {
-                self.mobs.swap_remove(i);
-                self.sfx.push(Sfx::MobKilled);
-            } else {
-                self.sfx.push(Sfx::MobHit);
-            }
+            let from = self.player.center().0;
+            self.hit_mob(i, damage, from);
         }
         true
+    }
+
+    fn weapon_damage(&self) -> i32 {
+        match self.inventory.selected().map(|s| s.item) {
+            Some(Item::Tool(t)) => t.damage(),
+            _ => FIST_DAMAGE,
+        }
+    }
+
+    /// Hurts a monster; a dead slime leaves gel.
+    fn hit_mob(&mut self, i: usize, damage: i32, from_x: f32) {
+        if !self.mobs[i].hit(damage, from_x) {
+            self.sfx.push(Sfx::MobHit);
+            return;
+        }
+        let m = self.mobs.swap_remove(i);
+        self.sfx.push(Sfx::MobKilled);
+        if m.kind == Kind::Slime {
+            let (x, y) = m.body.center();
+            let count = 1 + (self.random() % 2) as u16;
+            self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item: Item::Material(Material::Gel), count });
+        }
     }
 
     /// Monsters as sent to clients.
@@ -342,16 +375,12 @@ impl Game {
                     })
                     .collect();
             }
-            Msg::Hit { index } if !self.client => {
+            Msg::Hit { index, damage } if !self.client && (index as usize) < self.mobs.len() => {
                 let from_x = self.others.iter().find(|o| o.0 == from).map_or(0.0, |o| o.1.center().0);
-                if let Some(m) = self.mobs.get_mut(index as usize) {
-                    if m.hit(ATTACK_DAMAGE, from_x) {
-                        self.mobs.swap_remove(index as usize);
-                        self.sfx.push(Sfx::MobKilled);
-                    } else {
-                        self.sfx.push(Sfx::MobHit);
-                    }
-                }
+                self.hit_mob(index as usize, damage as i32, from_x);
+            }
+            Msg::Wall { x, y, wall } if self.world.in_bounds(x as i64, y as i64) => {
+                self.world.set_wall(x, y, wall);
             }
             Msg::Leave { id } => self.others.retain(|o| o.0 != id),
             Msg::Time(t) if self.client => self.time = t,
@@ -447,10 +476,57 @@ impl Game {
     }
 
     /// Breaks the block or object at the tile; with the free camera nothing drops.
+    /// With the free camera anything breaks at once and drops nothing. Otherwise
+    /// blocks need a pickaxe, trees an axe and walls a hammer, over several uses;
+    /// objects and plants come off by hand.
     pub fn dig(&mut self, tx: i64, ty: i64, free: bool) {
-        if self.in_reach(tx, ty, free) {
-            self.break_tile(tx, ty, !free);
+        if !self.in_reach(tx, ty, free) {
+            return;
         }
+        if free {
+            self.break_tile(tx, ty, false);
+            return;
+        }
+        if self.use_cd > 0.0 {
+            return;
+        }
+        let tool = match self.inventory.selected().map(|s| s.item) {
+            Some(Item::Tool(t)) => Some(t),
+            _ => None,
+        };
+        let t = self.world.tile(tx, ty);
+        let power = match (t, tool) {
+            (NO_TILE, Some(Tool::Hammer(h))) if self.world.wall(tx, ty) != 0 => Tool::Hammer(h).power() / 2.0,
+            (NO_TILE, _) => return,
+            (TREE, Some(Tool::Axe(a))) => Tool::Axe(a).power(),
+            (TREE, _) => return,
+            (t, _) if self.important(t) => 100.0,
+            (t, Some(Tool::Pickaxe(p))) => Tool::Pickaxe(p).power() / items::hardness(t),
+            _ => return,
+        };
+        self.use_cd = USE_TIME;
+        let done = match self.mining {
+            Some((x, y, p)) if (x, y) == (tx, ty) => p + power,
+            _ => power,
+        };
+        if done < 100.0 {
+            self.mining = Some((tx, ty, done));
+            self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
+            return;
+        }
+        self.mining = None;
+        if t == NO_TILE {
+            self.world.set_wall(tx as u32, ty as u32, 0);
+            self.outbox.push(Msg::Wall { x: tx as u32, y: ty as u32, wall: 0 });
+            self.sfx.push(Sfx::Dig);
+        } else {
+            self.break_tile(tx, ty, true);
+        }
+    }
+
+    /// Mining progress on a tile, 0 to 1, for the crack overlay.
+    pub fn mining(&self) -> Option<(i64, i64, f32)> {
+        self.mining.map(|(x, y, p)| (x, y, p / 100.0))
     }
 
     /// Removes a block, a whole object or a whole tree, then whatever rested on it.
@@ -470,7 +546,7 @@ impl Game {
         } else {
             (vec![(tx, ty)], Some((Item::Block(t), 1)))
         };
-        self.sfx.push(if HARD.contains(&t) { Sfx::Tink } else { Sfx::Dig });
+        self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
         for &(x, y) in &cells {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
             self.outbox.push(Msg::Tile { x: x as u32, y: y as u32, tile: NO_TILE, fx: -1, fy: -1 });
@@ -558,13 +634,17 @@ impl Game {
     fn template(&mut self, tile: u16, cells: &[(i64, i64)]) -> u16 {
         let x0 = cells.iter().map(|c| c.0).min().unwrap();
         let y1 = cells.iter().map(|c| c.1).max().unwrap();
-        let mut cells: Vec<_> = cells
+        let cells: Vec<_> = cells
             .iter()
             .map(|&(x, y)| {
                 let (fx, fy) = self.world.frame(x, y);
                 ((x - x0) as i32, (y - y1) as i32, fx, fy)
             })
             .collect();
+        self.add_template(tile, cells)
+    }
+
+    fn add_template(&mut self, tile: u16, mut cells: Vec<(i32, i32, i16, i16)>) -> u16 {
         cells.sort_unstable();
         let tpl = Template { tile, cells };
         let id = self.templates.iter().position(|t| *t == tpl).unwrap_or_else(|| {
@@ -572,6 +652,67 @@ impl Game {
             self.templates.len() - 1
         });
         id as u16
+    }
+
+    /// The first style of a craftable object, frames 18 px apart.
+    fn furniture(&mut self, f: Furniture) -> Item {
+        let (tile, w, h) = f.tile();
+        let cells =
+            (0..w).flat_map(|dx| (0..h).map(move |dy| (dx, dy - (h - 1), dx as i16 * 18, dy as i16 * 18))).collect();
+        Item::Object(self.add_template(tile, cells))
+    }
+
+    /// Station tiles around the player.
+    fn stations(&self) -> Vec<u16> {
+        let (x, y) = self.player.center();
+        let (tx, ty) = ((x / 16.0) as i64, (y / 16.0) as i64);
+        let mut v: Vec<u16> = (ty - STATION_REACH..=ty + STATION_REACH)
+            .flat_map(|y| (tx - STATION_REACH..=tx + STATION_REACH).map(move |x| (x, y)))
+            .map(|(x, y)| self.world.tile(x, y))
+            .filter(|t| [items::WORK_BENCH, items::FURNACE, items::ANVIL].contains(t))
+            .collect();
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+
+    /// Recipes that can be made here with what the player carries.
+    pub fn craftable(&self) -> Vec<usize> {
+        let stations = self.stations();
+        RECIPES
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.station.is_none_or(|s| stations.contains(&s)))
+            .filter(|(_, r)| r.inputs.iter().all(|&(item, n)| self.inventory.count(item) >= n as u32))
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// What a recipe gives, for its icon.
+    pub fn recipe_item(&mut self, i: usize) -> Item {
+        match RECIPES[i].out {
+            Out::Item(item) => item,
+            Out::Furniture(f) => self.furniture(f),
+        }
+    }
+
+    /// Makes recipe `i` if it can be made here; what does not fit drops at the player.
+    pub fn craft(&mut self, i: usize) -> bool {
+        if !self.craftable().contains(&i) {
+            return false;
+        }
+        let r = &RECIPES[i];
+        for &(item, n) in r.inputs {
+            self.inventory.remove(item, n);
+        }
+        let item = self.recipe_item(i);
+        let rest = self.inventory.add(item, r.count);
+        if rest > 0 {
+            let (x, y) = self.player.center();
+            self.drops.push(Drop { x, y, vx: 0.0, vy: 0.0, item, count: rest });
+        }
+        self.sfx.push(Sfx::Grab);
+        true
     }
 
     /// Uses the selected item on the tile: places a block or object, pours or fills a bucket.
@@ -583,6 +724,7 @@ impl Game {
         }
         let (x, y) = (tx as u32, ty as u32);
         match stack.item {
+            Item::Tool(_) | Item::Material(_) => return,
             Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
                     self.world.tile(tx + dx, ty + dy) != NO_TILE || self.world.wall(tx + dx, ty + dy) != 0
@@ -685,6 +827,20 @@ impl Game {
                 Some(s) if !s.fallback => fit(&s, [18, 18, 16, 16]),
                 _ => flat(atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4])),
             },
+            Item::Tool(t) => match self.sheet(t.sheet()) {
+                Some(s) => fit(s, [0, 0, s.w, s.h]),
+                None => flat([180, 180, 190, 255]),
+            },
+            Item::Material(m) => match self.sheet(m.sheet()) {
+                Some(s) => {
+                    let mut v = fit(s, [0, 0, s.w, s.h]);
+                    if m == Material::Gel {
+                        v[0].color = [0.45, 0.65, 1.0, 0.85];
+                    }
+                    v
+                }
+                None => flat([90, 140, 255, 255]),
+            },
             Item::Bucket(l) => {
                 let name = match l {
                     None => "Item_205",
@@ -752,6 +908,9 @@ impl Game {
         }
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
+        }
+        if let Some((tx, ty, p)) = self.mining() {
+            over.push(Sprite::flat([tx as f32 * 16.0, ty as f32 * 16.0], [16.0, 16.0], [0.0, 0.0, 0.0, p * 0.6]));
         }
         if let Some((tx, ty)) = cursor.filter(|&(x, y)| self.in_reach(x, y, free)) {
             over.push(Sprite::flat([tx as f32 * 16.0, ty as f32 * 16.0], [16.0, 16.0], [0.25, 0.25, 0.25, 0.25]));
@@ -936,6 +1095,8 @@ fn surface(world: &World) -> Vec<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inventory::Stack;
+    use crate::items::Tier;
     use formats::wld::Tile;
 
     const BENCH: u16 = 18;
@@ -968,12 +1129,63 @@ mod tests {
         g.update_drops(0.0);
     }
 
+    /// Hits a tile until it breaks; returns the number of hits.
+    fn mine(g: &mut Game, x: i64, y: i64) -> u32 {
+        let mut hits = 0;
+        while g.world.tile(x, y) != NO_TILE {
+            g.use_cd = 0.0;
+            g.dig(x, y, false);
+            hits += 1;
+            assert!(hits < 50, "never breaks");
+        }
+        hits
+    }
+
+    #[test]
+    fn tools_mine_by_power_and_hardness() {
+        let mut g = game();
+        g.inventory.selected = 0; // sword: no mining
+        g.dig(16, 20, false);
+        assert!(g.mining().is_none());
+        g.inventory.selected = 1; // copper pickaxe: 35 / 2 per hit on stone
+        g.dig(16, 20, false);
+        let (_, _, p) = g.mining().unwrap();
+        assert!((p - 0.175).abs() < 1e-4);
+        g.dig(16, 20, false);
+        assert_eq!(g.mining().unwrap().2, p, "waits for the use time");
+        assert_eq!(mine(&mut g, 16, 20), 5);
+        g.inventory.slots[1] = Some(Stack { item: Item::Tool(Tool::Pickaxe(Tier::Iron)), count: 1 });
+        assert_eq!(mine(&mut g, 17, 20), 5, "40 / 2: still five hits");
+    }
+
+    #[test]
+    fn crafting_needs_inputs_and_stations() {
+        let mut g = game();
+        let bench = RECIPES.iter().position(|r| r.out == Out::Furniture(Furniture::WorkBench)).unwrap();
+        let sword = RECIPES.iter().position(|r| r.out == Out::Item(Item::Tool(Tool::Sword(Tier::Wood)))).unwrap();
+        assert!(!g.craft(bench), "no wood");
+        g.inventory.add(Item::Block(items::WOOD), 17);
+        assert!(g.craft(bench));
+        assert_eq!(g.inventory.count(Item::Block(items::WOOD)), 7);
+        assert!(g.inventory.slots.iter().flatten().any(|s| matches!(s.item, Item::Object(_))));
+
+        // The fixture's benches are in reach of the spawn, so the sword can be made.
+        assert!(g.craftable().contains(&sword));
+        g.player = Player::spawn(&g.world, 40);
+        assert!(!g.craftable().contains(&sword), "too far from a bench");
+        g.player = Player::spawn(&g.world, 15);
+        assert!(g.craft(sword));
+        assert_eq!(g.inventory.count(Item::Block(items::WOOD)), 0);
+        assert_eq!(g.inventory.count(Item::Tool(Tool::Sword(Tier::Wood))), 1);
+    }
+
     #[test]
     fn objects_drop_and_place_again() {
         let mut g = game();
         g.dig(11, 19, false);
         assert_eq!((g.world.tile(10, 19), g.world.tile(11, 19)), (NO_TILE, NO_TILE));
         assert_eq!(g.world.tile(12, 19), BENCH, "the bench beside stays");
+        g.use_cd = 0.0;
         g.dig(20, 19, false);
         pick_up(&mut g);
         let objects: Vec<_> =
@@ -991,7 +1203,8 @@ mod tests {
         assert!(g.inventory.slots[g.inventory.selected].is_none(), "used up");
 
         // Digging the floor under the other bench breaks it too.
-        g.dig(12, 20, false);
+        g.inventory.selected = 1;
+        mine(&mut g, 12, 20);
         assert_eq!((g.world.tile(12, 19), g.world.tile(13, 19)), (NO_TILE, NO_TILE));
     }
 

@@ -1,5 +1,6 @@
 //! Items, stacks and the player's inventory (the first `HOTBAR` slots are the hotbar).
 
+use crate::items::{Material, Tool};
 use world::Liquid;
 
 pub const SLOTS: usize = 40;
@@ -13,13 +14,16 @@ pub enum Item {
     Bucket(Option<Liquid>),
     /// Furniture, torches and other objects: an index into the game's templates.
     Object(u16),
+    Tool(Tool),
+    Material(Material),
 }
 
 impl Item {
     fn max_stack(self) -> u16 {
         match self {
             Item::Block(_) => MAX_STACK,
-            Item::Bucket(_) => 1,
+            Item::Bucket(_) | Item::Tool(_) => 1,
+            Item::Material(_) => MAX_STACK,
             Item::Object(_) => 99,
         }
     }
@@ -64,6 +68,24 @@ impl Inventory {
         count
     }
 
+    pub fn count(&self, item: Item) -> u32 {
+        self.slots.iter().flatten().filter(|s| s.item == item).map(|s| s.count as u32).sum()
+    }
+
+    /// Takes `n` of `item`, last slots first. The caller checks there are enough.
+    pub fn remove(&mut self, item: Item, mut n: u16) {
+        for slot in self.slots.iter_mut().rev() {
+            if let Some(s) = slot.as_mut().filter(|s| s.item == item) {
+                let k = n.min(s.count);
+                s.count -= k;
+                n -= k;
+                if s.count == 0 {
+                    *slot = None;
+                }
+            }
+        }
+    }
+
     pub fn selected(&self) -> Option<Stack> {
         self.slots[self.selected]
     }
@@ -105,6 +127,16 @@ mod tests {
         assert_eq!(inv.slots[3], Some(Stack { item: Item::Bucket(None), count: 1 }));
         // Full inventory returns the rest.
         assert_eq!(inv.add(Item::Block(2), 999 * 40), 999 * 4);
+    }
+
+    #[test]
+    fn count_and_remove() {
+        let mut inv = Inventory::new(&[]);
+        inv.add(Item::Block(1), 1200);
+        assert_eq!(inv.count(Item::Block(1)), 1200);
+        inv.remove(Item::Block(1), 300);
+        assert_eq!(inv.count(Item::Block(1)), 900);
+        assert_eq!(inv.slots[1], None, "the second stack went first");
     }
 
     #[test]
