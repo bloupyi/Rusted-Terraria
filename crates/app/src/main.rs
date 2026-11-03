@@ -163,6 +163,11 @@ impl App {
         rects.push(rect(Vec2::new(10.0, 56.0), width, 8.0, [0.1, 0.1, 0.15, 0.6]));
         let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
         rects.push(rect(Vec2::new(11.0, 57.0), (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
+        if let Some(life) = self.game.boss_life() {
+            let (w, x) = (size.x * 0.5, size.x * 0.25);
+            rects.push(rect(Vec2::new(x, size.y - 40.0), w, 14.0, [0.1, 0.1, 0.15, 0.7]));
+            rects.push(rect(Vec2::new(x + 2.0, size.y - 38.0), (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]));
+        }
         for (k, &(r, item)) in self.recipes.iter().enumerate() {
             let hover = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) == Some(k);
             let frame = if hover { [0.4, 0.8, 0.5, 0.9] } else { [0.2, 0.35, 0.25, 0.7] };

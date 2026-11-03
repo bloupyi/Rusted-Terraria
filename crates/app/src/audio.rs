@@ -25,6 +25,7 @@ pub enum Sfx {
     MobHit,
     MobKilled,
     Zombie,
+    Roar,
 }
 
 impl Sfx {
@@ -41,6 +42,7 @@ impl Sfx {
             Sfx::MobHit => ("NPC_Hit_1", 1),
             Sfx::MobKilled => ("NPC_Killed_1", 1),
             Sfx::Zombie => ("Zombie", 3),
+            Sfx::Roar => ("Roar_0", 1),
         }
     }
 }

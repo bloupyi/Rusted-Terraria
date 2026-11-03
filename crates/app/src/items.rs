@@ -23,6 +23,9 @@ pub enum Material {
     Gel,
     CopperBar,
     IronBar,
+    Lens,
+    /// Calls the eye boss at night.
+    SuspiciousEye,
 }
 
 /// Placeable objects a recipe can make, built as fresh templates.
@@ -53,6 +56,7 @@ pub const WOOD: u16 = 30;
 pub const STONE: u16 = 1;
 pub const COPPER_ORE: u16 = 7;
 pub const IRON_ORE: u16 = 6;
+pub const DEMONITE_ORE: u16 = 22;
 
 /// Seconds between two uses of a tool or weapon.
 pub const USE_TIME: f32 = 0.25;
@@ -101,6 +105,8 @@ impl Material {
             Material::Gel => "Item_23",
             Material::CopperBar => "Item_20",
             Material::IronBar => "Item_22",
+            Material::Lens => "Item_38",
+            Material::SuspiciousEye => "Item_43",
         }
     }
 }
@@ -158,6 +164,12 @@ pub const RECIPES: &[Recipe] = &[
         out: Out::Furniture(Furniture::Furnace),
         count: 1,
         inputs: &[(Item::Block(STONE), 20), wood(4)],
+        station: Some(WORK_BENCH),
+    },
+    Recipe {
+        out: Out::Item(Item::Material(Material::SuspiciousEye)),
+        count: 1,
+        inputs: &[(Item::Material(Material::Lens), 6)],
         station: Some(WORK_BENCH),
     },
     Recipe {
@@ -231,7 +243,10 @@ pub const RECIPES: &[Recipe] = &[
 /// Every sheet the items above draw with.
 pub fn sheets() -> Vec<String> {
     let mut v: Vec<String> =
-        [Material::Gel, Material::CopperBar, Material::IronBar].iter().map(|m| m.sheet().to_string()).collect();
+        [Material::Gel, Material::CopperBar, Material::IronBar, Material::Lens, Material::SuspiciousEye]
+            .iter()
+            .map(|m| m.sheet().to_string())
+            .collect();
     for t in [Tier::Wood, Tier::Copper, Tier::Iron] {
         for tool in [Tool::Pickaxe(t), Tool::Axe(t), Tool::Hammer(t), Tool::Sword(t)] {
             v.push(tool.sheet().to_string());

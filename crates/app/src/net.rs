@@ -72,6 +72,7 @@ pub struct MobState {
     pub y: f32,
     pub facing_left: bool,
     pub hurt: bool,
+    pub hp: i32,
 }
 
 enum Event {
@@ -397,7 +398,7 @@ mod tests {
         let got = wait(|| host.poll().into_iter().find(|(_, m)| matches!(m, Msg::Hit { .. })));
         assert_eq!(got, (1, Msg::Hit { index: 4, damage: 9 }));
 
-        let s = MobState { kind: 0, x: 1.0, y: 2.0, facing_left: true, hurt: false };
+        let s = MobState { kind: 0, x: 1.0, y: 2.0, facing_left: true, hurt: false, hp: 20 };
         host.send(&Msg::Mobs(vec![s, s]), None);
         host.send(&Msg::Mobs(vec![s]), None);
         let mobs = wait(|| {

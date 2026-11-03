@@ -119,7 +119,15 @@ jour (attente puis saut vers le joueur), zombies en plus la nuit (marche, saut
 devant un mur de deux blocs). Ils apparaissent hors ecran a 35-55 tuiles, au plus
 5 a la fois, et disparaissent au-dela de 100 tuiles. Contact : degats, recul et
 invulnerabilite courte ; a 0 PV le joueur revient au point de depart. Clic gauche
-sur un monstre a portee : 10 degats avec recul. Barre de vie sous la barre d'objets.
+sur un monstre a portee : degats de l'arme avec recul. Barre de vie sous la barre d'objets.
+La nuit, des yeux demoniaques (`NPC_2`) volent vers le joueur et rebondissent sur
+les blocs ; ils lachent parfois une lentille. Le guide (`NPC_22`) vit au point de
+depart, se promene a 20 tuiles autour, ne blesse pas et ne peut pas etre frappe.
+Boss : l'oeil (`NPC_4`, 1200 PV) s'appelle la nuit avec l'oeil suspect (6
+lentilles a l'etabli, clic droit) ; il plane au-dessus du joueur, fonce trois fois,
+accelere sous la moitie de sa vie (deuxieme phase du sheet), traverse les blocs,
+part a l'aube et lache du minerai de demonite. Barre de vie du boss en bas de
+l'ecran. Le sprite n'est pas tourne vers le joueur (pas de rotation des sprites).
 
 Son (`app/src/audio.rs`) : effets `Content/Sounds/*.xnb` (SoundEffect PCM 16 bits,
 les 527 fichiers de 1.4.5 sont lus) charges a la demande, reechantillonnes a la
@@ -143,7 +151,7 @@ jeu : l'echange avec un vrai client ou serveur Terraria n'a pas pu etre essaye (
 serveur officiel ne tourne pas sous Linux sans Windows). Champs inconnus de la 1.4.5
 envoyes a zero, shimmer transmis comme de l'eau, objets au sol locaux.
 
-Sprites : joueur, monstres (`NPC_1`, `NPC_3`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
+Sprites : joueur, monstres (`NPC_1` a `NPC_4`, `NPC_22`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
 `Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
 eclaires comme les tuiles. Les liquides utilisent `Liquid_0` (eau animee),

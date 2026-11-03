@@ -76,8 +76,20 @@ const SKIN: [f32; 4] = [1.0, 0.80, 0.65, 1.0];
 pub fn sprite_sheets() -> Vec<String> {
     let mut v: Vec<String> = PLAYER_LAYERS.iter().map(|l| l.0.to_string()).collect();
     v.extend(
-        ["Tree_Tops_0", "Tree_Branches_0", "Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_3"]
-            .map(String::from),
+        [
+            "Tree_Tops_0",
+            "Tree_Branches_0",
+            "Item_205",
+            "Item_206",
+            "Item_207",
+            "Item_1128",
+            "NPC_1",
+            "NPC_2",
+            "NPC_3",
+            "NPC_4",
+            "NPC_22",
+        ]
+        .map(String::from),
     );
     v.extend(items::sheets());
     v
@@ -152,7 +164,7 @@ impl Game {
         let mesh_pending = vec![0; world.chunks.len()];
         let surface = surface(&world);
         let spawn_x = world.width / 2;
-        Self {
+        let mut g = Self {
             world,
             scene,
             sim,
@@ -189,7 +201,11 @@ impl Game {
             mesh_pending,
             mesh_queue: Default::default(),
             liquid_acc: 0.0,
-        }
+        };
+        // The guide lives at the spawn point.
+        let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
+        g.mobs.push(Mob::new(Kind::Guide, gx, gy));
+        g
     }
 
     pub fn update(&mut self, input: Option<Input>, dt: f32, time_scale: f32) {
@@ -222,7 +238,7 @@ impl Game {
         self.spawn_acc += dt;
         if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
             self.spawn_acc = 0.0;
-            if self.mobs.len() < MAX_MOBS {
+            if self.mobs.iter().filter(|m| !m.kind.friendly() && m.kind != Kind::EyeBoss).count() < MAX_MOBS {
                 self.try_spawn();
             }
             if self.mobs.iter().any(|m| m.kind == Kind::Zombie) && self.random().is_multiple_of(4) {
@@ -238,12 +254,19 @@ impl Game {
                 m.update(&self.world, near, dt);
             }
             let height = self.world.height as f32 * 16.0;
-            self.mobs.retain(|m| players.iter().any(|p| dist(m, p) < DESPAWN) && m.body.y < height);
+            // The boss leaves at dawn; the guide never leaves.
+            let day = self.time < DAYTIME;
+            self.mobs.retain(|m| {
+                m.kind.friendly()
+                    || (players.iter().any(|p| dist(m, p) < DESPAWN)
+                        && m.body.y < height
+                        && !(day && m.kind == Kind::EyeBoss))
+            });
         }
         if !fight || self.invulnerable > 0.0 {
             return;
         }
-        if let Some(m) = self.mobs.iter().find(|m| m.body.touches(&self.player.body)) {
+        if let Some(m) = self.mobs.iter().find(|m| !m.kind.friendly() && m.body.touches(&self.player.body)) {
             self.hp -= m.kind.damage();
             self.invulnerable = INVULNERABLE;
             self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
@@ -268,7 +291,16 @@ impl Game {
         let open = |y: i64| (1..=3).all(|k| w.in_bounds(x, y - k) && !w.solid(x, y - k) && w.liquid(x, y - k) == 0);
         let Some(y) = (pty - 25..pty + 25).find(|&y| w.solid(x, y) && open(y)) else { return };
         let night = self.time >= DAYTIME;
-        let kind = if night && (r >> 8) % 10 < 6 { Kind::Zombie } else { Kind::Slime };
+        let roll = (r >> 8) % 10;
+        if night && roll < 3 {
+            // Demon eyes come in the air, above the ground found.
+            let air = y - 10;
+            if (0..3).all(|k| w.in_bounds(x, air - k) && !w.solid(x, air - k)) {
+                self.mobs.push(Mob::new(Kind::DemonEye, x as f32 * 16.0 + 8.0, air as f32 * 16.0));
+            }
+            return;
+        }
+        let kind = if night && roll < 7 { Kind::Zombie } else { Kind::Slime };
         self.mobs.push(Mob::new(kind, x as f32 * 16.0 + 8.0, y as f32 * 16.0));
     }
 
@@ -280,6 +312,9 @@ impl Game {
         }
         let Some(i) = self.mobs.iter().position(|m| {
             let b = &m.body;
+            if m.kind.friendly() {
+                return false;
+            }
             wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h
         }) else {
             return false;
@@ -313,11 +348,35 @@ impl Game {
         }
         let m = self.mobs.swap_remove(i);
         self.sfx.push(Sfx::MobKilled);
-        if m.kind == Kind::Slime {
-            let (x, y) = m.body.center();
-            let count = 1 + (self.random() % 2) as u16;
-            self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item: Item::Material(Material::Gel), count });
+        let (x, y) = m.body.center();
+        let r = self.random();
+        let drop = match m.kind {
+            Kind::Slime => Some((Item::Material(Material::Gel), 1 + (r % 2) as u16)),
+            Kind::DemonEye if r.is_multiple_of(2) => Some((Item::Material(Material::Lens), 1)),
+            Kind::EyeBoss => Some((Item::Block(items::DEMONITE_ORE), 30 + (r % 30) as u16)),
+            _ => None,
+        };
+        if let Some((item, count)) = drop {
+            self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count });
         }
+    }
+
+    /// The eye boss, at night and if none is around, from above the player.
+    pub fn summon_boss(&mut self) -> bool {
+        if self.client || self.time < DAYTIME || self.mobs.iter().any(|m| m.kind == Kind::EyeBoss) {
+            return false;
+        }
+        let (px, py) = self.player.center();
+        let side = if self.random().is_multiple_of(2) { -1.0 } else { 1.0 };
+        self.mobs.push(Mob::new(Kind::EyeBoss, px + side * 600.0, py - 400.0));
+        self.inventory.consume();
+        self.sfx.push(Sfx::Roar);
+        true
+    }
+
+    /// The boss's life, 0 to 1, while one is around.
+    pub fn boss_life(&self) -> Option<f32> {
+        self.mobs.iter().find(|m| m.kind == Kind::EyeBoss).map(|m| m.hp.max(0) as f32 / Kind::EyeBoss.max_hp() as f32)
     }
 
     /// Monsters as sent to clients.
@@ -330,6 +389,7 @@ impl Game {
                 y: m.body.y,
                 facing_left: m.facing_left,
                 hurt: m.stun > 0.0,
+                hp: m.hp,
             })
             .collect()
     }
@@ -360,7 +420,7 @@ impl Game {
                 self.mobs = states
                     .iter()
                     .map(|s| {
-                        let kind = if s.kind == Kind::Zombie as u8 { Kind::Zombie } else { Kind::Slime };
+                        let kind = Kind::from_u8(s.kind).unwrap_or(Kind::Slime);
                         let mut m = Mob::new(kind, 0.0, 0.0);
                         // Grounded while the snapshot keeps it at the same height.
                         let old = self.mobs.iter().find(|o| o.kind == kind && (o.body.x - s.x).abs() < 16.0);
@@ -368,6 +428,7 @@ impl Game {
                         m.timer = old.map_or(0.0, |o| o.timer + 1.0 / 60.0);
                         (m.body.x, m.body.y, m.facing_left) = (s.x, s.y, s.facing_left);
                         m.stun = if s.hurt { 0.1 } else { 0.0 };
+                        m.hp = s.hp;
                         m
                     })
                     .collect();
@@ -722,6 +783,10 @@ impl Game {
         }
         let (x, y) = (tx as u32, ty as u32);
         match stack.item {
+            Item::Material(Material::SuspiciousEye) => {
+                self.summon_boss();
+                return;
+            }
             Item::Tool(_) | Item::Material(_) => return,
             Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
@@ -958,12 +1023,28 @@ impl Game {
                     let frame = if b.on_ground { (m.timer * 8.0) as u32 % 3 } else { 2 };
                     ("NPC_3", 38, 48, frame, [1.0; 4])
                 }
+                Kind::DemonEye => ("NPC_2", 38, 24, (m.timer * 6.0) as u32 % 2, [1.0; 4]),
+                Kind::Guide => {
+                    let frame = if !b.on_ground {
+                        1
+                    } else if b.vx != 0.0 {
+                        2 + (m.timer * 10.0) as u32 % 14
+                    } else {
+                        0
+                    };
+                    ("NPC_22", 40, 56, frame, [1.0; 4])
+                }
+                Kind::EyeBoss => {
+                    let frame = (m.timer * 8.0) as u32 % 3 + if m.enraged() { 3 } else { 0 };
+                    ("NPC_4", 110, 166, frame, [1.0; 4])
+                }
             };
             let color = if hurt { [1.0, 0.35, 0.35, 1.0] } else { color };
             match self.sheet(sheet) {
                 Some(s) => {
-                    let mut sp =
-                        Sprite::sheet([cx - w as f32 / 2.0, bottom - h as f32 + 2.0], s, [0, frame * h, w, h], flags);
+                    // Fliers are drawn around their centre, walkers on their feet.
+                    let top = if m.kind.flies() { b.y + b.h / 2.0 - h as f32 / 2.0 } else { bottom - h as f32 + 2.0 };
+                    let mut sp = Sprite::sheet([cx - w as f32 / 2.0, top], s, [0, frame * h, w, h], flags);
                     sp.color = color;
                     out.push(sp);
                 }
@@ -1207,6 +1288,33 @@ mod tests {
     }
 
     #[test]
+    fn guide_is_left_alone_and_the_boss_comes_at_night() {
+        let mut g = game();
+        let (gx, gy) = g.mobs[0].body.center();
+        assert!(!g.attack(gx, gy, false), "the guide cannot be hit");
+        g.update_mobs(0.0, true);
+        assert_eq!(g.hp, MAX_HP, "nor hurts");
+
+        g.inventory.slots[9] = Some(Stack { item: Item::Material(Material::SuspiciousEye), count: 1 });
+        g.inventory.selected = 9;
+        assert!(!g.summon_boss(), "not by day");
+        g.time = 0.8;
+        assert!(g.summon_boss());
+        assert!(g.inventory.slots[9].is_none(), "used up");
+        assert_eq!(g.boss_life(), Some(1.0));
+        let i = g.mobs.iter().position(|m| m.kind == Kind::EyeBoss).unwrap();
+        g.hit_mob(i, Kind::EyeBoss.max_hp(), 0.0);
+        assert_eq!(g.boss_life(), None);
+        assert!(g.drops.iter().any(|d| d.item == Item::Block(items::DEMONITE_ORE) && d.count >= 30));
+        g.time = 0.8;
+        g.mobs.push(Mob::new(Kind::EyeBoss, 0.0, 0.0));
+        g.time = 0.1;
+        g.update_mobs(0.0, false);
+        assert_eq!(g.boss_life(), None, "gone at dawn");
+        assert_eq!(g.mobs[0].kind, Kind::Guide, "the guide stays");
+    }
+
+    #[test]
     fn music_follows_depth_and_time() {
         let mut g = game();
         assert_eq!(g.music(), "Music_1");
@@ -1219,6 +1327,8 @@ mod tests {
     #[test]
     fn monsters_hurt_and_die() {
         let mut g = game();
+        assert_eq!(g.mobs[0].kind, Kind::Guide);
+        g.mobs.clear();
         let (px, py) = g.player.center();
         g.mobs.push(Mob::new(Kind::Slime, px, py + 21.0));
         g.update_mobs(0.0, true);

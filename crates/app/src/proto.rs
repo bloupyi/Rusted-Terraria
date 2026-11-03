@@ -30,9 +30,8 @@ pub fn important_table() -> Vec<bool> {
     (0..TILE_TYPES).map(|t| IMPORTANT[t / 8] & (1 << (t % 8)) != 0).collect()
 }
 
-/// Wire ids of the monsters.
-const NPC_SLIME: i16 = 1;
-const NPC_ZOMBIE: i16 = 3;
+/// Wire ids of the monsters, in `Kind` order.
+const NPC_IDS: [i16; 5] = [1, 3, 2, 22, 4];
 
 pub mod id {
     pub const CONNECT: u8 = 1;
@@ -482,9 +481,10 @@ pub fn decode(frame: &[u8], important: &[bool]) -> Option<Packet> {
             let _v = (r.f32()?, r.f32()?);
             let _target = r.u16()?;
             let (f0, f1) = (r.u8()?, r.u8()?);
-            for bit in [0x04, 0x08, 0x10, 0x20] {
+            let mut ai = [0.0; 4];
+            for (i, bit) in [0x04, 0x08, 0x10, 0x20].into_iter().enumerate() {
                 if f0 & bit != 0 {
-                    r.f32()?;
+                    ai[i] = r.f32()?;
                 }
             }
             let net_id = r.i16()?;
@@ -494,17 +494,24 @@ pub fn decode(frame: &[u8], important: &[bool]) -> Option<Packet> {
             if f1 & 0x04 != 0 {
                 r.f32()?;
             }
-            // Full life when the field is left out.
-            let hurt = f0 & 0x80 == 0;
-            let kind = match net_id {
-                NPC_SLIME => Some(world::mob::Kind::Slime as u8),
-                NPC_ZOMBIE => Some(world::mob::Kind::Zombie as u8),
-                _ => None,
+            let kind = NPC_IDS.iter().position(|&n| n == net_id).map(|k| k as u8);
+            // Life is left out when full.
+            let hp = if f0 & 0x80 != 0 {
+                kind.and_then(world::mob::Kind::from_u8).map_or(0, |k| k.max_hp())
+            } else {
+                match r.u8()? {
+                    1 => r.u8()? as i8 as i32,
+                    2 => r.i16()? as i32,
+                    _ => r.i32()?,
+                }
             };
             if index < 0 {
                 return None;
             }
-            Packet::Npc(index as u16, kind.map(|kind| MobState { kind, x, y, facing_left: f0 & 0x40 == 0, hurt }))
+            Packet::Npc(
+                index as u16,
+                kind.map(|kind| MobState { kind, x, y, facing_left: f0 & 0x40 == 0, hurt: ai[0] != 0.0, hp }),
+            )
         }
         id::STRIKE => {
             let index = r.i16()?;
@@ -528,19 +535,14 @@ pub fn decode(frame: &[u8], important: &[bool]) -> Option<Packet> {
 /// A monster slot; `None` frees it.
 pub fn npc(index: u16, m: Option<&MobState>) -> Vec<u8> {
     let mut o = W::new(id::NPC);
-    let (x, y, right, hurt, net_id) = match m {
-        Some(m) => {
-            let net_id = if m.kind == world::mob::Kind::Zombie as u8 { NPC_ZOMBIE } else { NPC_SLIME };
-            (m.x, m.y, !m.facing_left, m.hurt, net_id)
-        }
-        None => (0.0, 0.0, false, false, 0),
+    let (x, y, right, hurt, hp, net_id) = match m {
+        Some(m) => (m.x, m.y, !m.facing_left, m.hurt, m.hp, NPC_IDS.get(m.kind as usize).copied().unwrap_or(1)),
+        None => (0.0, 0.0, false, false, 0, 0),
     };
+    // The first AI value carries the hit flash.
     o.i16(index as i16).f32(x).f32(y).f32(0.0).f32(0.0).u16(255);
-    o.u8(if right { 0x40 } else { 0 } | if hurt { 0 } else { 0x80 }).u8(0).i16(net_id);
-    if hurt {
-        // Life as a one-byte field: hurt but alive.
-        o.u8(1).u8(1);
-    }
+    o.u8(if right { 0x40 } else { 0 } | 0x04).u8(0).f32(hurt as u8 as f32).i16(net_id);
+    o.u8(4).i32(hp);
     o.done()
 }
 
@@ -753,7 +755,8 @@ mod tests {
                 (_, got) => assert_eq!(got, Some(Packet::Msg(m.clone()))),
             }
         }
-        let s = MobState { kind: world::mob::Kind::Zombie as u8, x: 5.0, y: 6.0, facing_left: false, hurt: true };
+        let s =
+            MobState { kind: world::mob::Kind::EyeBoss as u8, x: 5.0, y: 6.0, facing_left: false, hurt: true, hp: 700 };
         let f = encode(&Msg::Mobs(vec![s, MobState { hurt: false, facing_left: true, ..s }]));
         assert_eq!(decode(body(&f[0]), &important), Some(Packet::Npc(0, Some(s))));
         assert_eq!(
