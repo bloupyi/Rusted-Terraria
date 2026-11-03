@@ -10,6 +10,8 @@ use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
 pub mod light;
+pub mod liquid;
+pub mod player;
 
 pub use formats::wld::{flags, Liquid, NO_TILE};
 
@@ -70,7 +72,15 @@ pub struct World {
     pub chunks_y: u32,
     /// Row-major: `cy * chunks_x + cx`.
     pub chunks: Vec<Box<Chunk>>,
+    /// Per chunk, `DIRTY_*` bits set by edits since the last `take_dirty`.
+    dirty: Vec<u8>,
+    dirty_list: Vec<u32>,
 }
+
+/// Blocks or walls changed: the chunk's tile mesh and light need rebuilding.
+pub const DIRTY_TILES: u8 = 1;
+/// Only liquids changed.
+pub const DIRTY_LIQUID: u8 = 2;
 
 impl World {
     pub fn load(path: &Path) -> Result<Self, formats::Error> {
@@ -93,7 +103,8 @@ impl World {
                 y += take;
             }
         })?;
-        Ok(Self { header, width, height, chunks_x, chunks_y, chunks })
+        let dirty = vec![0; chunks.len()];
+        Ok(Self { header, width, height, chunks_x, chunks_y, chunks, dirty, dirty_list: Vec::new() })
     }
 
     #[inline]
@@ -127,6 +138,82 @@ impl World {
         }
         let (x, y) = (x as u32, y as u32);
         self.chunk(x / CHUNK, y / CHUNK).liquid[Chunk::index(x % CHUNK, y % CHUNK)]
+    }
+
+    #[inline]
+    pub fn in_bounds(&self, x: i64, y: i64) -> bool {
+        x >= 0 && y >= 0 && x < self.width as i64 && y < self.height as i64
+    }
+
+    /// Chunk and index of an in-bounds tile.
+    #[inline]
+    pub fn cell(&self, x: u32, y: u32) -> (&Chunk, usize) {
+        (self.chunk(x / CHUNK, y / CHUNK), Chunk::index(x % CHUNK, y % CHUNK))
+    }
+
+    #[inline]
+    fn cell_mut(&mut self, x: u32, y: u32) -> (&mut Chunk, usize) {
+        let ci = ((y / CHUNK) * self.chunks_x + x / CHUNK) as usize;
+        (&mut self.chunks[ci], Chunk::index(x % CHUNK, y % CHUNK))
+    }
+
+    fn mark(&mut self, x: u32, y: u32, bits: u8) {
+        let ci = (y / CHUNK) * self.chunks_x + x / CHUNK;
+        let d = &mut self.dirty[ci as usize];
+        if *d == 0 {
+            self.dirty_list.push(ci);
+        }
+        *d |= bits;
+    }
+
+    /// Block framing reads neighbours, so edits on a chunk edge dirty the next chunk too.
+    fn mark_around(&mut self, x: u32, y: u32, bits: u8) {
+        for (dx, dy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let (nx, ny) = (x as i64 + dx, y as i64 + dy);
+            if self.in_bounds(nx, ny) {
+                self.mark(nx as u32, ny as u32, bits);
+            }
+        }
+    }
+
+    pub fn set_tile(&mut self, x: u32, y: u32, tile: u16, frame_x: i16, frame_y: i16) {
+        let (c, i) = self.cell_mut(x, y);
+        (c.tile[i], c.frame_x[i], c.frame_y[i]) = (tile, frame_x, frame_y);
+        self.mark_around(x, y, DIRTY_TILES);
+    }
+
+    pub fn set_wall(&mut self, x: u32, y: u32, wall: u16) {
+        let (c, i) = self.cell_mut(x, y);
+        c.wall[i] = wall;
+        self.mark_around(x, y, DIRTY_TILES);
+    }
+
+    pub fn set_liquid(&mut self, x: u32, y: u32, amount: u8, kind: u8) {
+        let (c, i) = self.cell_mut(x, y);
+        (c.liquid[i], c.liquid_kind[i]) = (amount, if amount == 0 { 0 } else { kind });
+        // The liquid mesh reads the cell above to fill full cells.
+        self.mark(x, y, DIRTY_LIQUID);
+        if y + 1 < self.height {
+            self.mark(x, y + 1, DIRTY_LIQUID);
+        }
+    }
+
+    /// Chunks edited since the last call, as `(cx, cy, DIRTY_* bits)`.
+    pub fn take_dirty(&mut self) -> Vec<(u32, u32, u8)> {
+        let list = std::mem::take(&mut self.dirty_list);
+        list.into_iter()
+            .map(|ci| {
+                let bits = std::mem::take(&mut self.dirty[ci as usize]);
+                (ci % self.chunks_x, ci / self.chunks_x, bits)
+            })
+            .collect()
+    }
+
+    /// Solid for collisions, liquids and light: a tile that is not frame-important.
+    #[inline]
+    pub fn solid(&self, x: i64, y: i64) -> bool {
+        let t = self.tile(x, y);
+        t != NO_TILE && !self.header.frame_important.get(t as usize).copied().unwrap_or(false)
     }
 
     /// Distinct tile and wall types present, for loading only the sheets needed.
