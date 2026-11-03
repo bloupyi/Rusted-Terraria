@@ -120,6 +120,15 @@ impl World {
         self.chunk(x / CHUNK, y / CHUNK).wall[Chunk::index(x % CHUNK, y % CHUNK)]
     }
 
+    #[inline]
+    pub fn liquid(&self, x: i64, y: i64) -> u8 {
+        if x < 0 || y < 0 || x >= self.width as i64 || y >= self.height as i64 {
+            return 0;
+        }
+        let (x, y) = (x as u32, y as u32);
+        self.chunk(x / CHUNK, y / CHUNK).liquid[Chunk::index(x % CHUNK, y % CHUNK)]
+    }
+
     /// Distinct tile and wall types present, for loading only the sheets needed.
     pub fn used_types(&self) -> (Vec<u16>, Vec<u16>) {
         let (tiles, walls) = self

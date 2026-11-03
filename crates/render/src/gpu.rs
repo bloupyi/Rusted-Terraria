@@ -36,8 +36,8 @@ struct CameraUniform {
 
 struct Row {
     buffer: Option<wgpu::Buffer>,
-    wall_off: Vec<u32>,
-    tile_off: Vec<u32>,
+    /// Walls, liquids, tiles.
+    offsets: [Vec<u32>; 3],
 }
 
 pub struct Renderer {
@@ -250,8 +250,7 @@ impl Renderer {
                         usage: wgpu::BufferUsages::VERTEX,
                     })
                 }),
-                wall_off: r.wall_off,
-                tile_off: r.tile_off,
+                offsets: [r.wall_off, r.liquid_off, r.tile_off],
             })
             .collect();
 
@@ -336,10 +335,10 @@ impl Renderer {
                 let hi = ((cam.center + half) / CHUNK_PX).ceil();
                 let (x0, x1) = (lo.x as usize, (hi.x as usize).min(self.chunks_x as usize));
                 let (y0, y1) = (lo.y as usize, (hi.y as usize).min(self.rows.len()));
-                // Walls of all visible rows first, then tiles, so tiles cover wall overhang.
-                for walls in [true, false] {
+                // Each layer over all visible rows before the next, so tiles cover wall overhang.
+                for layer in 0..3 {
                     for row in self.rows.get(y0..y1).unwrap_or(&[]) {
-                        let off = if walls { &row.wall_off } else { &row.tile_off };
+                        let off = &row.offsets[layer];
                         let Some(buf) = &row.buffer else { continue };
                         if x0 >= x1 || off[x0] == off[x1] {
                             continue;

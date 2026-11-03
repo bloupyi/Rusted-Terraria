@@ -19,6 +19,8 @@ struct VOut {
     @location(1) @interpolate(flat) layer: u32,
     // World position in tiles.
     @location(2) tile: vec2<f32>,
+    // Liquid kind + 1, 0 for sheets.
+    @location(3) @interpolate(flat) liquid: u32,
 }
 
 fn corner(vi: u32) -> vec2<f32> {
@@ -28,20 +30,44 @@ fn corner(vi: u32) -> vec2<f32> {
 @vertex
 fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32) -> VOut {
     let c = corner(vi);
-    let wall = (a >> 30u) != 0u;
+    var out: VOut;
+    let tile = vec2<f32>(f32(a & 0x7fffu), f32((a >> 15u) & 0x7fffu));
+    if (a >> 31u) != 0u {
+        // Liquid: fills the bottom `amount / 255` of its tile.
+        let top = 1.0 - f32(b & 0xffu) / 255.0;
+        let local = vec2<f32>(c.x, mix(top, 1.0, c.y));
+        out.pos = vec4<f32>((tile + local) * 16.0 * cam.scale + cam.offset, 0.0, 1.0);
+        out.tile = tile + local;
+        out.liquid = ((b >> 8u) & 0xffu) + 1u;
+        return out;
+    }
+    let wall = ((a >> 30u) & 1u) != 0u;
     let size = select(16.0, 32.0, wall);
     let pad = select(0.0, -8.0, wall);
-    let tile = vec2<f32>(f32(a & 0x7fffu), f32((a >> 15u) & 0x7fffu));
-    var out: VOut;
     out.pos = vec4<f32>((tile * 16.0 + pad + c * size) * cam.scale + cam.offset, 0.0, 1.0);
     out.texel = vec2<f32>(f32(b & 0xfffu), f32((b >> 12u) & 0xfffu)) + c * size;
     out.layer = b >> 24u;
     out.tile = tile + (pad + c * size) / 16.0;
+    out.liquid = 0u;
     return out;
+}
+
+// Premultiplied flat colours. TODO: liquid sheets and animated surface.
+fn liquid_color(kind: u32) -> vec4<f32> {
+    switch kind {
+        case 1u: { return vec4<f32>(0.95, 0.40, 0.08, 1.0) * 0.95; }
+        case 2u: { return vec4<f32>(0.95, 0.65, 0.10, 1.0) * 0.80; }
+        case 3u: { return vec4<f32>(0.80, 0.60, 1.00, 1.0) * 0.65; }
+        default: { return vec4<f32>(0.15, 0.35, 0.90, 1.0) * 0.55; }
+    }
 }
 
 @fragment
 fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
+    if in.liquid != 0u {
+        let c = liquid_color(in.liquid - 1u);
+        return vec4<f32>(c.rgb * smooth_light(in.tile), c.a);
+    }
     let c = textureLoad(atlas, vec2<i32>(floor(in.texel)), i32(in.layer), 0);
     if c.a == 0.0 {
         discard;
@@ -79,6 +105,7 @@ fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) page: u32) ->
     out.texel = c * PAGE;
     out.layer = page;
     out.tile = vec2<f32>(0.0);
+    out.liquid = 0u;
     return out;
 }
 
