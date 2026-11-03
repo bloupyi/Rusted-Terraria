@@ -1,0 +1,29 @@
+[workspace]
+resolver = "2"
+members = ["crates/formats", "crates/world", "crates/render", "crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.87"
+license = "MIT"
+
+[workspace.dependencies]
+formats = { path = "crates/formats" }
+world = { path = "crates/world" }
+render = { path = "crates/render" }
+bytemuck = { version = "1.25", features = ["derive"] }
+glam = "0.34"
+lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
+lzxd = "0.2.7"
+pollster = "1.0"
+rayon = "1.12"
+wgpu = "30"
+winit = "0.30.13"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+
+[profile.dev.package."*"]
+opt-level = 2
