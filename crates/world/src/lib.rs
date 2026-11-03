@@ -231,20 +231,38 @@ impl World {
     /// walls, liquids, paint and flags, no other world data.
     pub fn to_wld(&self) -> Vec<u8> {
         formats::synth::write_world(&self.header.name, self.width, self.height, &self.header.frame_important, |x, y| {
-            let (c, i) = self.cell(x, y);
-            formats::wld::Tile {
-                tile: c.tile[i],
-                frame_x: c.frame_x[i],
-                frame_y: c.frame_y[i],
-                tile_paint: c.tile_paint[i],
-                wall: c.wall[i],
-                wall_paint: c.wall_paint[i],
-                liquid: c.liquid[i],
-                liquid_kind: [Liquid::Water, Liquid::Lava, Liquid::Honey, Liquid::Shimmer]
-                    [c.liquid_kind[i] as usize & 3],
-                flags: c.flags[i],
-            }
+            self.cell_data(x, y)
         })
+    }
+
+    /// Everything stored for an in-bounds tile.
+    pub fn cell_data(&self, x: u32, y: u32) -> formats::wld::Tile {
+        let (c, i) = self.cell(x, y);
+        formats::wld::Tile {
+            tile: c.tile[i],
+            frame_x: c.frame_x[i],
+            frame_y: c.frame_y[i],
+            tile_paint: c.tile_paint[i],
+            wall: c.wall[i],
+            wall_paint: c.wall_paint[i],
+            liquid: c.liquid[i],
+            liquid_kind: [Liquid::Water, Liquid::Lava, Liquid::Honey, Liquid::Shimmer][c.liquid_kind[i] as usize & 3],
+            flags: c.flags[i],
+        }
+    }
+
+    /// Replaces an in-bounds tile whole.
+    pub fn set_cell(&mut self, x: u32, y: u32, t: &formats::wld::Tile) {
+        self.put_cell(x, y, t);
+        self.mark_around(x, y, DIRTY_TILES | DIRTY_LIQUID);
+    }
+
+    /// [`World::set_cell`] without marking chunks, for filling a world before its scene is built.
+    pub fn put_cell(&mut self, x: u32, y: u32, t: &formats::wld::Tile) {
+        let (c, i) = self.cell_mut(x, y);
+        (c.tile[i], c.frame_x[i], c.frame_y[i], c.tile_paint[i]) = (t.tile, t.frame_x, t.frame_y, t.tile_paint);
+        (c.wall[i], c.wall_paint[i], c.flags[i]) = (t.wall, t.wall_paint, t.flags);
+        (c.liquid[i], c.liquid_kind[i]) = (t.liquid, if t.liquid == 0 { 0 } else { t.liquid_kind as u8 });
     }
 
     /// Distinct tile and wall types present, for loading only the sheets needed.

@@ -1,21 +1,32 @@
-//! Multiplayer over TCP with our own messages. The host owns the world and the
-//! monsters: a joining client gets the world as a `.wld`, then players, edits
-//! and monsters are kept in step by small messages.
+//! Multiplayer over TCP with Terraria's packets (see `proto`). The host owns
+//! the world and the monsters: a joining client goes through the usual
+//! greeting, gets the world in sections, then players, edits and monsters are
+//! kept in step.
 //!
-//! Frames are `len: u32` then `type: u8` and a little-endian payload. Each
-//! connection has a reader thread feeding one inbox and a writer thread fed by
-//! a channel, so a large world upload never blocks the frame.
+//! Each connection has a reader thread feeding one inbox and a writer thread
+//! fed by a channel, so streaming a large world never blocks the frame.
 
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::Arc;
+use std::time::Duration;
+
+use formats::wld::Tile;
+use world::World;
+
+use crate::proto::{self, Packet};
 
 pub const DEFAULT_PORT: u16 = 7777;
-/// Host's own player id; clients get 1, 2...
+/// Host's own player slot; clients get 1, 2...
 pub const HOST_ID: u8 = 0;
+const JOIN_TIMEOUT: Duration = Duration::from_secs(30);
+/// Monster slots a client keeps track of.
+const MAX_MOBS: usize = 1000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Msg {
+    /// Host side only: the world (`.wld` bytes) for a client that asked for it.
     Welcome {
         id: u8,
         world: Vec<u8>,
@@ -28,12 +39,11 @@ pub enum Msg {
         vy: f32,
         facing_left: bool,
     },
+    /// The whole tile after an edit: block, frame, wall, liquid.
     Tile {
         x: u32,
         y: u32,
-        tile: u16,
-        fx: i16,
-        fy: i16,
+        cell: Tile,
     },
     Liquid {
         x: u32,
@@ -47,11 +57,6 @@ pub enum Msg {
     Hit {
         index: u16,
         damage: u16,
-    },
-    Wall {
-        x: u32,
-        y: u32,
-        wall: u16,
     },
     Leave {
         id: u8,
@@ -69,129 +74,10 @@ pub struct MobState {
     pub hurt: bool,
 }
 
-struct Out(Vec<u8>);
-
-impl Out {
-    fn u8(&mut self, v: u8) -> &mut Self {
-        self.0.push(v);
-        self
-    }
-    fn u16(&mut self, v: u16) -> &mut Self {
-        self.0.extend_from_slice(&v.to_le_bytes());
-        self
-    }
-    fn u32(&mut self, v: u32) -> &mut Self {
-        self.0.extend_from_slice(&v.to_le_bytes());
-        self
-    }
-    fn f32(&mut self, v: f32) -> &mut Self {
-        self.0.extend_from_slice(&v.to_le_bytes());
-        self
-    }
-}
-
-struct In<'a>(&'a [u8]);
-
-impl In<'_> {
-    fn take<const N: usize>(&mut self) -> Option<[u8; N]> {
-        let (a, rest) = self.0.split_first_chunk::<N>()?;
-        self.0 = rest;
-        Some(*a)
-    }
-    fn u8(&mut self) -> Option<u8> {
-        self.take::<1>().map(|b| b[0])
-    }
-    fn u16(&mut self) -> Option<u16> {
-        self.take().map(u16::from_le_bytes)
-    }
-    fn u32(&mut self) -> Option<u32> {
-        self.take().map(u32::from_le_bytes)
-    }
-    fn f32(&mut self) -> Option<f32> {
-        self.take().map(f32::from_le_bytes)
-    }
-}
-
-impl Msg {
-    /// The whole frame, length prefix included.
-    pub fn encode(&self) -> Vec<u8> {
-        let mut o = Out(vec![0; 4]);
-        match self {
-            Msg::Welcome { id, world } => {
-                o.u8(0).u8(*id).0.extend_from_slice(world);
-            }
-            Msg::Player { id, x, y, vx, vy, facing_left } => {
-                o.u8(1).u8(*id).f32(*x).f32(*y).f32(*vx).f32(*vy).u8(*facing_left as u8);
-            }
-            Msg::Tile { x, y, tile, fx, fy } => {
-                o.u8(2).u32(*x).u32(*y).u16(*tile).u16(*fx as u16).u16(*fy as u16);
-            }
-            Msg::Liquid { x, y, amount, kind } => {
-                o.u8(3).u32(*x).u32(*y).u8(*amount).u8(*kind);
-            }
-            Msg::Mobs(mobs) => {
-                o.u8(4).u16(mobs.len() as u16);
-                for m in mobs {
-                    o.u8(m.kind).f32(m.x).f32(m.y).u8(m.facing_left as u8 | (m.hurt as u8) << 1);
-                }
-            }
-            Msg::Hit { index, damage } => {
-                o.u8(5).u16(*index).u16(*damage);
-            }
-            Msg::Wall { x, y, wall } => {
-                o.u8(8).u32(*x).u32(*y).u16(*wall);
-            }
-            Msg::Leave { id } => {
-                o.u8(6).u8(*id);
-            }
-            Msg::Time(t) => {
-                o.u8(7).f32(*t);
-            }
-        }
-        let len = (o.0.len() - 4) as u32;
-        o.0[..4].copy_from_slice(&len.to_le_bytes());
-        o.0
-    }
-
-    /// One frame without its length prefix.
-    pub fn decode(frame: &[u8]) -> Option<Msg> {
-        let mut i = In(frame);
-        Some(match i.u8()? {
-            0 => {
-                let id = i.u8()?;
-                Msg::Welcome { id, world: i.0.to_vec() }
-            }
-            1 => Msg::Player {
-                id: i.u8()?,
-                x: i.f32()?,
-                y: i.f32()?,
-                vx: i.f32()?,
-                vy: i.f32()?,
-                facing_left: i.u8()? != 0,
-            },
-            2 => Msg::Tile { x: i.u32()?, y: i.u32()?, tile: i.u16()?, fx: i.u16()? as i16, fy: i.u16()? as i16 },
-            3 => Msg::Liquid { x: i.u32()?, y: i.u32()?, amount: i.u8()?, kind: i.u8()? },
-            4 => {
-                let n = i.u16()?;
-                let mut mobs = Vec::with_capacity(n as usize);
-                for _ in 0..n {
-                    let (kind, x, y, bits) = (i.u8()?, i.f32()?, i.f32()?, i.u8()?);
-                    mobs.push(MobState { kind, x, y, facing_left: bits & 1 != 0, hurt: bits & 2 != 0 });
-                }
-                Msg::Mobs(mobs)
-            }
-            5 => Msg::Hit { index: i.u16()?, damage: i.u16()? },
-            8 => Msg::Wall { x: i.u32()?, y: i.u32()?, wall: i.u16()? },
-            6 => Msg::Leave { id: i.u8()? },
-            7 => Msg::Time(i.f32()?),
-            _ => return None,
-        })
-    }
-}
-
 enum Event {
     Joined(u8, TcpStream),
-    Msg(u8, Msg),
+    Frame(u8, Vec<u8>),
+    Closed(u8),
 }
 
 struct Peer {
@@ -199,6 +85,8 @@ struct Peer {
     out: Sender<Vec<u8>>,
     /// Kept to shut the socket down, which ends the reader thread.
     stream: TcpStream,
+    /// The world handed over with `Welcome`, streamed when tiles are asked for.
+    world: Option<Arc<Vec<u8>>>,
 }
 
 impl Drop for Peer {
@@ -213,24 +101,29 @@ pub struct Net {
     peers: Vec<Peer>,
     events: Receiver<Event>,
     tx: Sender<Event>,
-    /// Joined clients waiting for the world, taken by [`Net::joined`].
+    /// Clients that asked for the world, taken by [`Net::joined`].
     joined: Vec<u8>,
+    important: Vec<bool>,
+    /// Host: monster slots used by the last snapshot sent.
+    mob_slots: usize,
+    /// Client: monster slots as received, and whether they changed.
+    mobs: Vec<Option<MobState>>,
+    mobs_changed: bool,
+    /// Messages that came during the greeting.
+    backlog: Vec<(u8, Msg)>,
 }
 
 fn reader(mut stream: TcpStream, id: u8, tx: Sender<Event>) {
     std::thread::spawn(move || {
-        let mut len = [0; 4];
+        let mut len = [0; 2];
         while stream.read_exact(&mut len).is_ok() {
-            let mut frame = vec![0; u32::from_le_bytes(len) as usize];
-            if stream.read_exact(&mut frame).is_err() {
-                break;
-            }
-            let Some(m) = Msg::decode(&frame) else { break };
-            if tx.send(Event::Msg(id, m)).is_err() {
+            let Some(n) = (u16::from_le_bytes(len) as usize).checked_sub(2) else { break };
+            let mut frame = vec![0; n];
+            if stream.read_exact(&mut frame).is_err() || tx.send(Event::Frame(id, frame)).is_err() {
                 break;
             }
         }
-        let _ = tx.send(Event::Msg(id, Msg::Leave { id }));
+        let _ = tx.send(Event::Closed(id));
     });
 }
 
@@ -249,10 +142,26 @@ fn writer(mut stream: TcpStream) -> Sender<Vec<u8>> {
 fn peer(stream: TcpStream, id: u8, tx: Sender<Event>) -> std::io::Result<Peer> {
     stream.set_nodelay(true)?;
     reader(stream.try_clone()?, id, tx);
-    Ok(Peer { id, out: writer(stream.try_clone()?), stream })
+    Ok(Peer { id, out: writer(stream.try_clone()?), stream, world: None })
 }
 
 impl Net {
+    fn new(host: bool, events: Receiver<Event>, tx: Sender<Event>) -> Self {
+        Self {
+            id: HOST_ID,
+            host,
+            peers: Vec::new(),
+            events,
+            tx,
+            joined: Vec::new(),
+            important: proto::important_table(),
+            mob_slots: 0,
+            mobs: Vec::new(),
+            mobs_changed: false,
+            backlog: Vec::new(),
+        }
+    }
+
     pub fn host(port: u16) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("0.0.0.0", port))?;
         let (tx, events) = channel();
@@ -264,66 +173,182 @@ impl Net {
                 }
             }
         });
-        Ok(Self { id: HOST_ID, host: true, peers: Vec::new(), events, tx, joined: Vec::new() })
+        Ok(Self::new(true, events, tx))
     }
 
-    /// Connects and waits for the world. Returns the client and the `.wld` bytes.
-    pub fn join(addr: &str) -> std::io::Result<(Self, Vec<u8>)> {
+    /// Connects, greets the server and receives the whole world.
+    pub fn join(addr: &str) -> std::io::Result<(Self, World)> {
         let stream = TcpStream::connect(addr)?;
         let (tx, events) = channel();
         let p = peer(stream, HOST_ID, tx.clone())?;
-        let bad = || std::io::Error::other("host closed before sending the world");
+        let _ = p.out.send(proto::connect());
+        let mut net = Self::new(false, events, tx);
+        let err = |s: &str| std::io::Error::other(s.to_string());
+        let mut world: Option<World> = None;
         loop {
-            match events.recv().map_err(|_| bad())? {
-                Event::Msg(_, Msg::Welcome { id, world }) => {
-                    return Ok((Self { id, host: false, peers: vec![p], events, tx, joined: Vec::new() }, world));
+            let frame = match net.events.recv_timeout(JOIN_TIMEOUT) {
+                Ok(Event::Frame(_, f)) => f,
+                Ok(Event::Closed(_)) => return Err(err("the server closed the connection")),
+                Ok(Event::Joined(..)) => continue,
+                Err(_) => return Err(err("no answer from the server")),
+            };
+            match proto::decode(&frame, &net.important) {
+                Some(Packet::Slot(id)) => {
+                    net.id = id;
+                    for f in proto::greeting(id) {
+                        let _ = p.out.send(f);
+                    }
                 }
-                Event::Msg(_, Msg::Leave { .. }) => return Err(bad()),
-                _ => {}
+                Some(Packet::Disconnect(reason)) => return Err(err(&format!("refused: {reason}"))),
+                Some(Packet::WorldInfo(info)) if world.is_none() => {
+                    let empty =
+                        formats::synth::write_world(&info.name, info.width, info.height, &net.important, |_, _| {
+                            Tile::default()
+                        });
+                    world = Some(World::parse(&empty).map_err(|e| err(&e.to_string()))?);
+                    net.backlog.push((HOST_ID, Msg::Time(info.time)));
+                    let _ = p.out.send(proto::request_tiles());
+                }
+                Some(Packet::Section { x, y, w, h, tiles }) => {
+                    let Some(world) = world.as_mut() else { continue };
+                    for (i, t) in tiles.iter().enumerate() {
+                        let (tx, ty) = (x + i as u32 % w, y + i as u32 / w);
+                        if i as u32 / w < h && world.in_bounds(tx as i64, ty as i64) {
+                            world.put_cell(tx, ty, t);
+                        }
+                    }
+                }
+                Some(Packet::Complete) => {
+                    let Some(world) = world else { return Err(err("tiles came before the world info")) };
+                    let _ = p.out.send(proto::spawn(net.id));
+                    net.peers.push(p);
+                    return Ok((net, world));
+                }
+                Some(packet) => {
+                    let mut msgs = std::mem::take(&mut net.backlog);
+                    net.client_packet(packet, &mut msgs);
+                    net.backlog = msgs;
+                }
+                None => {}
             }
+        }
+    }
+
+    fn client_packet(&mut self, packet: Packet, msgs: &mut Vec<(u8, Msg)>) {
+        match packet {
+            Packet::Msg(m) => msgs.push((HOST_ID, m)),
+            Packet::Npc(i, s) if (i as usize) < MAX_MOBS => {
+                let i = i as usize;
+                if self.mobs.len() <= i {
+                    self.mobs.resize(i + 1, None);
+                }
+                self.mobs[i] = s;
+                self.mobs_changed = true;
+            }
+            _ => {}
+        }
+    }
+
+    fn host_packet(&mut self, from: u8, packet: Packet, msgs: &mut Vec<(u8, Msg)>) {
+        let Some(p) = self.peers.iter().find(|p| p.id == from) else { return };
+        match packet {
+            Packet::Connect(v) if v == format!("Terraria{}", proto::RELEASE) => {
+                let _ = p.out.send(proto::slot(from));
+            }
+            Packet::Connect(_) => {
+                let _ = p.out.send(proto::disconnect("You are not using the same version as this server."));
+            }
+            Packet::RequestWorld => self.joined.push(from),
+            Packet::RequestTiles => {
+                if let Some(wld) = p.world.clone() {
+                    let out = p.out.clone();
+                    std::thread::spawn(move || {
+                        let Ok(world) = World::parse(&wld) else { return };
+                        for f in proto::world_frames(&world) {
+                            if out.send(f).is_err() {
+                                break;
+                            }
+                        }
+                    });
+                }
+            }
+            // Players speak only for themselves.
+            Packet::Msg(Msg::Player { x, y, vx, vy, facing_left, .. }) => {
+                msgs.push((from, Msg::Player { id: from, x, y, vx, vy, facing_left }))
+            }
+            Packet::Msg(Msg::Leave { .. }) => msgs.push((from, Msg::Leave { id: from })),
+            Packet::Msg(Msg::Mobs(_) | Msg::Time(_) | Msg::Welcome { .. }) => {}
+            Packet::Msg(m) => msgs.push((from, m)),
+            _ => {}
         }
     }
 
     /// Messages received since the last call, by sender id.
     pub fn poll(&mut self) -> Vec<(u8, Msg)> {
-        let mut msgs = Vec::new();
+        let mut msgs = std::mem::take(&mut self.backlog);
         while let Ok(e) = self.events.try_recv() {
             match e {
                 Event::Joined(id, stream) => {
-                    // A failing socket shows up as a `Leave` from its reader.
+                    // A failing socket shows up as `Closed` from its reader.
                     if let Ok(p) = peer(stream, id, self.tx.clone()) {
                         self.peers.push(p);
-                        self.joined.push(id);
                     }
                 }
-                Event::Msg(id, m) => {
-                    if let Msg::Leave { .. } = m {
-                        self.peers.retain(|p| p.id != id);
+                Event::Frame(id, frame) => {
+                    let Some(packet) = proto::decode(&frame, &self.important) else { continue };
+                    if self.host {
+                        self.host_packet(id, packet, &mut msgs);
+                    } else {
+                        self.client_packet(packet, &mut msgs);
                     }
-                    msgs.push((id, m));
+                }
+                Event::Closed(id) => {
+                    self.peers.retain(|p| p.id != id);
+                    msgs.push((id, Msg::Leave { id }));
                 }
             }
+        }
+        if std::mem::take(&mut self.mobs_changed) {
+            msgs.push((HOST_ID, Msg::Mobs(self.mobs.iter().flatten().copied().collect())));
         }
         msgs
     }
 
-    /// Clients that connected since the last call and need a `Welcome`.
+    /// Clients that asked for the world since the last call and need a `Welcome`.
     pub fn joined(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.joined)
     }
 
-    /// To one peer.
-    pub fn send_to(&self, id: u8, m: &Msg) {
-        if let Some(p) = self.peers.iter().find(|p| p.id == id) {
-            let _ = p.out.send(m.encode());
+    fn frames(&mut self, m: &Msg) -> Vec<Vec<u8>> {
+        let mut frames = proto::encode(m);
+        if let Msg::Mobs(mobs) = m {
+            frames.extend((mobs.len()..self.mob_slots).map(|i| proto::npc(i as u16, None)));
+            self.mob_slots = mobs.len();
+        }
+        frames
+    }
+
+    /// To one peer. `Welcome` sends the world info and keeps the world for the sections.
+    pub fn send_to(&mut self, id: u8, m: &Msg) {
+        let frames = self.frames(m);
+        let Some(p) = self.peers.iter_mut().find(|p| p.id == id) else { return };
+        if let Msg::Welcome { world, .. } = m {
+            let Ok(header) = formats::wld::Header::parse(world) else { return };
+            let _ = p.out.send(proto::world_info(&header, 0.0));
+            p.world = Some(Arc::new(world.clone()));
+        }
+        for f in frames {
+            let _ = p.out.send(f);
         }
     }
 
     /// To every peer but `except`.
-    pub fn send(&self, m: &Msg, except: Option<u8>) {
-        let frame = m.encode();
+    pub fn send(&mut self, m: &Msg, except: Option<u8>) {
+        let frames = self.frames(m);
         for p in self.peers.iter().filter(|p| Some(p.id) != except) {
-            let _ = p.out.send(frame.clone());
+            for f in &frames {
+                let _ = p.out.send(f.clone());
+            }
         }
     }
 }
@@ -331,27 +356,18 @@ impl Net {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use formats::wld::NO_TILE;
+    use std::time::Instant;
 
-    #[test]
-    fn messages_round_trip() {
-        let msgs = [
-            Msg::Welcome { id: 3, world: vec![1, 2, 3] },
-            Msg::Player { id: 1, x: 1.5, y: -2.0, vx: 3.0, vy: 4.0, facing_left: true },
-            Msg::Tile { x: 10, y: 20, tile: u16::MAX, fx: -1, fy: 36 },
-            Msg::Liquid { x: 1, y: 2, amount: 200, kind: 1 },
-            Msg::Mobs(vec![MobState { kind: 1, x: 5.0, y: 6.0, facing_left: false, hurt: true }]),
-            Msg::Hit { index: 7, damage: 12 },
-            Msg::Wall { x: 3, y: 4, wall: 0 },
-            Msg::Leave { id: 2 },
-            Msg::Time(0.5),
-        ];
-        for m in msgs {
-            let f = m.encode();
-            assert_eq!(u32::from_le_bytes(f[..4].try_into().unwrap()) as usize, f.len() - 4);
-            assert_eq!(Msg::decode(&f[4..]), Some(m));
+    fn wait<T>(mut f: impl FnMut() -> Option<T>) -> T {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            if let Some(v) = f() {
+                return v;
+            }
+            assert!(Instant::now() < deadline, "timed out");
+            std::thread::sleep(Duration::from_millis(5));
         }
-        assert_eq!(Msg::decode(&[99]), None);
-        assert_eq!(Msg::decode(&[2, 0]), None);
     }
 
     #[test]
@@ -359,36 +375,61 @@ mod tests {
         let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
         let mut host = Net::host(port).unwrap();
         let client = std::thread::spawn(move || Net::join(&format!("127.0.0.1:{port}")).unwrap());
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        let id = loop {
+        let wld = formats::synth::write_world("w", 420, 200, &proto::important_table(), |x, y| Tile {
+            tile: if y > 120 + x % 5 { 1 } else { NO_TILE },
+            wall: (y > 100) as u16 * 2,
+            ..Tile::default()
+        });
+        let id = wait(|| {
             host.poll();
-            if let Some(&id) = host.joined().first() {
-                break id;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
-        host.send_to(id, &Msg::Welcome { id, world: vec![9; 100_000] });
-        let (client, world) = client.join().unwrap();
-        assert_eq!((client.id, world.len()), (1, 100_000));
+            host.joined().first().copied()
+        });
+        host.send_to(id, &Msg::Welcome { id, world: wld.clone() });
+        wait(|| {
+            host.poll();
+            client.is_finished().then_some(())
+        });
+        let (mut client, world) = client.join().unwrap();
+        assert_eq!(client.id, 1);
+        assert_eq!(world.to_wld(), World::parse(&wld).unwrap().to_wld(), "same tiles");
+
         client.send(&Msg::Hit { index: 4, damage: 9 }, None);
-        let got = loop {
-            if let Some(m) = host.poll().into_iter().next() {
-                break m;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
+        let got = wait(|| host.poll().into_iter().find(|(_, m)| matches!(m, Msg::Hit { .. })));
         assert_eq!(got, (1, Msg::Hit { index: 4, damage: 9 }));
+
+        let s = MobState { kind: 0, x: 1.0, y: 2.0, facing_left: true, hurt: false };
+        host.send(&Msg::Mobs(vec![s, s]), None);
+        host.send(&Msg::Mobs(vec![s]), None);
+        let mobs = wait(|| {
+            let mut last = client.poll().into_iter().filter_map(|(_, m)| match m {
+                Msg::Mobs(v) => Some(v),
+                _ => None,
+            });
+            last.next_back().filter(|v| v.len() == 1)
+        });
+        assert_eq!(mobs, vec![s]);
+
         drop(client);
-        let left = loop {
-            if let Some(m) = host.poll().into_iter().next() {
-                break m;
-            }
-            assert!(std::time::Instant::now() < deadline);
-            std::thread::sleep(std::time::Duration::from_millis(5));
-        };
+        let left = wait(|| host.poll().into_iter().find(|(_, m)| matches!(m, Msg::Leave { .. })));
         assert_eq!(left, (1, Msg::Leave { id: 1 }));
         assert!(host.peers.is_empty());
+    }
+
+    #[test]
+    fn wrong_version_is_refused() {
+        let port = TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+        let mut host = Net::host(port).unwrap();
+        let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        s.write_all(&proto::W::new(proto::id::CONNECT).str("Terraria1").done()).unwrap();
+        let mut len = [0; 2];
+        let mut reply = Vec::new();
+        wait(|| {
+            host.poll();
+            s.set_read_timeout(Some(Duration::from_millis(10))).unwrap();
+            s.read_exact(&mut len).ok()?;
+            reply = vec![0; u16::from_le_bytes(len) as usize - 2];
+            s.read_exact(&mut reply).ok()
+        });
+        assert!(matches!(proto::decode(&reply, &[]), Some(Packet::Disconnect(_))));
     }
 }

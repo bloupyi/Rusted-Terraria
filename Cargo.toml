@@ -16,6 +16,7 @@ cpal = "0.18"
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = "0.34"
 lzxd = "0.2.7"
+miniz_oxide = "0.8"
 pollster = "1.0"
 rayon = "1.12"
 wgpu = "30"

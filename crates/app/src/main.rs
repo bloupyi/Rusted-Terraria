@@ -3,6 +3,7 @@ mod game;
 mod inventory;
 mod items;
 mod net;
+mod proto;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -402,12 +403,8 @@ fn main() {
         (Some(addr), _) => {
             let addr = if addr.contains(':') { addr } else { format!("{addr}:{}", net::DEFAULT_PORT) };
             println!("joining {addr}...");
-            let (net, wld) = net::Net::join(&addr).unwrap_or_else(|e| {
+            let (net, world) = net::Net::join(&addr).unwrap_or_else(|e| {
                 eprintln!("{addr}: {e}");
-                std::process::exit(1);
-            });
-            let world = world::World::parse(&wld).unwrap_or_else(|e| {
-                eprintln!("world from {addr}: {e}");
                 std::process::exit(1);
             });
             (world, Some(net))

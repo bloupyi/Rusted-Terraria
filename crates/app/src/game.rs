@@ -348,11 +348,8 @@ impl Game {
                 p.on_ground = vy == 0.0;
                 p.walked = if p.on_ground { p.walked + walked } else { 0.0 };
             }
-            Msg::Tile { x, y, tile, fx, fy } if self.world.in_bounds(x as i64, y as i64) => {
-                if tile != NO_TILE {
-                    self.world.set_liquid(x, y, 0, 0);
-                }
-                self.world.set_tile(x, y, tile, fx, fy);
+            Msg::Tile { x, y, ref cell } if self.world.in_bounds(x as i64, y as i64) => {
+                self.world.set_cell(x, y, cell);
                 self.sim.wake(&self.world, x, y);
             }
             Msg::Liquid { x, y, amount, kind } if self.world.in_bounds(x as i64, y as i64) => {
@@ -378,9 +375,6 @@ impl Game {
             Msg::Hit { index, damage } if !self.client && (index as usize) < self.mobs.len() => {
                 let from_x = self.others.iter().find(|o| o.0 == from).map_or(0.0, |o| o.1.center().0);
                 self.hit_mob(index as usize, damage as i32, from_x);
-            }
-            Msg::Wall { x, y, wall } if self.world.in_bounds(x as i64, y as i64) => {
-                self.world.set_wall(x, y, wall);
             }
             Msg::Leave { id } => self.others.retain(|o| o.0 != id),
             Msg::Time(t) if self.client => self.time = t,
@@ -517,11 +511,15 @@ impl Game {
         self.mining = None;
         if t == NO_TILE {
             self.world.set_wall(tx as u32, ty as u32, 0);
-            self.outbox.push(Msg::Wall { x: tx as u32, y: ty as u32, wall: 0 });
+            self.send_tile(tx as u32, ty as u32);
             self.sfx.push(Sfx::Dig);
         } else {
             self.break_tile(tx, ty, true);
         }
+    }
+
+    fn send_tile(&mut self, x: u32, y: u32) {
+        self.outbox.push(Msg::Tile { x, y, cell: self.world.cell_data(x, y) });
     }
 
     /// Mining progress on a tile, 0 to 1, for the crack overlay.
@@ -549,7 +547,7 @@ impl Game {
         self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
         for &(x, y) in &cells {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
-            self.outbox.push(Msg::Tile { x: x as u32, y: y as u32, tile: NO_TILE, fx: -1, fy: -1 });
+            self.send_tile(x as u32, y as u32);
             self.sim.wake(&self.world, x as u32, y as u32);
         }
         if let Some((item, count)) = item.filter(|_| drop) {
@@ -734,7 +732,7 @@ impl Game {
                 }
                 self.world.set_liquid(x, y, 0, 0);
                 self.world.set_tile(x, y, t, -1, -1);
-                self.outbox.push(Msg::Tile { x, y, tile: t, fx: -1, fy: -1 });
+                self.send_tile(x, y);
             }
             Item::Object(id) => {
                 let tpl = &self.templates[id as usize];
@@ -762,7 +760,7 @@ impl Game {
                 for (cx, cy, fx, fy) in cells {
                     self.world.set_liquid(cx as u32, cy as u32, 0, 0);
                     self.world.set_tile(cx as u32, cy as u32, tile, fx, fy);
-                    self.outbox.push(Msg::Tile { x: cx as u32, y: cy as u32, tile, fx, fy });
+                    self.send_tile(cx as u32, cy as u32);
                     self.sim.wake(&self.world, cx as u32, cy as u32);
                 }
             }

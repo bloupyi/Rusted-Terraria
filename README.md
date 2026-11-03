@@ -131,13 +131,17 @@ chaque cue `Music_N`, la banque d'ondes `Wave Bank.xwb` est lue entree par entre
 enchaine de 2 s). Jour `Music_1`, nuit `Music_3`, souterrain `Music_4` (plus de 30
 tuiles sous la surface).
 
-Multijoueur (`app/src/net.rs`, protocole maison sur TCP, port 7777 par defaut) :
-`rusted-terraria --host monde.wld` (ou `--port <port>`) heberge, et
-`rusted-terraria --join <adresse[:port]>` rejoint sans fichier monde : l'hote envoie
-le monde en `.wld` a la connexion. Ensuite joueurs, editions de tuiles et de
-liquides, monstres (simules par l'hote) et heure du jour sont synchronises ; les
-coups d'un client sont appliques par l'hote. Les liquides s'ecoulent de chaque cote
-sans synchronisation fine, et les objets au sol restent locaux.
+Multijoueur (`app/src/net.rs` et `app/src/proto.rs`, paquets du protocole de
+Terraria sur TCP, port 7777 par defaut) : `rusted-terraria --host monde.wld` (ou
+`--port <port>`) heberge, et `rusted-terraria --join <adresse[:port]>` rejoint sans
+fichier monde. La connexion suit la sequence du jeu (version `Terraria326`, place de
+joueur, infos du joueur, infos du monde, monde envoye par sections de 200x150
+compressees, apparition). Ensuite joueurs (paquet 13), tuiles (20, la tuile entiere),
+liquides (48), monstres (23, simules par l'hote), coups (28), depart (14) et heure
+(18) sont synchronises. Ecrit d'apres la description publique du protocole, sans le
+jeu : l'echange avec un vrai client ou serveur Terraria n'a pas pu etre essaye (le
+serveur officiel ne tourne pas sous Linux sans Windows). Champs inconnus de la 1.4.5
+envoyes a zero, shimmer transmis comme de l'eau, objets au sol locaux.
 
 Sprites : joueur, monstres (`NPC_1`, `NPC_3`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
