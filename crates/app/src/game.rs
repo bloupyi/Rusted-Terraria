@@ -6,6 +6,7 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::inventory::{Inventory, Item};
+use crate::net::{MobState, Msg};
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::mob::{Kind, Mob};
@@ -111,6 +112,12 @@ pub struct Game {
     pub mobs: Vec<Mob>,
     /// Sounds to play this frame.
     pub sfx: Vec<Sfx>,
+    /// Other players by network id.
+    pub others: Vec<(u8, Player)>,
+    /// Monsters come from the host instead of being simulated here.
+    pub client: bool,
+    /// Edits to send to the other players.
+    pub outbox: Vec<Msg>,
     pub hp: i32,
     invulnerable: f32,
     attack_cd: f32,
@@ -152,6 +159,9 @@ impl Game {
             templates: Vec::new(),
             mobs: Vec::new(),
             sfx: Vec::new(),
+            others: Vec::new(),
+            client: false,
+            outbox: Vec::new(),
             hp: MAX_HP,
             invulnerable: 0.0,
             attack_cd: 0.0,
@@ -194,7 +204,7 @@ impl Game {
         self.invulnerable -= dt;
         self.attack_cd -= dt;
         self.spawn_acc += dt;
-        if fight && self.spawn_acc >= SPAWN_EVERY {
+        if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
             self.spawn_acc = 0.0;
             if self.mobs.len() < MAX_MOBS {
                 self.try_spawn();
@@ -203,12 +213,17 @@ impl Game {
                 self.sfx.push(Sfx::Zombie);
             }
         }
-        let target = self.player.center();
-        for m in &mut self.mobs {
-            m.update(&self.world, target, dt);
+        if !self.client {
+            let players: Vec<(f32, f32)> =
+                std::iter::once(self.player.center()).chain(self.others.iter().map(|(_, p)| p.center())).collect();
+            let dist = |m: &Mob, p: &(f32, f32)| (m.body.center().0 - p.0).abs();
+            for m in &mut self.mobs {
+                let near = *players.iter().min_by(|a, b| dist(m, a).total_cmp(&dist(m, b))).unwrap();
+                m.update(&self.world, near, dt);
+            }
+            let height = self.world.height as f32 * 16.0;
+            self.mobs.retain(|m| players.iter().any(|p| dist(m, p) < DESPAWN) && m.body.y < height);
         }
-        self.mobs
-            .retain(|m| (m.body.center().0 - target.0).abs() < DESPAWN && m.body.y < self.world.height as f32 * 16.0);
         if !fight || self.invulnerable > 0.0 {
             return;
         }
@@ -253,7 +268,11 @@ impl Game {
         }) else {
             return false;
         };
-        if self.attack_cd <= 0.0 {
+        if self.attack_cd <= 0.0 && self.client {
+            self.attack_cd = ATTACK_EVERY;
+            self.sfx.extend([Sfx::Swing, Sfx::MobHit]);
+            self.outbox.push(Msg::Hit { index: i as u16 });
+        } else if self.attack_cd <= 0.0 {
             self.attack_cd = ATTACK_EVERY;
             self.sfx.push(Sfx::Swing);
             if self.mobs[i].hit(ATTACK_DAMAGE, self.player.center().0) {
@@ -264,6 +283,78 @@ impl Game {
             }
         }
         true
+    }
+
+    /// Monsters as sent to clients.
+    pub fn mob_states(&self) -> Vec<MobState> {
+        self.mobs
+            .iter()
+            .map(|m| MobState {
+                kind: m.kind as u8,
+                x: m.body.x,
+                y: m.body.y,
+                facing_left: m.facing_left,
+                hurt: m.stun > 0.0,
+            })
+            .collect()
+    }
+
+    /// Applies a message from player `from`.
+    pub fn apply(&mut self, from: u8, msg: &Msg) {
+        match *msg {
+            Msg::Player { id, x, y, vx, vy, facing_left } => {
+                let i = self.others.iter().position(|o| o.0 == id).unwrap_or_else(|| {
+                    self.others.push((id, Player::at(x, y)));
+                    self.others.len() - 1
+                });
+                let p = &mut self.others[i].1;
+                let walked = (x - p.x).abs();
+                (p.x, p.y, p.vx, p.vy, p.facing_left) = (x, y, vx, vy, facing_left);
+                p.on_ground = vy == 0.0;
+                p.walked = if p.on_ground { p.walked + walked } else { 0.0 };
+            }
+            Msg::Tile { x, y, tile, fx, fy } if self.world.in_bounds(x as i64, y as i64) => {
+                if tile != NO_TILE {
+                    self.world.set_liquid(x, y, 0, 0);
+                }
+                self.world.set_tile(x, y, tile, fx, fy);
+                self.sim.wake(&self.world, x, y);
+            }
+            Msg::Liquid { x, y, amount, kind } if self.world.in_bounds(x as i64, y as i64) => {
+                self.world.set_liquid(x, y, amount, kind);
+                self.sim.wake(&self.world, x, y);
+            }
+            Msg::Mobs(ref states) if self.client => {
+                self.mobs = states
+                    .iter()
+                    .map(|s| {
+                        let kind = if s.kind == Kind::Zombie as u8 { Kind::Zombie } else { Kind::Slime };
+                        let mut m = Mob::new(kind, 0.0, 0.0);
+                        // Grounded while the snapshot keeps it at the same height.
+                        let old = self.mobs.iter().find(|o| o.kind == kind && (o.body.x - s.x).abs() < 16.0);
+                        m.body.on_ground = old.is_some_and(|o| o.body.y == s.y);
+                        m.timer = old.map_or(0.0, |o| o.timer + 1.0 / 60.0);
+                        (m.body.x, m.body.y, m.facing_left) = (s.x, s.y, s.facing_left);
+                        m.stun = if s.hurt { 0.1 } else { 0.0 };
+                        m
+                    })
+                    .collect();
+            }
+            Msg::Hit { index } if !self.client => {
+                let from_x = self.others.iter().find(|o| o.0 == from).map_or(0.0, |o| o.1.center().0);
+                if let Some(m) = self.mobs.get_mut(index as usize) {
+                    if m.hit(ATTACK_DAMAGE, from_x) {
+                        self.mobs.swap_remove(index as usize);
+                        self.sfx.push(Sfx::MobKilled);
+                    } else {
+                        self.sfx.push(Sfx::MobHit);
+                    }
+                }
+            }
+            Msg::Leave { id } => self.others.retain(|o| o.0 != id),
+            Msg::Time(t) if self.client => self.time = t,
+            _ => {}
+        }
     }
 
     /// Drops fall onto blocks, fly to a nearby player and go into the inventory.
@@ -366,6 +457,7 @@ impl Game {
         self.sfx.push(if HARD.contains(&t) { Sfx::Tink } else { Sfx::Dig });
         for &(x, y) in &cells {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
+            self.outbox.push(Msg::Tile { x: x as u32, y: y as u32, tile: NO_TILE, fx: -1, fy: -1 });
             self.sim.wake(&self.world, x as u32, y as u32);
         }
         if let Some((item, count)) = item.filter(|_| drop) {
@@ -484,6 +576,7 @@ impl Game {
                 }
                 self.world.set_liquid(x, y, 0, 0);
                 self.world.set_tile(x, y, t, -1, -1);
+                self.outbox.push(Msg::Tile { x, y, tile: t, fx: -1, fy: -1 });
             }
             Item::Object(id) => {
                 let tpl = &self.templates[id as usize];
@@ -511,6 +604,7 @@ impl Game {
                 for (cx, cy, fx, fy) in cells {
                     self.world.set_liquid(cx as u32, cy as u32, 0, 0);
                     self.world.set_tile(cx as u32, cy as u32, tile, fx, fy);
+                    self.outbox.push(Msg::Tile { x: cx as u32, y: cy as u32, tile, fx, fy });
                     self.sim.wake(&self.world, cx as u32, cy as u32);
                 }
             }
@@ -523,6 +617,7 @@ impl Game {
                     return;
                 }
                 self.world.set_liquid(x, y, 255, kind as u8);
+                self.outbox.push(Msg::Liquid { x, y, amount: 255, kind: kind as u8 });
                 if !free {
                     self.inventory.set_selected(Item::Bucket(None));
                 }
@@ -537,6 +632,7 @@ impl Game {
                     return;
                 }
                 self.world.set_liquid(x, y, 0, 0);
+                self.outbox.push(Msg::Liquid { x, y, amount: 0, kind: 0 });
                 let kind = [Liquid::Water, Liquid::Lava, Liquid::Honey, Liquid::Shimmer][k as usize & 3];
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
@@ -632,8 +728,11 @@ impl Game {
 
         let mut over = Vec::new();
         self.mob_sprites(&mut over);
+        for (_, p) in &self.others {
+            self.player_sprites(p, false, &mut over);
+        }
         if !free {
-            self.player_sprites(&mut over);
+            self.player_sprites(&self.player, self.invulnerable > 0.0, &mut over);
         }
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
@@ -701,8 +800,7 @@ impl Game {
     }
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
-    fn player_sprites(&self, out: &mut Vec<Sprite>) {
-        let p = &self.player;
+    fn player_sprites(&self, p: &Player, dim: bool, out: &mut Vec<Sprite>) {
         let pos = [p.x + player::WIDTH / 2.0 - 20.0, p.y + player::HEIGHT - 54.0];
         let legs = if !p.on_ground {
             5
@@ -720,7 +818,7 @@ impl Game {
                 continue;
             }
             let mut s = Sprite::sheet(pos, sheet, [col * 40, row * 56, 40, 56], flip);
-            s.color = if self.invulnerable > 0.0 { color.map(|c| c * 0.5) } else { color };
+            s.color = if dim { color.map(|c| c * 0.5) } else { color };
             out.push(s);
             any = true;
         }

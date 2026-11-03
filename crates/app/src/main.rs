@@ -1,6 +1,7 @@
 mod audio;
 mod game;
 mod inventory;
+mod net;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -41,6 +42,7 @@ struct App {
     vsync: bool,
     game: Game,
     audio: Option<audio::Audio>,
+    net: Option<net::Net>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     camera: Camera,
@@ -90,6 +92,7 @@ impl App {
                 self.game.place(tx, ty, self.free);
             }
         }
+        self.sync_net();
         for sfx in self.game.sfx.drain(..) {
             if let Some(a) = &mut self.audio {
                 a.play(sfx, 0.6);
@@ -127,6 +130,32 @@ impl App {
         let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
         rects.push(rect(11.0, 57.0, (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
         rects
+    }
+
+    /// Applies what other players sent, then sends our player, edits and, as host, the world
+    /// to new clients and the monsters.
+    fn sync_net(&mut self) {
+        let Some(net) = &mut self.net else { return };
+        for (from, msg) in net.poll() {
+            // The host relays what a client does to the other clients.
+            if net.host && !matches!(msg, net::Msg::Hit { .. }) {
+                net.send(&msg, Some(from));
+            }
+            self.game.apply(from, &msg);
+        }
+        for id in net.joined() {
+            net.send_to(id, &net::Msg::Welcome { id, world: self.game.world.to_wld() });
+        }
+        let p = &self.game.player;
+        let me = net::Msg::Player { id: net.id, x: p.x, y: p.y, vx: p.vx, vy: p.vy, facing_left: p.facing_left };
+        net.send(&me, None);
+        for m in self.game.outbox.drain(..) {
+            net.send(&m, None);
+        }
+        if net.host {
+            net.send(&net::Msg::Mobs(self.game.mob_states()), None);
+            net.send(&net::Msg::Time(self.game.time), None);
+        }
     }
 
     fn view(&self, size: Vec2) -> Rect {
@@ -265,12 +294,13 @@ impl ApplicationHandler for App {
                     };
                     if let Some(window) = &self.window {
                         window.set_title(&format!(
-                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode} - {:02}:{:02} - {tool} - {} liquid chunks",
+                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode} - {:02}:{:02} - {tool} - {} liquid chunks - {} players",
                             self.name,
                             stats.draws,
                             clock as u32,
                             (clock.fract() * 60.0) as u32,
                             self.game.sim.active(),
+                            self.game.others.len() + 1,
                         ));
                     }
                     (self.frames, self.frame_time, self.title_at) = (0, Duration::ZERO, now);
@@ -291,23 +321,57 @@ fn main() {
     let mut path = None;
     let mut vsync = false;
     let mut free = false;
-    for a in std::env::args().skip(1) {
+    let mut host = None;
+    let mut join = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "--vsync" => vsync = true,
             "--free" => free = true,
+            "--host" => host = Some(net::DEFAULT_PORT),
+            "--port" => host = args.next().and_then(|p| p.parse().ok()),
+            "--join" => join = args.next(),
             _ => path = Some(PathBuf::from(a)),
         }
     }
-    let Some(path) = path else {
-        eprintln!("usage: rusted-terraria [--vsync] [--free] <world.wld>");
+    let usage = || -> ! {
+        eprintln!("usage: rusted-terraria [--vsync] [--free] [--host | --port <port>] <world.wld>");
+        eprintln!("       rusted-terraria [--vsync] [--free] --join <host[:port]>");
         std::process::exit(2);
     };
 
     let start = Instant::now();
-    let world = world::World::load(&path).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", path.display());
-        std::process::exit(1);
-    });
+    let (world, net) = match (join, path) {
+        (Some(addr), _) => {
+            let addr = if addr.contains(':') { addr } else { format!("{addr}:{}", net::DEFAULT_PORT) };
+            println!("joining {addr}...");
+            let (net, wld) = net::Net::join(&addr).unwrap_or_else(|e| {
+                eprintln!("{addr}: {e}");
+                std::process::exit(1);
+            });
+            let world = world::World::parse(&wld).unwrap_or_else(|e| {
+                eprintln!("world from {addr}: {e}");
+                std::process::exit(1);
+            });
+            (world, Some(net))
+        }
+        (None, Some(path)) => {
+            let world = world::World::load(&path).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", path.display());
+                std::process::exit(1);
+            });
+            let net = host.map(|port| {
+                let n = net::Net::host(port).unwrap_or_else(|e| {
+                    eprintln!("port {port}: {e}");
+                    std::process::exit(1);
+                });
+                println!("hosting on port {port}");
+                n
+            });
+            (world, net)
+        }
+        (None, None) => usage(),
+    };
     let parsed = start.elapsed();
     let images = formats::install::images_dir();
     match &images {
@@ -329,7 +393,8 @@ fn main() {
     println!("audio: {}", if audio.is_some() { "on" } else { "off (no output device or no install)" });
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
-    let game = Game::new(world, scene);
+    let mut game = Game::new(world, scene);
+    game.client = net.as_ref().is_some_and(|n| !n.host);
     let (cx, cy) = game.player.center();
     let mut app = App {
         name: game.world.header.name.clone(),
@@ -337,6 +402,7 @@ fn main() {
         vsync,
         game,
         audio,
+        net,
         window: None,
         renderer: None,
         camera: Camera {

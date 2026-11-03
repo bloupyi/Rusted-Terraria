@@ -120,6 +120,14 @@ ramassage, coups, monstres touches ou tues, gemissements de zombies. Sans sortie
 audio ou sans installation, le jeu reste muet. La musique (`Wave Bank.xwb`, XACT)
 n'est pas lue.
 
+Multijoueur (`app/src/net.rs`, protocole maison sur TCP, port 7777 par defaut) :
+`rusted-terraria --host monde.wld` (ou `--port <port>`) heberge, et
+`rusted-terraria --join <adresse[:port]>` rejoint sans fichier monde : l'hote envoie
+le monde en `.wld` a la connexion. Ensuite joueurs, editions de tuiles et de
+liquides, monstres (simules par l'hote) et heure du jour sont synchronises ; les
+coups d'un client sont appliques par l'hote. Les liquides s'ecoulent de chaque cote
+sans synchronisation fine, et les objets au sol restent locaux.
+
 Sprites : joueur, monstres (`NPC_1`, `NPC_3`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
 `Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
