@@ -227,6 +227,44 @@ impl World {
         t != NO_TILE && !self.header.frame_important.get(t as usize).copied().unwrap_or(false)
     }
 
+    /// The world as a minimal `.wld` that [`World::parse`] reads back: tiles,
+    /// walls, liquids, paint and flags, no other world data.
+    pub fn to_wld(&self) -> Vec<u8> {
+        formats::synth::write_world(&self.header.name, self.width, self.height, &self.header.frame_important, |x, y| {
+            self.cell_data(x, y)
+        })
+    }
+
+    /// Everything stored for an in-bounds tile.
+    pub fn cell_data(&self, x: u32, y: u32) -> formats::wld::Tile {
+        let (c, i) = self.cell(x, y);
+        formats::wld::Tile {
+            tile: c.tile[i],
+            frame_x: c.frame_x[i],
+            frame_y: c.frame_y[i],
+            tile_paint: c.tile_paint[i],
+            wall: c.wall[i],
+            wall_paint: c.wall_paint[i],
+            liquid: c.liquid[i],
+            liquid_kind: [Liquid::Water, Liquid::Lava, Liquid::Honey, Liquid::Shimmer][c.liquid_kind[i] as usize & 3],
+            flags: c.flags[i],
+        }
+    }
+
+    /// Replaces an in-bounds tile whole.
+    pub fn set_cell(&mut self, x: u32, y: u32, t: &formats::wld::Tile) {
+        self.put_cell(x, y, t);
+        self.mark_around(x, y, DIRTY_TILES | DIRTY_LIQUID);
+    }
+
+    /// [`World::set_cell`] without marking chunks, for filling a world before its scene is built.
+    pub fn put_cell(&mut self, x: u32, y: u32, t: &formats::wld::Tile) {
+        let (c, i) = self.cell_mut(x, y);
+        (c.tile[i], c.frame_x[i], c.frame_y[i], c.tile_paint[i]) = (t.tile, t.frame_x, t.frame_y, t.tile_paint);
+        (c.wall[i], c.wall_paint[i], c.flags[i]) = (t.wall, t.wall_paint, t.flags);
+        (c.liquid[i], c.liquid_kind[i]) = (t.liquid, if t.liquid == 0 { 0 } else { t.liquid_kind as u8 });
+    }
+
     /// Distinct tile and wall types present, for loading only the sheets needed.
     pub fn used_types(&self) -> (Vec<u16>, Vec<u16>) {
         let (tiles, walls) = self
@@ -281,5 +319,30 @@ mod tests {
         let (tiles, walls) = world.used_types();
         assert_eq!(tiles, vec![0, 1, 2, 3, 4]);
         assert_eq!(walls, (1..10).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn round_trips_through_wld() {
+        let mut world = World::parse(&formats::synth::write_world("r", 40, 40, &[false, true], |x, y| Tile {
+            tile: if y > 30 {
+                0
+            } else if y == 30 && x == 3 {
+                1
+            } else {
+                NO_TILE
+            },
+            frame_x: if y == 30 && x == 3 { 18 } else { -1 },
+            frame_y: if y == 30 && x == 3 { 36 } else { -1 },
+            ..Tile::default()
+        }))
+        .unwrap();
+        world.set_liquid(5, 29, 200, Liquid::Lava as u8);
+        world.set_wall(6, 6, 4);
+        let back = World::parse(&world.to_wld()).unwrap();
+        assert_eq!(back.tile(3, 30), 1);
+        assert_eq!(back.frame(3, 30), (18, 36));
+        assert_eq!(back.tile(0, 35), 0);
+        assert_eq!((back.liquid(5, 29), back.cell(5, 29).0.liquid_kind[back.cell(5, 29).1]), (200, 1));
+        assert_eq!(back.wall(6, 6), 4);
     }
 }

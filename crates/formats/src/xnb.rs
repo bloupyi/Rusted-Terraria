@@ -1,4 +1,4 @@
-//! XNB container (XNA 4.0 / FNA) and its Texture2D payload.
+//! XNB container (XNA 4.0 / FNA) and its Texture2D and SoundEffect payloads.
 
 use crate::reader::{bad, Error, Reader};
 
@@ -7,7 +7,9 @@ pub const FLAG_LZ4: u8 = 0x40;
 pub const FLAG_LZX: u8 = 0x80;
 
 const TEXTURE2D_READER: &str = "Microsoft.Xna.Framework.Content.Texture2DReader";
+const SOUND_EFFECT_READER: &str = "Microsoft.Xna.Framework.Content.SoundEffectReader";
 const SURFACE_COLOR: i32 = 0;
+const WAVE_FORMAT_PCM: u16 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Header {
@@ -98,9 +100,8 @@ fn decompress_lzx(mut src: &[u8], size: usize) -> Result<Vec<u8>, Error> {
     Ok(out)
 }
 
-pub fn read_texture(data: &[u8]) -> Result<Texture, Error> {
-    let (_, content) = content(data)?;
-    let mut r = Reader::new(&content);
+/// Skips the type reader list; checks the primary object is read by `reader`.
+fn primary(r: &mut Reader, reader: &str) -> Result<(), Error> {
     let readers = r.var_u32()?;
     let mut names = Vec::with_capacity(readers as usize);
     for _ in 0..readers {
@@ -110,9 +111,46 @@ pub fn read_texture(data: &[u8]) -> Result<Texture, Error> {
     let _shared = r.var_u32()?;
     let id = r.var_u32()? as usize;
     let name = id.checked_sub(1).and_then(|i| names.get(i)).ok_or(Error::Format("bad reader id".into()))?;
-    if !name.starts_with(TEXTURE2D_READER) {
-        return bad(format!("not a Texture2D: {name}"));
+    if !name.starts_with(reader) {
+        return bad(format!("expected {reader}, found {name}"));
     }
+    Ok(())
+}
+
+#[derive(Debug, Clone)]
+pub struct Sound {
+    pub channels: u16,
+    pub rate: u32,
+    /// Interleaved samples.
+    pub samples: Vec<i16>,
+}
+
+/// A SoundEffect: a WAVEFORMATEX then the sample data. Only 16-bit PCM, which is
+/// what every file under `Content/Sounds` holds (1.4.5).
+pub fn read_sound(data: &[u8]) -> Result<Sound, Error> {
+    let (_, content) = content(data)?;
+    let mut r = Reader::new(&content);
+    primary(&mut r, SOUND_EFFECT_READER)?;
+    let format_len = r.u32()? as usize;
+    let mut f = Reader::new(r.bytes(format_len)?);
+    let tag = f.i16()? as u16;
+    let channels = f.i16()? as u16;
+    let rate = f.u32()?;
+    let _avg = f.u32()?;
+    let _align = f.i16()?;
+    let bits = f.i16()?;
+    if tag != WAVE_FORMAT_PCM || bits != 16 || channels == 0 {
+        return bad(format!("unsupported sound format {tag}, {bits} bits, {channels} channels"));
+    }
+    let len = r.u32()? as usize;
+    let samples = r.bytes(len)?.chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect();
+    Ok(Sound { channels, rate, samples })
+}
+
+pub fn read_texture(data: &[u8]) -> Result<Texture, Error> {
+    let (_, content) = content(data)?;
+    let mut r = Reader::new(&content);
+    primary(&mut r, TEXTURE2D_READER)?;
     let format = r.i32()?;
     let width = r.u32()?;
     let height = r.u32()?;
@@ -180,6 +218,30 @@ mod tests {
         let t = read_texture(&wrap(0, &c, &c)).unwrap();
         assert_eq!((t.width, t.height, t.rgba.len()), (3, 2, 24));
         assert_eq!(t.rgba[5], 5);
+    }
+
+    #[test]
+    fn sound_pcm() {
+        let mut c = vec![1];
+        push_str(&mut c, "Microsoft.Xna.Framework.Content.SoundEffectReader");
+        c.extend_from_slice(&0i32.to_le_bytes());
+        c.push(0);
+        c.push(1);
+        c.extend_from_slice(&18u32.to_le_bytes());
+        for v in [1u16, 1] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [22050u32, 44100] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        for v in [2u16, 16, 0] {
+            c.extend_from_slice(&v.to_le_bytes());
+        }
+        c.extend_from_slice(&4u32.to_le_bytes());
+        c.extend_from_slice(&[1, 0, 0xff, 0xff]);
+        let s = read_sound(&wrap(0, &c, &c)).unwrap();
+        assert_eq!((s.channels, s.rate, s.samples), (1, 22050, vec![1, -1]));
+        assert!(read_texture(&wrap(0, &c, &c)).is_err());
     }
 
     #[test]

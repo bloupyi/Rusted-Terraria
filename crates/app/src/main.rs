@@ -1,5 +1,9 @@
+mod audio;
 mod game;
 mod inventory;
+mod items;
+mod net;
+mod proto;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -16,6 +20,25 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use world::light::Rect;
 use world::player::Input;
+
+/// Screen pixels of a hotbar or crafting slot, and the gap after it.
+const SLOT: f32 = 40.0;
+const SLOT_GAP: f32 = 4.0;
+/// Top of the crafting rows, under the health bar.
+const CRAFT_Y: f32 = 72.0;
+
+/// Top-left of slot `i` of a row of ten starting at `y`.
+fn slot_at(i: usize, y: f32) -> Vec2 {
+    Vec2::new(10.0 + (i % HOTBAR) as f32 * (SLOT + SLOT_GAP), y + (i / HOTBAR) as f32 * (SLOT + SLOT_GAP))
+}
+
+/// Which slot of rows starting at `y` holds screen point `p`, among `n`.
+fn slot_under(p: Vec2, y: f32, n: usize) -> Option<usize> {
+    (0..n).find(|&i| {
+        let o = slot_at(i, y);
+        p.x >= o.x && p.x < o.x + SLOT && p.y >= o.y && p.y < o.y + SLOT
+    })
+}
 
 const TITLE_EVERY: Duration = Duration::from_millis(500);
 const PAN_SPEED: f32 = 1200.0;
@@ -39,6 +62,8 @@ struct App {
     world_px: Vec2,
     vsync: bool,
     game: Game,
+    audio: Option<audio::Audio>,
+    net: Option<net::Net>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     camera: Camera,
@@ -47,10 +72,17 @@ struct App {
     keys: Keys,
     cursor: Vec2,
     buttons: [bool; 2],
+    /// The left button went down on the interface: no digging until it is released.
+    ui_click: bool,
+    crafting: bool,
+    /// Craftable recipes and what each makes, while the crafting rows are open.
+    recipes: Vec<(usize, Item)>,
     drag: Option<Vec2>,
     last: Instant,
     frames: u32,
     frame_time: Duration,
+    /// `--profile`: time per phase (update, sync, sprites, render), printed with the title.
+    profile: Option<[Duration; 4]>,
     title_at: Instant,
 }
 
@@ -78,7 +110,12 @@ impl App {
             let (cx, cy) = self.game.player.center();
             self.camera.center = Vec2::new(cx, cy);
         }
-        if self.drag.is_none() {
+        self.recipes = if self.crafting {
+            self.game.craftable().into_iter().map(|i| (i, self.game.recipe_item(i))).collect()
+        } else {
+            Vec::new()
+        };
+        if self.drag.is_none() && !self.ui_click {
             let (tx, ty) = self.cursor_tile(size);
             let w = self.screen_to_world(self.cursor, size);
             if self.buttons[0] && !self.game.attack(w.x, w.y, self.free) {
@@ -88,38 +125,96 @@ impl App {
                 self.game.place(tx, ty, self.free);
             }
         }
+        self.sync_net();
+        for sfx in self.game.sfx.drain(..) {
+            if let Some(a) = &mut self.audio {
+                a.play(sfx, 0.6);
+            }
+        }
+        if let Some(a) = &mut self.audio {
+            a.music(self.game.music());
+        }
         (self.camera.sky, self.camera.background) = self.game.sky();
         self.camera.time += dt;
     }
 
-    /// Hotbar in the top-left corner, as world sprites under the current camera.
-    /// Each slot shows its item, with a bar for the stack size.
+    /// Hotbar in the top-left corner, health under it, then the crafting rows if
+    /// open, as world sprites under the current camera.
     fn hotbar(&self, size: Vec2) -> Vec<Sprite> {
-        const SLOT: f32 = 40.0;
         let z = self.camera.zoom;
-        let at = |x: f32, y: f32| -> [f32; 2] { self.screen_to_world(Vec2::new(x, y), size).into() };
-        let rect = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(x, y), [w / z, h / z], color);
+        let at = |p: Vec2| -> [f32; 2] { self.screen_to_world(p, size).into() };
+        let rect = |p: Vec2, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(p), [w / z, h / z], color);
+        let slot = |rects: &mut Vec<Sprite>, o: Vec2, frame: [f32; 4], item: Option<(Item, u16)>| {
+            rects.push(rect(o, SLOT, SLOT, frame));
+            rects.push(rect(o + 3.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
+            if let Some((item, count)) = item {
+                rects.extend(self.game.item_icon(item, at(o + 8.0), (SLOT - 16.0) / z, 0));
+                if count > 1 {
+                    let w = (SLOT - 8.0) * (count as f32 / 99.0).min(1.0);
+                    rects.push(rect(o + Vec2::new(4.0, SLOT - 7.0), w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
+                }
+            }
+        };
         let inv = &self.game.inventory;
         let mut rects = Vec::new();
         for i in 0..HOTBAR {
-            let x = 10.0 + i as f32 * (SLOT + 4.0);
             let frame = if i == inv.selected { [0.9, 0.8, 0.3, 0.9] } else { [0.1, 0.1, 0.15, 0.6] };
-            rects.push(rect(x, 10.0, SLOT, SLOT, frame));
-            rects.push(rect(x + 3.0, 13.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
-            if let Some(s) = inv.slots[i] {
-                rects.extend(self.game.item_icon(s.item, at(x + 8.0, 16.0), (SLOT - 16.0) / z, 0));
-                if s.count > 1 {
-                    let w = (SLOT - 8.0) * s.count as f32 / inventory::MAX_STACK as f32;
-                    rects.push(rect(x + 4.0, 10.0 + SLOT - 7.0, w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
-                }
-            }
+            slot(&mut rects, slot_at(i, 10.0), frame, inv.slots[i].map(|s| (s.item, s.count)));
         }
-        // Health under the hotbar.
-        let width = HOTBAR as f32 * (SLOT + 4.0) - 4.0;
-        rects.push(rect(10.0, 56.0, width, 8.0, [0.1, 0.1, 0.15, 0.6]));
+        let width = HOTBAR as f32 * (SLOT + SLOT_GAP) - SLOT_GAP;
+        rects.push(rect(Vec2::new(10.0, 56.0), width, 8.0, [0.1, 0.1, 0.15, 0.6]));
         let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
-        rects.push(rect(11.0, 57.0, (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
+        rects.push(rect(Vec2::new(11.0, 57.0), (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
+        if let Some(life) = self.game.boss_life() {
+            let (w, x) = (size.x * 0.5, size.x * 0.25);
+            rects.push(rect(Vec2::new(x, size.y - 40.0), w, 14.0, [0.1, 0.1, 0.15, 0.7]));
+            rects.push(rect(Vec2::new(x + 2.0, size.y - 38.0), (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]));
+        }
+        for (k, &(r, item)) in self.recipes.iter().enumerate() {
+            let hover = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) == Some(k);
+            let frame = if hover { [0.4, 0.8, 0.5, 0.9] } else { [0.2, 0.35, 0.25, 0.7] };
+            slot(&mut rects, slot_at(k, CRAFT_Y), frame, Some((item, items::RECIPES[r].count)));
+        }
         rects
+    }
+
+    /// A left press on the interface: picks a hotbar slot or crafts. True if it hit one.
+    fn click_ui(&mut self) -> bool {
+        if let Some(i) = slot_under(self.cursor, 10.0, HOTBAR) {
+            self.game.inventory.selected = i;
+            return true;
+        }
+        if let Some(k) = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) {
+            self.game.craft(self.recipes[k].0);
+            return true;
+        }
+        false
+    }
+
+    /// Applies what other players sent, then sends our player, edits and, as host, the world
+    /// to new clients and the monsters.
+    fn sync_net(&mut self) {
+        let Some(net) = &mut self.net else { return };
+        for (from, msg) in net.poll() {
+            // The host relays what a client does to the other clients.
+            if net.host && !matches!(msg, net::Msg::Hit { .. }) {
+                net.send(&msg, Some(from));
+            }
+            self.game.apply(from, &msg);
+        }
+        for id in net.joined() {
+            net.send_to(id, &net::Msg::Welcome { id, world: self.game.world.to_wld() });
+        }
+        let p = &self.game.player;
+        let me = net::Msg::Player { id: net.id, x: p.x, y: p.y, vx: p.vx, vy: p.vy, facing_left: p.facing_left };
+        net.send(&me, None);
+        for m in self.game.outbox.drain(..) {
+            net.send(&m, None);
+        }
+        if net.host {
+            net.send(&net::Msg::Mobs(self.game.mob_states()), None);
+            net.send(&net::Msg::Time(self.game.time), None);
+        }
     }
 
     fn view(&self, size: Vec2) -> Rect {
@@ -174,6 +269,7 @@ impl ApplicationHandler for App {
                     KeyCode::KeyT => k.fast_time = down,
                     KeyCode::Escape => el.exit(),
                     KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
+                    KeyCode::KeyC if press => self.crafting = !self.crafting,
                     KeyCode::KeyF if press => {
                         self.free = !self.free;
                         if !self.free {
@@ -209,7 +305,10 @@ impl ApplicationHandler for App {
             WindowEvent::MouseInput { state, button, .. } => {
                 let down = state == ElementState::Pressed;
                 match button {
-                    MouseButton::Left => self.buttons[0] = down,
+                    MouseButton::Left => {
+                        self.buttons[0] = down;
+                        self.ui_click = down && self.click_ui();
+                    }
                     MouseButton::Right => self.buttons[1] = down,
                     MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
                     _ => {}
@@ -231,15 +330,24 @@ impl ApplicationHandler for App {
                 let dt = now - self.last;
                 self.last = now;
                 let size = renderer.size();
+                let t0 = Instant::now();
                 self.update(dt.as_secs_f32().min(0.1), size);
                 let view = self.view(size);
                 let cursor = self.cursor_tile(size);
                 let hud = self.hotbar(size);
                 let Some(renderer) = &mut self.renderer else { return };
+                let t1 = Instant::now();
                 self.game.sync(renderer, view);
+                let t2 = Instant::now();
                 let (under, mut over) = self.game.sprites(view, Some(cursor), self.free);
                 over.extend(hud);
+                let t3 = Instant::now();
                 let stats = renderer.render(&self.camera, &under, &over);
+                if let Some(p) = &mut self.profile {
+                    for (acc, d) in p.iter_mut().zip([t1 - t0, t2 - t1, t3 - t2, t3.elapsed()]) {
+                        *acc += d;
+                    }
+                }
                 self.frames += 1;
                 self.frame_time += dt;
                 if now - self.title_at >= TITLE_EVERY {
@@ -254,17 +362,28 @@ impl ApplicationHandler for App {
                             Item::Bucket(None) => "empty bucket".to_string(),
                             Item::Bucket(Some(l)) => format!("{l:?} bucket"),
                             Item::Object(i) => format!("object {} x{}", self.game.templates[i as usize].tile, s.count),
+                            Item::Tool(t) => format!("{t:?}"),
+                            Item::Material(m) => format!("{m:?} x{}", s.count),
                         },
                     };
                     if let Some(window) = &self.window {
                         window.set_title(&format!(
-                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode} - {:02}:{:02} - {tool} - {} liquid chunks",
+                            "Rusted Terraria - {} - {fps:.0} FPS - {ms:.2} ms - {} draws, {mode} - {:02}:{:02} - {tool} - {} liquid chunks - {} players",
                             self.name,
                             stats.draws,
                             clock as u32,
                             (clock.fract() * 60.0) as u32,
                             self.game.sim.active(),
+                            self.game.others.len() + 1,
                         ));
+                    }
+                    if let Some(p) = &mut self.profile {
+                        let ms = p.map(|d| d.as_secs_f64() * 1000.0 / self.frames as f64);
+                        println!(
+                            "{fps:.0} FPS, zoom {:.3}: update {:.2} ms, sync {:.2} ms, sprites {:.2} ms, render {:.2} ms, {} draws, {mode}",
+                            self.camera.zoom, ms[0], ms[1], ms[2], ms[3], stats.draws
+                        );
+                        *p = [Duration::ZERO; 4];
                     }
                     (self.frames, self.frame_time, self.title_at) = (0, Duration::ZERO, now);
                 }
@@ -283,24 +402,60 @@ impl ApplicationHandler for App {
 fn main() {
     let mut path = None;
     let mut vsync = false;
+    let mut profile = false;
+    let mut zoom = 1.0;
     let mut free = false;
-    for a in std::env::args().skip(1) {
+    let mut host = None;
+    let mut join = None;
+    let mut args = std::env::args().skip(1);
+    while let Some(a) = args.next() {
         match a.as_str() {
             "--vsync" => vsync = true,
+            "--profile" => profile = true,
+            "--zoom" => zoom = args.next().and_then(|z| z.parse().ok()).unwrap_or(1.0f32).clamp(1.0 / 64.0, 8.0),
             "--free" => free = true,
+            "--host" => host = Some(net::DEFAULT_PORT),
+            "--port" => host = args.next().and_then(|p| p.parse().ok()),
+            "--join" => join = args.next(),
             _ => path = Some(PathBuf::from(a)),
         }
     }
-    let Some(path) = path else {
-        eprintln!("usage: rusted-terraria [--vsync] [--free] <world.wld>");
+    let usage = || -> ! {
+        eprintln!(
+            "usage: rusted-terraria [--vsync] [--profile] [--zoom <z>] [--free] [--host | --port <port>] <world.wld>"
+        );
+        eprintln!("       rusted-terraria [--vsync] [--free] --join <host[:port]>");
         std::process::exit(2);
     };
 
     let start = Instant::now();
-    let world = world::World::load(&path).unwrap_or_else(|e| {
-        eprintln!("{}: {e}", path.display());
-        std::process::exit(1);
-    });
+    let (world, net) = match (join, path) {
+        (Some(addr), _) => {
+            let addr = if addr.contains(':') { addr } else { format!("{addr}:{}", net::DEFAULT_PORT) };
+            println!("joining {addr}...");
+            let (net, world) = net::Net::join(&addr).unwrap_or_else(|e| {
+                eprintln!("{addr}: {e}");
+                std::process::exit(1);
+            });
+            (world, Some(net))
+        }
+        (None, Some(path)) => {
+            let world = world::World::load(&path).unwrap_or_else(|e| {
+                eprintln!("{}: {e}", path.display());
+                std::process::exit(1);
+            });
+            let net = host.map(|port| {
+                let n = net::Net::host(port).unwrap_or_else(|e| {
+                    eprintln!("port {port}: {e}");
+                    std::process::exit(1);
+                });
+                println!("hosting on port {port}");
+                n
+            });
+            (world, net)
+        }
+        (None, None) => usage(),
+    };
     let parsed = start.elapsed();
     let images = formats::install::images_dir();
     match &images {
@@ -318,19 +473,25 @@ fn main() {
         scene.mesher.atlas.missing
     );
 
+    let audio = images.as_deref().and_then(|d| d.parent()).and_then(|c| audio::Audio::new(c.to_path_buf()));
+    println!("audio: {}", if audio.is_some() { "on" } else { "off (no output device or no install)" });
+
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
-    let game = Game::new(world, scene);
+    let mut game = Game::new(world, scene);
+    game.client = net.as_ref().is_some_and(|n| !n.host);
     let (cx, cy) = game.player.center();
     let mut app = App {
         name: game.world.header.name.clone(),
         world_px,
         vsync,
         game,
+        audio,
+        net,
         window: None,
         renderer: None,
         camera: Camera {
             center: Vec2::new(cx, cy),
-            zoom: 1.0,
+            zoom,
             lighting: true,
             sky: [1.0; 3],
             background: [0.0; 3],
@@ -340,10 +501,14 @@ fn main() {
         keys: Keys::default(),
         cursor: Vec2::ZERO,
         buttons: [false; 2],
+        ui_click: false,
+        crafting: false,
+        recipes: Vec::new(),
         drag: None,
         last: Instant::now(),
         frames: 0,
         frame_time: Duration::ZERO,
+        profile: profile.then_some([Duration::ZERO; 4]),
         title_at: Instant::now(),
     };
     let event_loop = EventLoop::new().expect("event loop");
