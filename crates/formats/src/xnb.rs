@@ -63,8 +63,9 @@ pub fn content(data: &[u8]) -> Result<(Header, Vec<u8>), Error> {
         Some(size) if h.flags & FLAG_LZX != 0 => decompress_lzx(body, size as usize)?,
         // TODO: MonoGame's LZ4 XNB is assumed to be one raw LZ4 block (no frame header).
         // Not verified against a real file; Terraria itself ships LZX or uncompressed.
-        Some(size) => lz4_flex::block::decompress(body, size as usize)
-            .map_err(|e| Error::Format(format!("lz4: {e}")))?,
+        Some(size) => {
+            lz4_flex::block::decompress(body, size as usize).map_err(|e| Error::Format(format!("lz4: {e}")))?
+        }
     };
     Ok((h, out))
 }

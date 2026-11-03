@@ -43,7 +43,13 @@ fn main() {
             }
             return t;
         }
-        t.tile = if y < s + 40 { 0 } else if hash(x, y).is_multiple_of(7) { 7 } else { 1 };
+        t.tile = if y < s + 40 {
+            0
+        } else if hash(x, y).is_multiple_of(7) {
+            7
+        } else {
+            1
+        };
         t
     };
     let start = std::time::Instant::now();

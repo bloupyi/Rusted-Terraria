@@ -3,7 +3,13 @@
 
 use crate::wld::{flags::*, Liquid, Tile, KNOWN_VERSION, NO_TILE};
 
-pub fn write_world(name: &str, width: u32, height: u32, frame_important: &[bool], tile: impl Fn(u32, u32) -> Tile) -> Vec<u8> {
+pub fn write_world(
+    name: &str,
+    width: u32,
+    height: u32,
+    frame_important: &[bool],
+    tile: impl Fn(u32, u32) -> Tile,
+) -> Vec<u8> {
     let mut v = Vec::new();
     v.extend_from_slice(&KNOWN_VERSION.to_le_bytes());
     v.extend_from_slice(b"relogic\x02");
@@ -102,7 +108,8 @@ fn encode(v: &mut Vec<u8>, t: &Tile, repeat: u32, important: &[bool]) {
         h3 |= 0x40;
         body.push((t.wall >> 8) as u8);
     }
-    for (f, bit) in [(INVISIBLE_BLOCK, 0x02), (INVISIBLE_WALL, 0x04), (FULLBRIGHT_BLOCK, 0x08), (FULLBRIGHT_WALL, 0x10)] {
+    for (f, bit) in [(INVISIBLE_BLOCK, 0x02), (INVISIBLE_WALL, 0x04), (FULLBRIGHT_BLOCK, 0x08), (FULLBRIGHT_WALL, 0x10)]
+    {
         if t.flags & f != 0 {
             h4 |= bit;
         }

@@ -80,8 +80,7 @@ impl World {
         let (width, height) = (header.width, header.height);
         let chunks_x = width.div_ceil(CHUNK);
         let chunks_y = height.div_ceil(CHUNK);
-        let mut chunks: Vec<Box<Chunk>> =
-            (0..chunks_x * chunks_y).into_par_iter().map(|_| Chunk::empty()).collect();
+        let mut chunks: Vec<Box<Chunk>> = (0..chunks_x * chunks_y).into_par_iter().map(|_| Chunk::empty()).collect();
         wld::read_tiles(data, &header, |x, y, n, t| {
             let (cx, lx) = (x / CHUNK, x % CHUNK);
             let (mut y, end) = (y, y + n);

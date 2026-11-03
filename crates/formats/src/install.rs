@@ -37,7 +37,9 @@ fn default_dirs() -> Vec<PathBuf> {
         let home = PathBuf::from(home);
         v.push(home.join(".steam/steam/steamapps/common/Terraria"));
         v.push(home.join(".local/share/Steam/steamapps/common/Terraria"));
-        v.push(home.join("Library/Application Support/Steam/steamapps/common/Terraria/Terraria.app/Contents/Resources"));
+        v.push(
+            home.join("Library/Application Support/Steam/steamapps/common/Terraria/Terraria.app/Contents/Resources"),
+        );
     }
     v
 }

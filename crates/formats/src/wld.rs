@@ -228,7 +228,8 @@ fn read_tile(r: &mut Reader, important: &[bool], v269: bool) -> Result<(Tile, u3
     if h3 & 0x40 != 0 {
         t.wall |= (r.u8()? as u16) << 8;
     }
-    for (bit, f) in [(0x02, INVISIBLE_BLOCK), (0x04, INVISIBLE_WALL), (0x08, FULLBRIGHT_BLOCK), (0x10, FULLBRIGHT_WALL)] {
+    for (bit, f) in [(0x02, INVISIBLE_BLOCK), (0x04, INVISIBLE_WALL), (0x08, FULLBRIGHT_BLOCK), (0x10, FULLBRIGHT_WALL)]
+    {
         if h4 & bit != 0 {
             t.flags |= f;
         }

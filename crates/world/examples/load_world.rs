@@ -4,5 +4,12 @@ fn main() {
     let w = world::World::load(path.as_ref()).unwrap();
     let parsed = start.elapsed();
     let (t, wl) = w.used_types();
-    println!("{}x{} parsed {parsed:.2?}, {} tile types, {} wall types, total {:.2?}", w.width, w.height, t.len(), wl.len(), start.elapsed());
+    println!(
+        "{}x{} parsed {parsed:.2?}, {} tile types, {} wall types, total {:.2?}",
+        w.width,
+        w.height,
+        t.len(),
+        wl.len(),
+        start.elapsed()
+    );
 }
