@@ -14,6 +14,7 @@ pub struct Camera {
     pub center: Vec2,
     /// Screen pixels per world pixel.
     pub zoom: f32,
+    pub lighting: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -29,7 +30,8 @@ struct CameraUniform {
     scale: [f32; 2],
     offset: [f32; 2],
     lod_pages_x: u32,
-    _pad: u32,
+    lighting: u32,
+    world: [u32; 2],
 }
 
 struct Row {
@@ -50,6 +52,7 @@ pub struct Renderer {
     rows: Vec<Row>,
     chunks_x: u32,
     lod_pages: (u32, u32),
+    world: [u32; 2],
 }
 
 impl Renderer {
@@ -60,7 +63,7 @@ impl Renderer {
         vsync: bool,
         scene: Scene,
     ) -> Self {
-        let Scene { atlas, rows, chunks_x, lod_pages_x: pages_x, lod_pages_y: pages_y, lod: pages } = scene;
+        let Scene { atlas, rows, chunks_x, lod_pages_x: pages_x, lod_pages_y: pages_y, lod: pages, light } = scene;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
             compatible_surface: Some(&surface),
@@ -118,6 +121,29 @@ impl Renderer {
             );
         }
 
+        // One page per LOD page, uploaded straight from the row-major light map.
+        let light_tex = texture_array(&device, "light", LOD_PAGE, pages.len() as u32);
+        for page in 0..pages.len() as u32 {
+            let (ox, oy) = ((page % pages_x) * LOD_PAGE, (page / pages_x) * LOD_PAGE);
+            queue.write_texture(
+                wgpu::TexelCopyTextureInfo {
+                    texture: &light_tex,
+                    mip_level: 0,
+                    origin: wgpu::Origin3d { x: 0, y: 0, z: page },
+                    aspect: wgpu::TextureAspect::All,
+                },
+                bytemuck::cast_slice(&light.rgba[(oy * light.width + ox) as usize..]),
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(light.width * 4), rows_per_image: None },
+                wgpu::Extent3d {
+                    width: LOD_PAGE.min(light.width - ox),
+                    height: LOD_PAGE.min(light.height - oy),
+                    depth_or_array_layers: 1,
+                },
+            );
+        }
+        let world = [light.width, light.height];
+        drop(light);
+
         let camera = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("camera"),
             size: std::mem::size_of::<CameraUniform>() as u64,
@@ -139,7 +165,7 @@ impl Renderer {
             entries: &[
                 wgpu::BindGroupLayoutEntry {
                     binding: 0,
-                    visibility: wgpu::ShaderStages::VERTEX,
+                    visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
                     ty: wgpu::BindingType::Buffer {
                         ty: wgpu::BufferBindingType::Uniform,
                         has_dynamic_offset: false,
@@ -149,6 +175,7 @@ impl Renderer {
                 },
                 tex_entry(1),
                 tex_entry(2),
+                tex_entry(3),
             ],
         });
         let view = |t: &wgpu::Texture| {
@@ -157,7 +184,7 @@ impl Renderer {
                 ..Default::default()
             })
         };
-        let (atlas_view, lod_view) = (view(&atlas_tex), view(&lod_tex));
+        let (atlas_view, lod_view, light_view) = (view(&atlas_tex), view(&lod_tex), view(&light_tex));
         let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: None,
             layout: &layout,
@@ -165,6 +192,7 @@ impl Renderer {
                 wgpu::BindGroupEntry { binding: 0, resource: camera.as_entire_binding() },
                 wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::TextureView(&atlas_view) },
                 wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::TextureView(&lod_view) },
+                wgpu::BindGroupEntry { binding: 3, resource: wgpu::BindingResource::TextureView(&light_view) },
             ],
         });
 
@@ -239,6 +267,7 @@ impl Renderer {
             rows,
             chunks_x,
             lod_pages: (pages_x, pages_y),
+            world,
         }
     }
 
@@ -269,7 +298,8 @@ impl Renderer {
             scale: scale.into(),
             offset: (-cam.center * scale).into(),
             lod_pages_x: self.lod_pages.0,
-            _pad: 0,
+            lighting: cam.lighting as u32,
+            world: self.world,
         };
         self.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
 

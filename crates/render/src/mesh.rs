@@ -3,6 +3,7 @@
 
 use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
+use world::light::LightMap;
 use world::{Chunk, World, CHUNK, NO_TILE};
 
 use crate::atlas::{Atlas, SheetRef};
@@ -36,15 +37,19 @@ pub struct Scene {
     pub lod_pages_x: u32,
     pub lod_pages_y: u32,
     pub lod: Vec<Vec<u8>>,
+    /// Same page layout as `lod`.
+    pub light: LightMap,
 }
 
 impl Scene {
     pub fn build(world: &World, images: Option<&std::path::Path>) -> Self {
         let (tiles, walls) = world.used_types();
         let atlas = Atlas::load(images, &tiles, &walls);
-        let (rows, (lod_pages_x, lod_pages_y, lod)) =
-            rayon::join(|| build_rows(world, &atlas), || build_lod(world, &atlas));
-        Self { atlas, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod }
+        let (rows, ((lod_pages_x, lod_pages_y, lod), light)) = rayon::join(
+            || build_rows(world, &atlas),
+            || rayon::join(|| build_lod(world, &atlas), || world::light::compute(world)),
+        );
+        Self { atlas, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod, light }
     }
 }
 

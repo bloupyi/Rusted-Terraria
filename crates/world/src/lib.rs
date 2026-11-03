@@ -9,6 +9,8 @@ use std::path::Path;
 use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
+pub mod light;
+
 pub use formats::wld::{flags, Liquid, NO_TILE};
 
 pub const CHUNK: u32 = 32;
