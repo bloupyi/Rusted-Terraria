@@ -44,6 +44,13 @@ les motifs de centre 3x3 et les grandes trames fixees par la position (aussi pou
 les blocs concernes). Les ensembles de types (`world::tile_sets`) sont generes par
 `tools/gen_tile_sets.py`.
 
+Ciel et fonds (`app::backdrop`) : l'heure, la phase et le type de lune, la ligne de
+surface, les limites des 4 zones de foret et leurs styles de fond sont lus dans le
+fichier monde. Ciel, soleil, lune, montagnes et trois plans d'arbres sont places
+comme dans le jeu (echelle, parallaxe, hauteur selon la position de la vue, a zoom
+de fond 1 quel que soit le zoom de jeu), avec la couleur du ciel du jeu selon
+l'heure ; la lumiere du ciel sur les tuiles en derive.
+
 Controles :
 
 - ZQSD/WASD ou fleches : marcher, sauter (haut ou Espace), descendre des plateformes.
@@ -96,7 +103,7 @@ Eclairage :
   styles de torches, lampes, champignons, pierre infernale...) et les liquides
   (lave, miel, shimmer), alpha pour le ciel ouvert (chaque colonne jusqu'au premier
   bloc ou mur). Le shader multiplie l'alpha par la couleur du ciel selon l'heure :
-  le cycle jour/nuit (15 min de jour, 9 de nuit) ne recalcule rien.
+  le cycle jour/nuit (15 min de jour, 9 de nuit, a l'heure sauvegardee) ne recalcule rien.
 - Propagation par balayages droite, gauche, bas, haut, repetes deux fois ; la
   lumiere qui sort d'une case est attenuee selon la case (air, liquide, bloc).
   Lignes et bandes de colonnes en parallele, environ 300 ms sur 8400x2400 et 4 coeurs.
