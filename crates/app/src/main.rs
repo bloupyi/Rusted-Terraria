@@ -1,12 +1,14 @@
 mod game;
+mod inventory;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use game::{Game, Tool};
+use game::Game;
 use glam::Vec2;
-use render::{Camera, Renderer, Scene};
+use inventory::{Item, HOTBAR};
+use render::{Camera, ColorRect, Renderer, Scene};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -14,7 +16,6 @@ use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use world::light::Rect;
 use world::player::Input;
-use world::Liquid;
 
 const TITLE_EVERY: Duration = Duration::from_millis(500);
 const PAN_SPEED: f32 = 1200.0;
@@ -90,6 +91,34 @@ impl App {
         self.camera.time += dt;
     }
 
+    /// Hotbar in the top-left corner, as world rects under the current camera.
+    /// Each slot shows its item colour, with a bar for the stack size.
+    fn hotbar(&self, size: Vec2) -> Vec<ColorRect> {
+        const SLOT: f32 = 40.0;
+        let z = self.camera.zoom;
+        let at = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| ColorRect {
+            pos: self.screen_to_world(Vec2::new(x, y), size).into(),
+            size: [w / z, h / z],
+            color,
+        };
+        let inv = &self.game.inventory;
+        let mut rects = Vec::new();
+        for i in 0..HOTBAR {
+            let x = 10.0 + i as f32 * (SLOT + 4.0);
+            let frame = if i == inv.selected { [0.9, 0.8, 0.3, 0.9] } else { [0.1, 0.1, 0.15, 0.6] };
+            rects.push(at(x, 10.0, SLOT, SLOT, frame));
+            rects.push(at(x + 3.0, 13.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
+            if let Some(s) = inv.slots[i] {
+                rects.push(at(x + 10.0, 16.0, SLOT - 20.0, SLOT - 20.0, self.game.item_color(s.item)));
+                if s.count > 1 {
+                    let w = (SLOT - 8.0) * s.count as f32 / inventory::MAX_STACK as f32;
+                    rects.push(at(x + 4.0, 10.0 + SLOT - 7.0, w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
+                }
+            }
+        }
+        rects
+    }
+
     fn view(&self, size: Vec2) -> Rect {
         let half = size / (2.0 * self.camera.zoom * 16.0);
         let lo = ((self.camera.center / 16.0) - half).floor().max(Vec2::ZERO);
@@ -151,13 +180,18 @@ impl ApplicationHandler for App {
                             (self.game.player.vx, self.game.player.vy) = (0.0, 0.0);
                         }
                     }
-                    KeyCode::KeyQ if press => self.game.cycle_block(-1),
-                    KeyCode::KeyE if press => self.game.cycle_block(1),
-                    KeyCode::Digit1 if press => self.game.tool = Tool::Block,
-                    KeyCode::Digit2 if press => self.game.tool = Tool::Liquid(Liquid::Water),
-                    KeyCode::Digit3 if press => self.game.tool = Tool::Liquid(Liquid::Lava),
-                    KeyCode::Digit4 if press => self.game.tool = Tool::Liquid(Liquid::Honey),
-                    KeyCode::Digit5 if press => self.game.tool = Tool::Liquid(Liquid::Shimmer),
+                    KeyCode::KeyQ if press => self.game.inventory.cycle(-1),
+                    KeyCode::KeyE if press => self.game.inventory.cycle(1),
+                    KeyCode::Digit1 if press => self.game.inventory.selected = 0,
+                    KeyCode::Digit2 if press => self.game.inventory.selected = 1,
+                    KeyCode::Digit3 if press => self.game.inventory.selected = 2,
+                    KeyCode::Digit4 if press => self.game.inventory.selected = 3,
+                    KeyCode::Digit5 if press => self.game.inventory.selected = 4,
+                    KeyCode::Digit6 if press => self.game.inventory.selected = 5,
+                    KeyCode::Digit7 if press => self.game.inventory.selected = 6,
+                    KeyCode::Digit8 if press => self.game.inventory.selected = 7,
+                    KeyCode::Digit9 if press => self.game.inventory.selected = 8,
+                    KeyCode::Digit0 if press => self.game.inventory.selected = 9,
                     _ => {}
                 }
             }
@@ -197,9 +231,11 @@ impl ApplicationHandler for App {
                 self.update(dt.as_secs_f32().min(0.1), size);
                 let view = self.view(size);
                 let cursor = self.cursor_tile(size);
+                let hud = self.hotbar(size);
                 let Some(renderer) = &mut self.renderer else { return };
                 self.game.sync(renderer, view);
-                let rects = self.game.player_rects(Some(cursor), self.free);
+                let mut rects = self.game.player_rects(Some(cursor), self.free);
+                rects.extend(hud);
                 let stats = renderer.render(&self.camera, &rects);
                 self.frames += 1;
                 self.frame_time += dt;
@@ -208,9 +244,13 @@ impl ApplicationHandler for App {
                     let ms = self.frame_time.as_secs_f64() * 1000.0 / self.frames as f64;
                     let mode = if stats.lod { "map".to_string() } else { format!("{} inst", stats.instances) };
                     let clock = self.game.clock();
-                    let tool = match self.game.tool {
-                        Tool::Block => format!("block {}", self.game.block()),
-                        Tool::Liquid(l) => format!("{l:?}"),
+                    let tool = match self.game.inventory.selected() {
+                        None => "empty".to_string(),
+                        Some(s) => match s.item {
+                            Item::Block(t) => format!("block {t} x{}", s.count),
+                            Item::Bucket(None) => "empty bucket".to_string(),
+                            Item::Bucket(Some(l)) => format!("{l:?} bucket"),
+                        },
                     };
                     if let Some(window) = &self.window {
                         window.set_title(&format!(

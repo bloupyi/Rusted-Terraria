@@ -33,11 +33,15 @@ mesurer les FPS).
 Controles :
 
 - ZQSD/WASD ou fleches : marcher, sauter (haut ou Espace), descendre des plateformes.
-- Clic gauche : creuser (un objet entier s'il est multi-tuiles). Clic droit : poser.
-  Portee de 10 tuiles.
-- 1 : bloc (Q/E pour changer de type), 2 a 5 : eau, lave, miel, shimmer.
+- Clic gauche : creuser (un objet entier s'il est multi-tuiles) ; les blocs tombent
+  en objets que le joueur ramasse en passant pres. Clic droit : utiliser l'objet
+  choisi (poser un bloc, vider ou remplir un seau). Portee de 10 tuiles.
+- 1 a 0 ou Q/E : choisir l'emplacement de la barre d'objets (en haut a gauche ;
+  la barre blanche sous un objet donne la taille de la pile). Depart : seaux d'eau,
+  de lave, de miel, de shimmer et un seau vide.
 - F : camera libre (deplacement au clavier, Maj pour accelerer, clic milieu pour
-  glisser, edition sans limite de portee) ; `--free` pour demarrer ainsi.
+  glisser, edition sans limite de portee ni consommation d'objets) ; `--free` pour
+  demarrer ainsi.
 - Molette : zoom autour du curseur. L : couper l'eclairage. T (maintenu) : accelerer
   le temps. Echap : quitter.
 
@@ -51,7 +55,7 @@ chunks de liquide actifs.
 | `crates/formats` | Formats du jeu : XNB (LZX, LZ4, Texture2D), WLD, recherche de l'installation. Aucune dependance graphique |
 | `crates/world` | Monde en chunks 32x32, struct of arrays, editions, lumiere, liquides, physique du joueur |
 | `crates/render` | Atlas de sheets, instances par chunk construites avec rayon, rendu wgpu |
-| `crates/app` | Binaire `rusted-terraria` : fenetre winit, boucle, camera, jeu (`game.rs`) |
+| `crates/app` | Binaire `rusted-terraria` : fenetre winit, boucle, camera, jeu (`game.rs`), inventaire |
 
 Choix de rendu :
 
@@ -128,6 +132,7 @@ Marquees `TODO` dans le code :
   utilise LZX ou rien). Formats DXT non decodes.
 - Cadrage des blocs approximatif (voisins identiques seulement), pas de fusion
   terre/pierre, herbe, pentes, peinture ni arbres.
-- Liquides et joueur sans textures du jeu (couleurs unies) : les noms et la
+- Les objets multi-tuiles (meubles, torches) disparaissent sans objet a ramasser.
+- Liquides, joueur et objets sans textures du jeu (couleurs unies) : les noms et la
   disposition des sheets `Liquid_*` et `Player_*` ne sont pas verifies sans
   installation.

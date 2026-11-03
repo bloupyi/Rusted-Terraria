@@ -259,7 +259,8 @@ fn block_frame(up: bool, down: bool, left: bool, right: bool, v: u32) -> (u32, u
 }
 
 /// Opaque versions of the shader's liquid colours.
-const LIQUID_LOD: [[u8; 4]; 4] = [[40, 90, 230, 255], [240, 100, 20, 255], [240, 165, 25, 255], [205, 155, 255, 255]];
+pub const LIQUID_LOD: [[u8; 4]; 4] =
+    [[40, 90, 230, 255], [240, 100, 20, 255], [240, 165, 25, 255], [205, 155, 255, 255]];
 
 /// Empty map pages of `LOD_PAGE`² texels, row-major; `colorize` fills them.
 fn build_lod(world: &World) -> (u32, u32, Vec<Vec<u8>>) {

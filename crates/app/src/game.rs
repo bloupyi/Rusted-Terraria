@@ -2,6 +2,8 @@
 //! keeping the GPU copies (meshes, light, map) in step with edits.
 
 use render::{ColorRect, Renderer, Scene};
+
+use crate::inventory::{Inventory, Item};
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::player::{self, Input, Player};
@@ -19,13 +21,21 @@ const LIGHT_BUDGET: usize = 64;
 const LOD_BUDGET: usize = 256;
 /// Off-screen chunks remeshed per frame; on-screen ones always are.
 const MESH_BUDGET: usize = 64;
-/// Tile types placeable from the start even if the world has none.
-pub const EXTRA_TILES: [u16; 3] = [0, 1, OBSIDIAN];
+/// Tile types edits may create even if the world has none.
+pub const EXTRA_TILES: [u16; 1] = [OBSIDIAN];
+const DROP_SIZE: f32 = 10.0;
+/// Dropped items fly to the player from this far, and are picked up from `PICKUP`.
+const MAGNET: f32 = 5.0 * 16.0;
+const PICKUP: f32 = 1.5 * 16.0;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub enum Tool {
-    Block,
-    Liquid(Liquid),
+/// An item lying in the world.
+pub struct Drop {
+    pub x: f32,
+    pub y: f32,
+    pub vx: f32,
+    pub vy: f32,
+    pub item: Item,
+    pub count: u16,
 }
 
 pub struct Game {
@@ -35,9 +45,8 @@ pub struct Game {
     pub player: Player,
     /// 0 at dawn, 1 a full day later.
     pub time: f32,
-    pub tool: Tool,
-    blocks: Vec<u16>,
-    block: usize,
+    pub inventory: Inventory,
+    pub drops: Vec<Drop>,
     stale: Vec<u8>,
     lod_queue: Vec<u32>,
     /// Per chunk, `DIRTY_*` bits not yet remeshed.
@@ -48,12 +57,6 @@ pub struct Game {
 
 impl Game {
     pub fn new(world: World, scene: Scene) -> Self {
-        let important = &world.header.frame_important;
-        let (mut blocks, _) = world.used_types();
-        blocks.extend_from_slice(&EXTRA_TILES);
-        blocks.retain(|&t| !important.get(t as usize).copied().unwrap_or(false));
-        blocks.sort_unstable();
-        blocks.dedup();
         let sim = LiquidSim::new(&world);
         let player = Player::spawn(&world, world.width / 2);
         let stale = vec![0; world.chunks.len()];
@@ -64,9 +67,14 @@ impl Game {
             sim,
             player,
             time: 0.25,
-            tool: Tool::Block,
-            blocks,
-            block: 0,
+            inventory: Inventory::new(&[
+                Item::Bucket(Some(Liquid::Water)),
+                Item::Bucket(Some(Liquid::Lava)),
+                Item::Bucket(Some(Liquid::Honey)),
+                Item::Bucket(Some(Liquid::Shimmer)),
+                Item::Bucket(None),
+            ]),
+            drops: Vec::new(),
             stale,
             lod_queue: Vec::new(),
             mesh_pending,
@@ -75,26 +83,53 @@ impl Game {
         }
     }
 
-    pub fn block(&self) -> u16 {
-        self.blocks[self.block]
-    }
-
-    pub fn cycle_block(&mut self, step: i32) {
-        self.block = (self.block as i32 + step).rem_euclid(self.blocks.len() as i32) as usize;
-        self.tool = Tool::Block;
-    }
-
     pub fn update(&mut self, input: Option<Input>, dt: f32, time_scale: f32) {
         self.time = (self.time + dt * time_scale / DAY_LENGTH).fract();
         if let Some(input) = input {
             self.player.update(&self.world, input, dt);
         }
+        self.update_drops(dt);
         // At most one tick per frame: under load liquids slow down instead of piling up work.
         self.liquid_acc = (self.liquid_acc + dt).min(LIQUID_TICK);
         if self.liquid_acc >= LIQUID_TICK {
             self.liquid_acc -= LIQUID_TICK;
             self.sim.tick(&mut self.world);
         }
+    }
+
+    /// Drops fall onto blocks, fly to a nearby player and go into the inventory.
+    fn update_drops(&mut self, dt: f32) {
+        let (px, py) = self.player.center();
+        let world = &self.world;
+        let inventory = &mut self.inventory;
+        self.drops.retain_mut(|d| {
+            let (dx, dy) = (px - (d.x + DROP_SIZE / 2.0), py - (d.y + DROP_SIZE / 2.0));
+            let dist = (dx * dx + dy * dy).sqrt();
+            if dist < PICKUP {
+                d.count = inventory.add(d.item, d.count);
+                return d.count > 0;
+            }
+            if dist < MAGNET {
+                (d.vx, d.vy) = (dx / dist * 300.0, dy / dist * 300.0);
+                (d.x, d.y) = (d.x + d.vx * dt, d.y + d.vy * dt);
+                return true;
+            }
+            d.vx *= 0.9;
+            d.vy = (d.vy + 1200.0 * dt).min(500.0);
+            let (nx, ny) = (d.x + d.vx * dt, d.y + d.vy * dt);
+            let tx = ((nx + DROP_SIZE / 2.0) / 16.0).floor() as i64;
+            let below = ((ny + DROP_SIZE) / 16.0).floor() as i64;
+            if world.solid(tx, below) || !world.in_bounds(tx, below) {
+                d.y = below as f32 * 16.0 - DROP_SIZE;
+                d.vy = 0.0;
+            } else {
+                d.y = ny;
+            }
+            if !world.solid(((nx + DROP_SIZE / 2.0) / 16.0).floor() as i64, ((d.y + 1.0) / 16.0).floor() as i64) {
+                d.x = nx;
+            }
+            true
+        });
     }
 
     /// Hours on a 24 h clock, dawn at 4:30.
@@ -127,6 +162,7 @@ impl Game {
     }
 
     /// Removes the block at the tile, or the whole object if it is frame-important.
+    /// Blocks drop as items, except with the free camera.
     pub fn dig(&mut self, tx: i64, ty: i64, free: bool) {
         if !self.in_reach(tx, ty, free) {
             return;
@@ -149,16 +185,29 @@ impl Game {
                 todo.extend([(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]);
             }
         }
+        // TODO: objects (furniture, torches) have no item of their own yet and drop nothing.
+        if !important && !free {
+            self.drops.push(Drop {
+                x: tx as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
+                y: ty as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
+                vx: 0.0,
+                vy: -120.0,
+                item: Item::Block(t),
+                count: 1,
+            });
+        }
     }
 
-    /// Places the current block, or pours the current liquid.
+    /// Uses the selected item on the tile: places a block, pours or fills a bucket.
+    /// Nothing is used up with the free camera.
     pub fn place(&mut self, tx: i64, ty: i64, free: bool) {
+        let Some(stack) = self.inventory.selected() else { return };
         if !self.in_reach(tx, ty, free) || self.world.solid(tx, ty) {
             return;
         }
         let (x, y) = (tx as u32, ty as u32);
-        match self.tool {
-            Tool::Block => {
+        match stack.item {
+            Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
                     self.world.tile(tx + dx, ty + dy) != NO_TILE || self.world.wall(tx + dx, ty + dy) != 0
                 });
@@ -166,11 +215,49 @@ impl Game {
                     return;
                 }
                 self.world.set_liquid(x, y, 0, 0);
-                self.world.set_tile(x, y, self.block(), -1, -1);
+                self.world.set_tile(x, y, t, -1, -1);
+                if !free {
+                    self.inventory.consume();
+                }
             }
-            Tool::Liquid(kind) => self.world.set_liquid(x, y, 255, kind as u8),
+            Item::Bucket(Some(kind)) => {
+                let (amount, k) = {
+                    let (c, i) = self.world.cell(x, y);
+                    (c.liquid[i], c.liquid_kind[i])
+                };
+                if amount != 0 && k != kind as u8 {
+                    return;
+                }
+                self.world.set_liquid(x, y, 255, kind as u8);
+                if !free {
+                    self.inventory.set_selected(Item::Bucket(None));
+                }
+            }
+            Item::Bucket(None) => {
+                let (amount, k) = {
+                    let (c, i) = self.world.cell(x, y);
+                    (c.liquid[i], c.liquid_kind[i])
+                };
+                // Scoops a cell that is at least half full.
+                if amount < 128 {
+                    return;
+                }
+                self.world.set_liquid(x, y, 0, 0);
+                let kind = [Liquid::Water, Liquid::Lava, Liquid::Honey, Liquid::Shimmer][k as usize & 3];
+                self.inventory.set_selected(Item::Bucket(Some(kind)));
+            }
         }
         self.sim.wake(&self.world, x, y);
+    }
+
+    /// Colour of an item for drops and the hotbar.
+    pub fn item_color(&self, item: Item) -> [f32; 4] {
+        let c = match item {
+            Item::Block(t) => self.scene.mesher.atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4]),
+            Item::Bucket(None) => [150, 150, 160, 255],
+            Item::Bucket(Some(l)) => render::mesh::LIQUID_LOD[l as usize],
+        };
+        c.map(|v| v as f32 / 255.0)
     }
 
     pub fn player_rects(&self, cursor: Option<(i64, i64)>, free: bool) -> Vec<ColorRect> {
@@ -183,6 +270,9 @@ impl Game {
                 color: [0.85, 0.65, 0.45, 1.0],
             });
             rects.push(ColorRect { pos: [p.x + 2.0, p.y + 22.0], size: [16.0, 20.0], color: [0.25, 0.35, 0.7, 1.0] });
+        }
+        for d in &self.drops {
+            rects.push(ColorRect { pos: [d.x, d.y], size: [DROP_SIZE; 2], color: self.item_color(d.item) });
         }
         if let Some((tx, ty)) = cursor.filter(|&(x, y)| self.in_reach(x, y, free)) {
             rects.push(ColorRect {
