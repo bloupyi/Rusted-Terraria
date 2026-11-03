@@ -16,15 +16,14 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - run: rustup toolchain install stable --profile minimal --component clippy
       - name: ALSA headers for cpal
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libasound2-dev
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      - name: No game assets in the tree
+      - name: No game files or decompiled sources in the tree or history
         shell: bash
-        run: |
-          if git ls-files | grep -iE '\.(xnb|wld|twld|plr|xwb|xsb|xgs)$'; then
-            echo "game files must not be committed"; exit 1
-          fi
+        run: python3 tools/check_public_tree.py && python3 tools/check_public_tree.py --history

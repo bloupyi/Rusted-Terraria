@@ -22,3 +22,12 @@
 **/fixtures/terraria/
 
 rusted-terraria.cfg
+
+# Sources decompilees et binaires du jeu : uniquement en local
+/.local/
+*.cs
+*.csproj
+*.sln
+*.exe
+*.dll
+*.pdb
