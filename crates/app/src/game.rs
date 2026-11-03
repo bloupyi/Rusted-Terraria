@@ -7,6 +7,7 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 use crate::inventory::{Inventory, Item};
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
+use world::mob::{Kind, Mob};
 use world::player::{self, Input, Player};
 use world::{Liquid, World, CHUNK, NO_TILE};
 
@@ -32,6 +33,16 @@ const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 2
 /// Objects that hang from the tile above them.
 const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
+pub const MAX_HP: i32 = 100;
+/// Seconds without damage after a hit.
+const INVULNERABLE: f32 = 0.67;
+const MAX_MOBS: usize = 5;
+const SPAWN_EVERY: f32 = 2.0;
+/// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
+const SPAWN_DIST: (i64, i64) = (35, 55);
+const DESPAWN: f32 = 100.0 * 16.0;
+const ATTACK_DAMAGE: i32 = 10;
+const ATTACK_EVERY: f32 = 0.35;
 /// Dirt-brown backdrop under the surface, lit like the tiles.
 const UNDERGROUND: [f32; 4] = [0.30, 0.21, 0.15, 1.0];
 /// Walked pixels per leg frame.
@@ -55,7 +66,10 @@ const SKIN: [f32; 4] = [1.0, 0.80, 0.65, 1.0];
 /// Sheets packed beside the tiles for sprites.
 pub fn sprite_sheets() -> Vec<String> {
     let mut v: Vec<String> = PLAYER_LAYERS.iter().map(|l| l.0.to_string()).collect();
-    v.extend(["Tree_Tops_0", "Tree_Branches_0", "Item_205", "Item_206", "Item_207", "Item_1128"].map(String::from));
+    v.extend(
+        ["Tree_Tops_0", "Tree_Branches_0", "Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_3"]
+            .map(String::from),
+    );
     v
 }
 
@@ -91,6 +105,13 @@ pub struct Game {
     pub inventory: Inventory,
     pub drops: Vec<Drop>,
     pub templates: Vec<Template>,
+    pub mobs: Vec<Mob>,
+    pub hp: i32,
+    invulnerable: f32,
+    attack_cd: f32,
+    spawn_acc: f32,
+    spawn_x: u32,
+    rng: u64,
     /// Per column, the first row of the underground backdrop.
     pub surface: Vec<u32>,
     stale: Vec<u8>,
@@ -108,6 +129,7 @@ impl Game {
         let stale = vec![0; world.chunks.len()];
         let mesh_pending = vec![0; world.chunks.len()];
         let surface = surface(&world);
+        let spawn_x = world.width / 2;
         Self {
             world,
             scene,
@@ -123,6 +145,13 @@ impl Game {
             ]),
             drops: Vec::new(),
             templates: Vec::new(),
+            mobs: Vec::new(),
+            hp: MAX_HP,
+            invulnerable: 0.0,
+            attack_cd: 0.0,
+            spawn_acc: 0.0,
+            spawn_x,
+            rng: 0x9E37_79B9_7F4A_7C15,
             surface,
             stale,
             lod_queue: Vec::new(),
@@ -137,6 +166,7 @@ impl Game {
         if let Some(input) = input {
             self.player.update(&self.world, input, dt);
         }
+        self.update_mobs(dt, input.is_some());
         self.update_drops(dt);
         // At most one tick per frame: under load liquids slow down instead of piling up work.
         self.liquid_acc = (self.liquid_acc + dt).min(LIQUID_TICK);
@@ -144,6 +174,82 @@ impl Game {
             self.liquid_acc -= LIQUID_TICK;
             self.sim.tick(&mut self.world);
         }
+    }
+
+    fn random(&mut self) -> u64 {
+        self.rng ^= self.rng << 13;
+        self.rng ^= self.rng >> 7;
+        self.rng ^= self.rng << 17;
+        self.rng
+    }
+
+    /// Spawns, moves and despawns monsters; contact hurts the player when `fight`.
+    fn update_mobs(&mut self, dt: f32, fight: bool) {
+        self.invulnerable -= dt;
+        self.attack_cd -= dt;
+        self.spawn_acc += dt;
+        if fight && self.spawn_acc >= SPAWN_EVERY {
+            self.spawn_acc = 0.0;
+            if self.mobs.len() < MAX_MOBS {
+                self.try_spawn();
+            }
+        }
+        let target = self.player.center();
+        for m in &mut self.mobs {
+            m.update(&self.world, target, dt);
+        }
+        self.mobs
+            .retain(|m| (m.body.center().0 - target.0).abs() < DESPAWN && m.body.y < self.world.height as f32 * 16.0);
+        if !fight || self.invulnerable > 0.0 {
+            return;
+        }
+        if let Some(m) = self.mobs.iter().find(|m| m.body.touches(&self.player.body)) {
+            self.hp -= m.kind.damage();
+            self.invulnerable = INVULNERABLE;
+            let away = if self.player.center().0 < m.body.center().0 { -1.0 } else { 1.0 };
+            (self.player.vx, self.player.vy) = (away * 250.0, -250.0);
+            if self.hp <= 0 {
+                self.hp = MAX_HP;
+                self.player = Player::spawn(&self.world, self.spawn_x);
+            }
+        }
+    }
+
+    /// A monster on open ground to one side, off screen: slimes by day, zombies too at night.
+    fn try_spawn(&mut self) {
+        let r = self.random();
+        let (px, py) = self.player.center();
+        let (ptx, pty) = ((px / 16.0) as i64, (py / 16.0) as i64);
+        let side = if r & 1 == 0 { -1 } else { 1 };
+        let d = SPAWN_DIST.0 + ((r >> 1) % (SPAWN_DIST.1 - SPAWN_DIST.0) as u64) as i64;
+        let x = ptx + side * d;
+        let w = &self.world;
+        let open = |y: i64| (1..=3).all(|k| w.in_bounds(x, y - k) && !w.solid(x, y - k) && w.liquid(x, y - k) == 0);
+        let Some(y) = (pty - 25..pty + 25).find(|&y| w.solid(x, y) && open(y)) else { return };
+        let night = self.time >= DAYTIME;
+        let kind = if night && (r >> 8) % 10 < 6 { Kind::Zombie } else { Kind::Slime };
+        self.mobs.push(Mob::new(kind, x as f32 * 16.0 + 8.0, y as f32 * 16.0));
+    }
+
+    /// Hits the monster under the world point if in reach. True if one was there.
+    pub fn attack(&mut self, wx: f32, wy: f32, free: bool) -> bool {
+        let (tx, ty) = ((wx / 16.0).floor() as i64, (wy / 16.0).floor() as i64);
+        if !self.in_reach(tx, ty, free) {
+            return false;
+        }
+        let Some(i) = self.mobs.iter().position(|m| {
+            let b = &m.body;
+            wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h
+        }) else {
+            return false;
+        };
+        if self.attack_cd <= 0.0 {
+            self.attack_cd = ATTACK_EVERY;
+            if self.mobs[i].hit(ATTACK_DAMAGE, self.player.center().0) {
+                self.mobs.swap_remove(i);
+            }
+        }
+        true
     }
 
     /// Drops fall onto blocks, fly to a nearby player and go into the inventory.
@@ -500,6 +606,7 @@ impl Game {
         self.tree_tops(view, &mut under);
 
         let mut over = Vec::new();
+        self.mob_sprites(&mut over);
         if !free {
             self.player_sprites(&mut over);
         }
@@ -538,6 +645,36 @@ impl Game {
         }
     }
 
+    fn mob_sprites(&self, out: &mut Vec<Sprite>) {
+        for m in &self.mobs {
+            let b = &m.body;
+            let (cx, bottom) = (b.x + b.w / 2.0, b.y + b.h);
+            let hurt = m.stun > 0.0;
+            // Monster sheets face left.
+            let flags = SPRITE_LIT | if m.facing_left { 0 } else { SPRITE_FLIP };
+            let (sheet, w, h, frame, color) = match m.kind {
+                Kind::Slime => {
+                    let frame = if b.on_ground { (m.timer * 4.0) as u32 % 2 } else { 1 };
+                    ("NPC_1", 32, 26, frame, [0.45, 0.95, 0.45, 1.0])
+                }
+                Kind::Zombie => {
+                    let frame = if b.on_ground { (m.timer * 8.0) as u32 % 3 } else { 2 };
+                    ("NPC_3", 38, 48, frame, [1.0; 4])
+                }
+            };
+            let color = if hurt { [1.0, 0.35, 0.35, 1.0] } else { color };
+            match self.sheet(sheet) {
+                Some(s) => {
+                    let mut sp =
+                        Sprite::sheet([cx - w as f32 / 2.0, bottom - h as f32 + 2.0], s, [0, frame * h, w, h], flags);
+                    sp.color = color;
+                    out.push(sp);
+                }
+                None => out.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([b.x, b.y], [b.w, b.h], color) }),
+            }
+        }
+    }
+
     /// Layered body sheets, tinted, with the walk cycle on the legs.
     fn player_sprites(&self, out: &mut Vec<Sprite>) {
         let p = &self.player;
@@ -558,7 +695,7 @@ impl Game {
                 continue;
             }
             let mut s = Sprite::sheet(pos, sheet, [col * 40, row * 56, 40, 56], flip);
-            s.color = color;
+            s.color = if self.invulnerable > 0.0 { color.map(|c| c * 0.5) } else { color };
             out.push(s);
             any = true;
         }
@@ -717,5 +854,22 @@ mod tests {
         // Digging the floor under the other bench breaks it too.
         g.dig(12, 20, false);
         assert_eq!((g.world.tile(12, 19), g.world.tile(13, 19)), (NO_TILE, NO_TILE));
+    }
+
+    #[test]
+    fn monsters_hurt_and_die() {
+        let mut g = game();
+        let (px, py) = g.player.center();
+        g.mobs.push(Mob::new(Kind::Slime, px, py + 21.0));
+        g.update_mobs(0.0, true);
+        assert_eq!(g.hp, MAX_HP - Kind::Slime.damage());
+        g.update_mobs(0.1, true);
+        assert_eq!(g.hp, MAX_HP - Kind::Slime.damage(), "invulnerable for a moment");
+        for _ in 0..3 {
+            let (mx, my) = g.mobs[0].body.center();
+            assert!(g.attack(mx, my, false));
+            g.attack_cd = 0.0;
+        }
+        assert!(g.mobs.is_empty());
     }
 }

@@ -9,8 +9,10 @@ use std::path::Path;
 use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
+pub mod body;
 pub mod light;
 pub mod liquid;
+pub mod mob;
 pub mod player;
 
 pub use formats::wld::{flags, Liquid, NO_TILE};

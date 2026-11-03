@@ -106,7 +106,14 @@ plateformes traversables par dessous ou en descendant, nage ralentie dans les
 liquides. Dessine avec les sheets `Player_0_*` et `Player_Hair_1` teintees, jambes
 animees en marche.
 
-Sprites : joueur, objets au sol, barre d'objets (icones tirees des sheets de tuiles
+Monstres (`world::mob`) : corps partage avec le joueur (`world::body`). Slimes le
+jour (attente puis saut vers le joueur), zombies en plus la nuit (marche, saut
+devant un mur de deux blocs). Ils apparaissent hors ecran a 35-55 tuiles, au plus
+5 a la fois, et disparaissent au-dela de 100 tuiles. Contact : degats, recul et
+invulnerabilite courte ; a 0 PV le joueur revient au point de depart. Clic gauche
+sur un monstre a portee : 10 degats avec recul. Barre de vie sous la barre d'objets.
+
+Sprites : joueur, monstres (`NPC_1`, `NPC_3`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
 `Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
 eclaires comme les tuiles. Les liquides utilisent `Liquid_0` (eau animee),
