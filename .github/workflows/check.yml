@@ -1,0 +1,27 @@
+name: check
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+permissions:
+  contents: read
+jobs:
+  check:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: rustup toolchain install stable --profile minimal --component clippy
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: No game assets in the tree
+        shell: bash
+        run: |
+          if git ls-files | grep -iE '\.(xnb|wld|twld|plr|xwb|xsb|xgs)$'; then
+            echo "game files must not be committed"; exit 1
+          fi
