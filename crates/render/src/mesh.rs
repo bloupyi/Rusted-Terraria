@@ -3,15 +3,18 @@
 
 use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
+use world::light::LightMap;
 use world::{Chunk, World, CHUNK, NO_TILE};
 
 use crate::atlas::{Atlas, SheetRef};
 
 pub const LOD_PAGE: u32 = 2048;
 const WALL_BIT: u32 = 1 << 30;
+const LIQUID_BIT: u32 = 1 << 31;
 
-/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30.
-/// `b`: atlas u (12) | atlas v (12) << 12 | layer (8) << 24.
+/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30 | liquid << 31.
+/// `b`: atlas u (12) | atlas v (12) << 12 | layer (8) << 24,
+/// or for a liquid: amount (8) | kind (8) << 8.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Instance {
@@ -19,12 +22,13 @@ pub struct Instance {
     pub b: u32,
 }
 
-/// One chunk row: walls of every chunk, then tiles of every chunk, so any
+/// One chunk row: walls of every chunk, then liquids, then tiles, so any
 /// horizontal run of visible chunks is one contiguous range per layer.
 pub struct RowMesh {
     pub instances: Vec<Instance>,
-    /// `chunks_x + 1` prefix offsets into `instances`.
+    /// `chunks_x + 1` prefix offsets into `instances`, per layer.
     pub wall_off: Vec<u32>,
+    pub liquid_off: Vec<u32>,
     pub tile_off: Vec<u32>,
 }
 
@@ -36,47 +40,49 @@ pub struct Scene {
     pub lod_pages_x: u32,
     pub lod_pages_y: u32,
     pub lod: Vec<Vec<u8>>,
+    /// Same page layout as `lod`.
+    pub light: LightMap,
 }
 
 impl Scene {
     pub fn build(world: &World, images: Option<&std::path::Path>) -> Self {
         let (tiles, walls) = world.used_types();
         let atlas = Atlas::load(images, &tiles, &walls);
-        let (rows, (lod_pages_x, lod_pages_y, lod)) =
-            rayon::join(|| build_rows(world, &atlas), || build_lod(world, &atlas));
-        Self { atlas, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod }
+        let (rows, ((lod_pages_x, lod_pages_y, lod), light)) = rayon::join(
+            || build_rows(world, &atlas),
+            || rayon::join(|| build_lod(world, &atlas), || world::light::compute(world)),
+        );
+        Self { atlas, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod, light }
     }
 }
 
 fn build_rows(world: &World, atlas: &Atlas) -> Vec<RowMesh> {
     let important = &world.header.frame_important;
-    let chunks: Vec<(Vec<Instance>, Vec<Instance>)> = (0..world.chunks_x * world.chunks_y)
+    let chunks: Vec<[Vec<Instance>; 3]> = (0..world.chunks_x * world.chunks_y)
         .into_par_iter()
         .map(|i| build_chunk(world, atlas, important, i % world.chunks_x, i / world.chunks_x))
         .collect();
     chunks
         .par_chunks(world.chunks_x as usize)
         .map(|row| {
-            let total: usize = row.iter().map(|(w, t)| w.len() + t.len()).sum();
+            let total: usize = row.iter().flatten().map(Vec::len).sum();
             let mut instances = Vec::with_capacity(total);
-            let mut wall_off = vec![0];
-            for (w, _) in row {
-                instances.extend_from_slice(w);
-                wall_off.push(instances.len() as u32);
-            }
-            let mut tile_off = vec![instances.len() as u32];
-            for (_, t) in row {
-                instances.extend_from_slice(t);
-                tile_off.push(instances.len() as u32);
-            }
-            RowMesh { instances, wall_off, tile_off }
+            let [wall_off, liquid_off, tile_off] = std::array::from_fn(|layer| {
+                let mut off = vec![instances.len() as u32];
+                for c in row {
+                    instances.extend_from_slice(&c[layer]);
+                    off.push(instances.len() as u32);
+                }
+                off
+            });
+            RowMesh { instances, wall_off, liquid_off, tile_off }
         })
         .collect()
 }
 
-fn build_chunk(world: &World, atlas: &Atlas, important: &[bool], cx: u32, cy: u32) -> (Vec<Instance>, Vec<Instance>) {
+fn build_chunk(world: &World, atlas: &Atlas, important: &[bool], cx: u32, cy: u32) -> [Vec<Instance>; 3] {
     let c: &Chunk = world.chunk(cx, cy);
-    let (mut walls, mut tiles) = (Vec::new(), Vec::new());
+    let (mut walls, mut liquids, mut tiles) = (Vec::new(), Vec::new(), Vec::new());
     let is_block = |t: u16| t != NO_TILE && !important.get(t as usize).copied().unwrap_or(false);
     for lx in 0..CHUNK {
         let x = cx * CHUNK + lx;
@@ -98,6 +104,11 @@ fn build_chunk(world: &World, atlas: &Atlas, important: &[bool], cx: u32, cy: u3
                     walls.push(inst);
                 }
             }
+            if c.liquid[i] != 0 {
+                // Liquid below more liquid fills its tile.
+                let amount = if world.liquid(xi, yi - 1) != 0 { 255 } else { c.liquid[i] as u32 };
+                liquids.push(Instance { a: x | (y << 15) | LIQUID_BIT, b: amount | (c.liquid_kind[i] as u32) << 8 });
+            }
             let t = c.tile[i];
             if let Some(Some(s)) = atlas.tiles.get(t as usize).filter(|_| t != NO_TILE) {
                 let (fx, fy) = if is_block(t) {
@@ -113,7 +124,7 @@ fn build_chunk(world: &World, atlas: &Atlas, important: &[bool], cx: u32, cy: u3
             }
         }
     }
-    (walls, tiles)
+    [walls, liquids, tiles]
 }
 
 #[inline]
@@ -157,6 +168,9 @@ fn block_frame(up: bool, down: bool, left: bool, right: bool, v: u32) -> (u32, u
     }
 }
 
+/// Opaque versions of the shader's liquid colours.
+const LIQUID_LOD: [[u8; 4]; 4] = [[40, 90, 230, 255], [240, 100, 20, 255], [240, 165, 25, 255], [205, 155, 255, 255]];
+
 /// Map pages of `LOD_PAGE`² texels, row-major, RGBA8 premultiplied.
 fn build_lod(world: &World, atlas: &Atlas) -> (u32, u32, Vec<Vec<u8>>) {
     let px = world.width.div_ceil(LOD_PAGE);
@@ -179,6 +193,9 @@ fn build_lod(world: &World, atlas: &Atlas) -> (u32, u32, Vec<Vec<u8>>) {
                     let (t, w) = (world.tile(x as i64, y as i64), world.wall(x as i64, y as i64));
                     if let Some(c) = atlas.tile_color.get(t as usize).filter(|_| t != NO_TILE) {
                         px.copy_from_slice(c);
+                    } else if world.liquid(x as i64, y as i64) != 0 {
+                        let c = world.chunk(x / CHUNK, y / CHUNK);
+                        px.copy_from_slice(&LIQUID_LOD[c.liquid_kind[Chunk::index(x % CHUNK, y % CHUNK)] as usize & 3]);
                     } else if let Some(c) = atlas.wall_color.get(w as usize).filter(|_| w != 0) {
                         px.copy_from_slice(&[c[0] / 2, c[1] / 2, c[2] / 2, 255]);
                     }
@@ -188,4 +205,28 @@ fn build_lod(world: &World, atlas: &Atlas) -> (u32, u32, Vec<Vec<u8>>) {
         })
         .collect();
     (px, py, pages)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use formats::wld::{Liquid, Tile};
+
+    #[test]
+    fn liquid_instances() {
+        // Lava column at x = 3: partial surface at y = 5, full below.
+        let world = World::parse(&formats::synth::write_world("l", 40, 40, &[], |x, y| Tile {
+            liquid: if x == 3 && (5..8).contains(&y) { 100 } else { 0 },
+            liquid_kind: Liquid::Lava,
+            ..Tile::default()
+        }))
+        .unwrap();
+        let rows = build_rows(&world, &Atlas::load(None, &[], &[]));
+        let r = &rows[0];
+        let liquids = &r.instances[r.liquid_off[0] as usize..r.liquid_off[world.chunks_x as usize] as usize];
+        let got: Vec<(u32, u32)> = liquids.iter().map(|i| ((i.a >> 15) & 0x7fff, i.b)).collect();
+        let lava = (Liquid::Lava as u32) << 8;
+        assert_eq!(got, vec![(5, 100 | lava), (6, 255 | lava), (7, 255 | lava)]);
+        assert!(liquids.iter().all(|i| i.a & LIQUID_BIT != 0 && i.a & 0x7fff == 3));
+    }
 }

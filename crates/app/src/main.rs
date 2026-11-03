@@ -82,6 +82,10 @@ impl ApplicationHandler for App {
                     KeyCode::KeyS | KeyCode::ArrowDown => 3,
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => 4,
                     KeyCode::Escape => return el.exit(),
+                    KeyCode::KeyL if down && !event.repeat => {
+                        self.camera.lighting = !self.camera.lighting;
+                        return;
+                    }
                     _ => return,
                 };
                 self.keys[slot] = down;
@@ -185,7 +189,7 @@ fn main() {
         scene: Some(scene),
         window: None,
         renderer: None,
-        camera: Camera { center: world_px * Vec2::new(0.5, 0.3), zoom: 1.0 },
+        camera: Camera { center: world_px * Vec2::new(0.5, 0.3), zoom: 1.0, lighting: true },
         keys: [false; 5],
         cursor: Vec2::ZERO,
         drag: None,

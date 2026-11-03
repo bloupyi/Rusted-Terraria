@@ -2,7 +2,8 @@
 
 Moteur Rust qui reimplemente Terraria from scratch, en visant des performances
 nettement superieures a l'original. Phase 1 : charger un monde `.wld` existant et
-l'afficher en lecture seule, camera libre.
+l'afficher en lecture seule, camera libre. Phase 2 (en cours) : eclairage et
+liquides, puis joueur et physique.
 
 ## Contraintes
 
@@ -30,7 +31,8 @@ remplacement. `--vsync` active la synchro verticale (desactivee par defaut pour
 mesurer les FPS).
 
 Controles : ZQSD/WASD ou fleches pour se deplacer (Maj pour accelerer), molette pour
-zoomer autour du curseur, clic gauche ou milieu pour glisser, Echap pour quitter.
+zoomer autour du curseur, clic gauche ou milieu pour glisser, L pour couper
+l'eclairage, Echap pour quitter.
 Le titre affiche FPS, temps de frame, nombre de draws et d'instances.
 
 ## Organisation
@@ -38,7 +40,7 @@ Le titre affiche FPS, temps de frame, nombre de draws et d'instances.
 | Crate | Role |
 |---|---|
 | `crates/formats` | Formats du jeu : XNB (LZX, LZ4, Texture2D), WLD, recherche de l'installation. Aucune dependance graphique |
-| `crates/world` | Monde en chunks 32x32, struct of arrays |
+| `crates/world` | Monde en chunks 32x32, struct of arrays, calcul de la lumiere |
 | `crates/render` | Atlas de sheets, instances par chunk construites avec rayon, rendu wgpu |
 | `crates/app` | Binaire `rusted-terraria` : fenetre winit, boucle, camera |
 
@@ -50,6 +52,19 @@ Choix de rendu :
 - Instance de 8 octets : position de tuile, coordonnees atlas, couche.
 - Sous 2 pixels par tuile, une carte d'un texel par tuile (couleur moyenne de la
   sheet) remplace les instances : un draw quel que soit le zoom arriere.
+
+Eclairage :
+
+- Une valeur RGB par tuile, calculee au chargement (`world::light`) : ciel ouvert
+  (chaque colonne jusqu'au premier bloc ou mur), tuiles lumineuses, lave.
+- Propagation par balayages droite, gauche, bas, haut, repetes deux fois ; la
+  lumiere qui sort d'une case est attenuee selon la case (air, liquide, bloc).
+  Lignes et bandes de colonnes en parallele, environ 300 ms sur 8400x2400 et 4 coeurs.
+- Envoyee au GPU dans des pages 2048x2048 comme la carte ; le shader interpole
+  entre les centres des tuiles.
+
+Liquides : quads de couleur unie entre murs et tuiles, hauteur selon la quantite,
+plein si du liquide est au-dessus. Couleur opaque sur la carte.
 
 ## Tests
 
@@ -69,7 +84,7 @@ cargo run --release -p world --example gen_world -- big.wld
 cargo run --release -p world --example load_world -- big.wld
 ```
 
-## Limites connues (phase 1)
+## Limites connues
 
 Marquees `TODO` dans le code :
 
@@ -79,4 +94,9 @@ Marquees `TODO` dans le code :
 - XNB : LZ4 suppose un bloc brut sans en-tete de frame (non verifie, Terraria
   utilise LZX ou rien). Formats DXT non decodes.
 - Cadrage des blocs approximatif (voisins identiques seulement), pas de fusion
-  terre/pierre, herbe, pentes, peinture, liquides, arbres ni eclairage.
+  terre/pierre, herbe, pentes, peinture ni arbres.
+- Eclairage statique (calcule une fois, midi) : table des tuiles lumineuses
+  incomplete, une couleur par type (styles de torches ignores), pas de cycle
+  jour/nuit ni de mise a jour locale.
+- Liquides : couleurs unies sans les textures du jeu ni surface animee, pas encore
+  de simulation d'ecoulement.
