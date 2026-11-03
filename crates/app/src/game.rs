@@ -4,6 +4,7 @@
 use render::atlas::SheetRef;
 use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
+use crate::audio::Sfx;
 use crate::inventory::{Inventory, Item};
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -33,6 +34,8 @@ const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 2
 /// Objects that hang from the tile above them.
 const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
+/// Stone, ores and obsidian ring instead of thudding when broken.
+const HARD: [u16; 7] = [1, 6, 7, 8, 9, 25, 56];
 pub const MAX_HP: i32 = 100;
 /// Seconds without damage after a hit.
 const INVULNERABLE: f32 = 0.67;
@@ -106,6 +109,8 @@ pub struct Game {
     pub drops: Vec<Drop>,
     pub templates: Vec<Template>,
     pub mobs: Vec<Mob>,
+    /// Sounds to play this frame.
+    pub sfx: Vec<Sfx>,
     pub hp: i32,
     invulnerable: f32,
     attack_cd: f32,
@@ -146,6 +151,7 @@ impl Game {
             drops: Vec::new(),
             templates: Vec::new(),
             mobs: Vec::new(),
+            sfx: Vec::new(),
             hp: MAX_HP,
             invulnerable: 0.0,
             attack_cd: 0.0,
@@ -193,6 +199,9 @@ impl Game {
             if self.mobs.len() < MAX_MOBS {
                 self.try_spawn();
             }
+            if self.mobs.iter().any(|m| m.kind == Kind::Zombie) && self.random().is_multiple_of(4) {
+                self.sfx.push(Sfx::Zombie);
+            }
         }
         let target = self.player.center();
         for m in &mut self.mobs {
@@ -206,6 +215,7 @@ impl Game {
         if let Some(m) = self.mobs.iter().find(|m| m.body.touches(&self.player.body)) {
             self.hp -= m.kind.damage();
             self.invulnerable = INVULNERABLE;
+            self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
             let away = if self.player.center().0 < m.body.center().0 { -1.0 } else { 1.0 };
             (self.player.vx, self.player.vy) = (away * 250.0, -250.0);
             if self.hp <= 0 {
@@ -245,8 +255,12 @@ impl Game {
         };
         if self.attack_cd <= 0.0 {
             self.attack_cd = ATTACK_EVERY;
+            self.sfx.push(Sfx::Swing);
             if self.mobs[i].hit(ATTACK_DAMAGE, self.player.center().0) {
                 self.mobs.swap_remove(i);
+                self.sfx.push(Sfx::MobKilled);
+            } else {
+                self.sfx.push(Sfx::MobHit);
             }
         }
         true
@@ -257,11 +271,16 @@ impl Game {
         let (px, py) = self.player.center();
         let world = &self.world;
         let inventory = &mut self.inventory;
+        let sfx = &mut self.sfx;
         self.drops.retain_mut(|d| {
             let (dx, dy) = (px - (d.x + DROP_SIZE / 2.0), py - (d.y + DROP_SIZE / 2.0));
             let dist = (dx * dx + dy * dy).sqrt();
             if dist < PICKUP {
+                let before = d.count;
                 d.count = inventory.add(d.item, d.count);
+                if d.count < before {
+                    sfx.push(Sfx::Grab);
+                }
                 return d.count > 0;
             }
             if dist < MAGNET {
@@ -344,6 +363,7 @@ impl Game {
         } else {
             (vec![(tx, ty)], Some((Item::Block(t), 1)))
         };
+        self.sfx.push(if HARD.contains(&t) { Sfx::Tink } else { Sfx::Dig });
         for &(x, y) in &cells {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
             self.sim.wake(&self.world, x as u32, y as u32);
@@ -521,8 +541,13 @@ impl Game {
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
         }
-        if matches!(stack.item, Item::Block(_) | Item::Object(_)) && !free {
-            self.inventory.consume();
+        if matches!(stack.item, Item::Block(_) | Item::Object(_)) {
+            self.sfx.push(Sfx::Dig);
+            if !free {
+                self.inventory.consume();
+            }
+        } else {
+            self.sfx.push(Sfx::Splash);
         }
         self.sim.wake(&self.world, x, y);
     }

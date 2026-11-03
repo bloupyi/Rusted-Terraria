@@ -1,3 +1,4 @@
+mod audio;
 mod game;
 mod inventory;
 
@@ -39,6 +40,7 @@ struct App {
     world_px: Vec2,
     vsync: bool,
     game: Game,
+    audio: Option<audio::Audio>,
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
     camera: Camera,
@@ -86,6 +88,11 @@ impl App {
             }
             if self.buttons[1] {
                 self.game.place(tx, ty, self.free);
+            }
+        }
+        for sfx in self.game.sfx.drain(..) {
+            if let Some(a) = &mut self.audio {
+                a.play(sfx, 0.6);
             }
         }
         (self.camera.sky, self.camera.background) = self.game.sky();
@@ -318,6 +325,9 @@ fn main() {
         scene.mesher.atlas.missing
     );
 
+    let audio = images.as_deref().and_then(|d| d.parent()).and_then(|c| audio::Audio::new(c.join("Sounds")));
+    println!("audio: {}", if audio.is_some() { "on" } else { "off (no output device or no install)" });
+
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
     let game = Game::new(world, scene);
     let (cx, cy) = game.player.center();
@@ -326,6 +336,7 @@ fn main() {
         world_px,
         vsync,
         game,
+        audio,
         window: None,
         renderer: None,
         camera: Camera {

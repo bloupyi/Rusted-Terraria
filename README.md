@@ -113,6 +113,13 @@ devant un mur de deux blocs). Ils apparaissent hors ecran a 35-55 tuiles, au plu
 invulnerabilite courte ; a 0 PV le joueur revient au point de depart. Clic gauche
 sur un monstre a portee : 10 degats avec recul. Barre de vie sous la barre d'objets.
 
+Son (`app/src/audio.rs`) : effets `Content/Sounds/*.xnb` (SoundEffect PCM 16 bits,
+les 527 fichiers de 1.4.5 sont lus) charges a la demande, reechantillonnes a la
+frequence de sortie et mixes dans le callback cpal. Creuser, poser, seaux,
+ramassage, coups, monstres touches ou tues, gemissements de zombies. Sans sortie
+audio ou sans installation, le jeu reste muet. La musique (`Wave Bank.xwb`, XACT)
+n'est pas lue.
+
 Sprites : joueur, monstres (`NPC_1`, `NPC_3`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
 `Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
