@@ -1,16 +1,16 @@
 //! Terraria world file (.wld), versions with section offsets.
 //!
 //! Field layout comes from community format documentation and observation of
-//! saved files. Uncertain points are marked TODO.
+//! saved files (checked on a 1.4.5.8 save, version 326).
 
 use crate::reader::{bad, Error, Reader};
 
 /// Oldest version accepted. TODO: 1.3.x (< 225) shares the layout as far as
 /// documented, but has not been checked against real files.
 pub const MIN_VERSION: i32 = 225;
-/// Newest version the tile layout below is known for (1.4.4.x).
-/// TODO: newer versions are parsed with the same layout; the section end check
-/// will reject them if the tile record changed.
+/// Version written by `synth`. Real saves up to 326 (1.4.5.8) share this tile
+/// layout; newer ones are parsed the same way and rejected by the section end
+/// check if the tile record changes.
 pub const KNOWN_VERSION: i32 = 279;
 
 const MAGIC: &[u8; 7] = b"relogic";
@@ -195,7 +195,7 @@ fn read_tile(r: &mut Reader, important: &[bool], v269: bool) -> Result<(Tile, u3
     let liquid_bits = (h1 & 0x18) >> 3;
     if liquid_bits != 0 {
         t.liquid = r.u8()?;
-        // TODO: shimmer as h3 bit 7 is from documentation, not seen in a real save yet.
+        // Shimmer is h3 bit 7 (seen in a 1.4.5 save: one lake of ~900 cells).
         t.liquid_kind = if h3 & 0x80 != 0 {
             Liquid::Shimmer
         } else {

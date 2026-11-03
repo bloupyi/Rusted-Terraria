@@ -14,7 +14,6 @@ world = { path = "crates/world" }
 render = { path = "crates/render" }
 bytemuck = { version = "1.25", features = ["derive"] }
 glam = "0.34"
-lz4_flex = { version = "0.14", default-features = false, features = ["std"] }
 lzxd = "0.2.7"
 pollster = "1.0"
 rayon = "1.12"

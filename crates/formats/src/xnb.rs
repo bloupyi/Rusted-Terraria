@@ -61,11 +61,8 @@ pub fn content(data: &[u8]) -> Result<(Header, Vec<u8>), Error> {
     let out = match h.decompressed_size {
         None => body.to_vec(),
         Some(size) if h.flags & FLAG_LZX != 0 => decompress_lzx(body, size as usize)?,
-        // TODO: MonoGame's LZ4 XNB is assumed to be one raw LZ4 block (no frame header).
-        // Not verified against a real file; Terraria itself ships LZX or uncompressed.
-        Some(size) => {
-            lz4_flex::block::decompress(body, size as usize).map_err(|e| Error::Format(format!("lz4: {e}")))?
-        }
+        // Terraria 1.4.5 ships LZX (13 993 files) or uncompressed (22), never MonoGame's LZ4.
+        Some(_) => return bad("LZ4 XNB not supported (not used by Terraria)"),
     };
     Ok((h, out))
 }
@@ -122,7 +119,7 @@ pub fn read_texture(data: &[u8]) -> Result<Texture, Error> {
     let _mips = r.u32()?;
     let len = r.u32()? as usize;
     if format != SURFACE_COLOR {
-        // TODO: DXT1/3/5 (4/5/6) are not decoded; Terraria's tile sheets use Color.
+        // Every texture under Content/Images (1.4.5) is Color; DXT never occurs.
         return bad(format!("unsupported surface format {format}"));
     }
     if len != width as usize * height as usize * 4 {
@@ -186,11 +183,9 @@ mod tests {
     }
 
     #[test]
-    fn texture_lz4() {
+    fn lz4_rejected() {
         let c = texture_content(16, 16);
-        let t = read_texture(&wrap(FLAG_LZ4, &c, &lz4_flex::block::compress(&c))).unwrap();
-        assert_eq!((t.width, t.height), (16, 16));
-        assert_eq!(t.rgba[..], c[c.len() - 1024..]);
+        assert!(read_texture(&wrap(FLAG_LZ4, &c, &c)).is_err());
     }
 
     #[test]

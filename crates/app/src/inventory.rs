@@ -11,6 +11,8 @@ pub enum Item {
     Block(u16),
     /// `None` is an empty bucket.
     Bucket(Option<Liquid>),
+    /// Furniture, torches and other objects: an index into the game's templates.
+    Object(u16),
 }
 
 impl Item {
@@ -18,6 +20,7 @@ impl Item {
         match self {
             Item::Block(_) => MAX_STACK,
             Item::Bucket(_) => 1,
+            Item::Object(_) => 99,
         }
     }
 }

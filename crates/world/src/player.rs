@@ -34,6 +34,9 @@ pub struct Player {
     pub vx: f32,
     pub vy: f32,
     pub on_ground: bool,
+    pub facing_left: bool,
+    /// Distance walked on the ground, for the walk animation.
+    pub walked: f32,
 }
 
 impl Player {
@@ -42,7 +45,15 @@ impl Player {
         let ty = (0..world.height as i64)
             .find(|&y| (0..2).any(|dx| world.solid(tx as i64 + dx, y)))
             .unwrap_or(world.height as i64);
-        Self { x: tx as f32 * 16.0, y: ty as f32 * 16.0 - HEIGHT, vx: 0.0, vy: 0.0, on_ground: false }
+        Self {
+            x: tx as f32 * 16.0,
+            y: ty as f32 * 16.0 - HEIGHT,
+            vx: 0.0,
+            vy: 0.0,
+            on_ground: false,
+            facing_left: false,
+            walked: 0.0,
+        }
     }
 
     pub fn center(&self) -> (f32, f32) {
@@ -63,6 +74,9 @@ impl Player {
         let target = dir * RUN_SPEED * k;
         let dv = (target - self.vx).clamp(-accel * dt, accel * dt);
         self.vx += dv;
+        if dir != 0.0 {
+            self.facing_left = dir < 0.0;
+        }
         if input.jump && (self.on_ground || wet) {
             self.vy = -JUMP_SPEED * if wet { 0.6 } else { 1.0 };
         }
@@ -78,6 +92,7 @@ impl Player {
             self.move_x(world, self.vx * h, grounded || self.on_ground);
             self.move_y(world, self.vy * h, input.down);
         }
+        self.walked = if self.on_ground { self.walked + (self.vx * dt).abs() } else { 0.0 };
     }
 
     fn in_liquid(&self, world: &World) -> bool {
@@ -192,7 +207,8 @@ mod tests {
                 }
             },
         );
-        let mut p = Player { x: 5.0 * 16.0, y: 0.0, vx: 0.0, vy: 0.0, on_ground: false };
+        let mut p =
+            Player { x: 5.0 * 16.0, y: 0.0, vx: 0.0, vy: 0.0, on_ground: false, facing_left: false, walked: 0.0 };
         run(&mut p, &w, Input::default(), 2.0);
         assert!(p.on_ground);
         assert_eq!(p.y + HEIGHT, 40.0 * 16.0);
@@ -210,13 +226,14 @@ mod tests {
             y if y >= 40 => 1,
             _ => NO_TILE,
         });
-        let mut p = Player { x: 100.0, y: 0.0, vx: 0.0, vy: 0.0, on_ground: false };
+        let mut p = Player { x: 100.0, y: 0.0, vx: 0.0, vy: 0.0, on_ground: false, facing_left: false, walked: 0.0 };
         run(&mut p, &w, Input::default(), 2.0);
         assert_eq!(p.y + HEIGHT, 20.0 * 16.0);
         run(&mut p, &w, Input { down: true, ..Input::default() }, 2.0);
         assert_eq!(p.y + HEIGHT, 40.0 * 16.0);
         // Jumping up through the platform from below.
-        let mut p = Player { x: 100.0, y: 22.0 * 16.0, vx: 0.0, vy: -500.0, on_ground: false };
+        let mut p =
+            Player { x: 100.0, y: 22.0 * 16.0, vx: 0.0, vy: -500.0, on_ground: false, facing_left: false, walked: 0.0 };
         run(&mut p, &w, Input { jump: true, ..Input::default() }, 0.2);
         assert!(p.y < 20.0 * 16.0);
     }

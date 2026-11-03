@@ -140,6 +140,15 @@ impl World {
         self.chunk(x / CHUNK, y / CHUNK).liquid[Chunk::index(x % CHUNK, y % CHUNK)]
     }
 
+    /// Stored frame of a frame-important tile; out of bounds reads as `(-1, -1)`.
+    pub fn frame(&self, x: i64, y: i64) -> (i16, i16) {
+        if !self.in_bounds(x, y) {
+            return (-1, -1);
+        }
+        let (c, i) = self.cell(x as u32, y as u32);
+        (c.frame_x[i], c.frame_y[i])
+    }
+
     #[inline]
     pub fn in_bounds(&self, x: i64, y: i64) -> bool {
         x >= 0 && y >= 0 && x < self.width as i64 && y < self.height as i64

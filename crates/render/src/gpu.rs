@@ -24,16 +24,43 @@ pub struct Camera {
     pub time: f32,
 }
 
-/// A flat rectangle in world pixels, colour premultiplied (player, cursor).
+/// A rectangle in world pixels: flat colour, or an atlas region tinted by
+/// `color` (premultiplied). Player, mobs, drops, tree tops, the hotbar.
 #[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-pub struct ColorRect {
+#[derive(Clone, Copy, Pod, Zeroable, Default, Debug)]
+pub struct Sprite {
     pub pos: [f32; 2],
     pub size: [f32; 2],
     pub color: [f32; 4],
+    /// Atlas texels `x, y, w, h`; `w == 0` draws flat colour.
+    pub uv: [f32; 4],
+    /// Atlas layer | `SPRITE_LIT` | `SPRITE_FLIP`.
+    pub flags: u32,
 }
 
-const MAX_RECTS: u64 = 1024;
+/// Multiplied by the tile light under it.
+pub const SPRITE_LIT: u32 = 1 << 8;
+/// Mirrored horizontally.
+pub const SPRITE_FLIP: u32 = 1 << 9;
+
+impl Sprite {
+    pub fn flat(pos: [f32; 2], size: [f32; 2], color: [f32; 4]) -> Self {
+        Self { pos, size, color, ..Self::default() }
+    }
+
+    /// `src`: region of `sheet` in its own pixels.
+    pub fn sheet(pos: [f32; 2], sheet: &crate::atlas::SheetRef, src: [u32; 4], flags: u32) -> Self {
+        Self {
+            pos,
+            size: [src[2] as f32, src[3] as f32],
+            color: [1.0; 4],
+            uv: [(sheet.x + src[0]) as f32, (sheet.y + src[1]) as f32, src[2] as f32, src[3] as f32],
+            flags: sheet.layer | flags,
+        }
+    }
+}
+
+const MAX_RECTS: u64 = 4096;
 
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
@@ -51,6 +78,8 @@ struct CameraUniform {
     lighting: u32,
     world: [u32; 2],
     sky: [f32; 4],
+    /// Per liquid kind: sheet x, y, layer, frame count (0: flat colour).
+    liquids: [[u32; 4]; 4],
 }
 
 struct Row {
@@ -77,6 +106,7 @@ pub struct Renderer {
     chunks_x: u32,
     lod_pages: (u32, u32),
     world: [u32; 2],
+    liquids: [[u32; 4]; 4],
 }
 
 impl Renderer {
@@ -90,6 +120,9 @@ impl Renderer {
         let (pages_x, pages_y, chunks_x) = (scene.lod_pages_x, scene.lod_pages_y, scene.chunks_x);
         let (rows, pages) = (std::mem::take(&mut scene.rows), std::mem::take(&mut scene.lod));
         let atlas = &mut scene.mesher.atlas;
+        // Frames sit side by side, 16 px wide with a 2 px gap.
+        let liquids = crate::mesh::LIQUID_SHEETS
+            .map(|n| atlas.named.get(n).map_or([0; 4], |s| [s.x, s.y, s.layer, (s.w + 2) / 18]));
         let light = &scene.light;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -266,14 +299,14 @@ impl Renderer {
         let tile_pipeline = pipeline("vs_tile", "fs_tile", &[Some(instance_layout)]);
         let lod_pipeline = pipeline("vs_lod", "fs_lod", &[]);
         let rect_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<ColorRect>() as u64,
+            array_stride: std::mem::size_of::<Sprite>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4, 4 => Uint32],
         };
         let rect_pipeline = pipeline("vs_rect", "fs_rect", &[Some(rect_layout)]);
         let rects = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("rects"),
-            size: MAX_RECTS * std::mem::size_of::<ColorRect>() as u64,
+            size: MAX_RECTS * std::mem::size_of::<Sprite>() as u64,
             usage: wgpu::BufferUsages::VERTEX | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
@@ -304,6 +337,7 @@ impl Renderer {
             chunks_x,
             lod_pages: (pages_x, pages_y),
             world,
+            liquids,
         }
     }
 
@@ -365,7 +399,8 @@ impl Renderer {
         Vec2::new(self.config.width as f32, self.config.height as f32)
     }
 
-    pub fn render(&mut self, cam: &Camera, rects: &[ColorRect]) -> Stats {
+    /// `under` is drawn behind walls (backdrops), `over` in front of everything.
+    pub fn render(&mut self, cam: &Camera, under: &[Sprite], over: &[Sprite]) -> Stats {
         let frame = match self.surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(f) | wgpu::CurrentSurfaceTexture::Suboptimal(f) => f,
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
@@ -383,10 +418,15 @@ impl Renderer {
             lighting: cam.lighting as u32,
             world: self.world,
             sky: [cam.sky[0], cam.sky[1], cam.sky[2], cam.time],
+            liquids: self.liquids,
         };
         self.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
-        let rects = &rects[..rects.len().min(MAX_RECTS as usize)];
-        self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(rects));
+        let under = &under[..under.len().min(MAX_RECTS as usize / 4)];
+        let over = &over[..over.len().min(MAX_RECTS as usize - under.len())];
+        self.queue.write_buffer(&self.rects, 0, bytemuck::cast_slice(under));
+        let over_at = std::mem::size_of_val(under) as u64;
+        self.queue.write_buffer(&self.rects, over_at, bytemuck::cast_slice(over));
+        let (n_under, n_over) = (under.len() as u32, over.len() as u32);
 
         let view = frame.texture.create_view(&Default::default());
         let mut encoder = self.device.create_command_encoder(&Default::default());
@@ -414,6 +454,12 @@ impl Renderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.bind_group, &[]);
+            if n_under > 0 {
+                pass.set_pipeline(&self.rect_pipeline);
+                pass.set_vertex_buffer(0, self.rects.slice(..));
+                pass.draw(0..4, 0..n_under);
+                stats.draws += 1;
+            }
             if stats.lod {
                 pass.set_pipeline(&self.lod_pipeline);
                 pass.draw(0..4, 0..self.lod_pages.0 * self.lod_pages.1);
@@ -442,10 +488,10 @@ impl Renderer {
                     }
                 }
             }
-            if !rects.is_empty() {
+            if n_over > 0 {
                 pass.set_pipeline(&self.rect_pipeline);
                 pass.set_vertex_buffer(0, self.rects.slice(..));
-                pass.draw(0..4, 0..rects.len() as u32);
+                pass.draw(0..4, n_under..n_under + n_over);
                 stats.draws += 1;
             }
         }
