@@ -32,7 +32,15 @@ Sans installation trouvee, les tuiles sont affichees avec des couleurs de
 remplacement. `--vsync` active la synchro verticale (desactivee par defaut pour
 mesurer les FPS). `--profile` affiche chaque seconde le temps CPU par phase (mise a
 jour, synchro des chunks, sprites, envoi du rendu) et `--zoom <z>` fixe le zoom de
-depart (1/64 a 8), pour mesurer.
+depart (1/64 a 8), pour mesurer. `--at <x,y>` centre la camera sur une tuile
+(avec `--free`, pour comparer un endroit precis avec le jeu).
+
+Raccords des blocs : memes regles que le jeu (`world::frame`), lues dans la
+decompilation locale et reecrites en tables ordonnees : briques qui se joignent,
+pierre et minerais qui se fondent dans la terre, herbe sur sa terre ou sa boue,
+coins interieurs, demi-blocs et pentes (decoupees en colonnes de 2 pixels comme
+dans le jeu). Les ensembles de types (`world::tile_sets`) sont generes par
+`tools/gen_tile_sets.py`.
 
 Controles :
 

@@ -104,6 +104,8 @@ impl Atlas {
         }
         atlas.uploads = refs.into_iter().zip(loaded).map(|(r, l)| (r.unwrap(), l.2)).collect();
         atlas.layers = layer + 1;
+        // Instances keep 5 bits for the layer.
+        assert!(atlas.layers <= 32, "atlas needs {} layers", atlas.layers);
         atlas
     }
 }
