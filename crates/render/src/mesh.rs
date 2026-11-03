@@ -196,9 +196,8 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
             }
             let wall = c.wall[i];
             if let Some(Some(s)) = atlas.walls.get(wall as usize).filter(|_| wall != 0) {
-                let n = |dx, dy| world.wall(xi + dx, yi + dy) != 0;
-                let (fx, fy) = block_frame(n(0, -1), n(0, 1), n(-1, 0), n(1, 0), variant(x, y));
-                if let Some(inst) = instance(s, x, y, fx * 36, fy * 36, 32, true, 0) {
+                let (fx, fy) = world::frame::wall(world, xi, yi, variant(x, y) as usize);
+                if let Some(inst) = instance(s, x, y, fx, fy, 32, true, 0) {
                     walls.push(inst);
                 }
             }
@@ -235,30 +234,6 @@ fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, size: u32, wall: boo
 #[inline]
 fn variant(x: u32, y: u32) -> u32 {
     (x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77)).rotate_right(13) % 3
-}
-
-/// Frame cell (in grid units) of a block from its 4 neighbours.
-/// TODO: approximate layout read off block sheets; no tile merging (dirt/stone
-/// blends, grass), no slopes or half blocks yet.
-fn block_frame(up: bool, down: bool, left: bool, right: bool, v: u32) -> (u32, u32) {
-    match (up, down, left, right) {
-        (true, true, true, true) => (1 + v, 1),
-        (false, true, true, true) => (1 + v, 0),
-        (true, false, true, true) => (1 + v, 2),
-        (true, true, false, true) => (0, v),
-        (true, true, true, false) => (4, v),
-        (false, true, false, true) => (2 * v, 3),
-        (false, true, true, false) => (1 + 2 * v, 3),
-        (true, false, false, true) => (2 * v, 4),
-        (true, false, true, false) => (1 + 2 * v, 4),
-        (true, true, false, false) => (5, v),
-        (false, false, true, true) => (6 + v, 4),
-        (false, true, false, false) => (6 + v, 0),
-        (true, false, false, false) => (6 + v, 3),
-        (false, false, false, true) => (9, v),
-        (false, false, true, false) => (12, v),
-        (false, false, false, false) => (9 + v, 3),
-    }
 }
 
 /// Opaque versions of the shader's liquid colours.

@@ -19,12 +19,15 @@ FLAGS = {
     "tileMergeDirt": "MERGE_DIRT",
     "tileBlockLight": "BLOCK_LIGHT",
 }
+# Integer arrays split into one set per value.
+LEVELS = {"tileLargeFrames": "LARGE_FRAMES", "wallLargeFrames": "WALL_LARGE_FRAMES"}
 SETS = {
     "Platforms": "PLATFORMS",
     "tileMossBrick": "MOSS_BRICK",
     "ChecksForMerge": "CHECKS_FOR_MERGE",
     "ForcedDirtMerging": "FORCED_DIRT_MERGING",
     "Ore": "ORE",
+    "TruncatesWalls": "TRUNCATES_WALLS",
 }
 CONVERSION = {"Grass": "GRASS", "MergesWithDirtInASpecialWay": "DIRT_SPECIAL"}
 
@@ -63,7 +66,7 @@ def run(lines, values):
 
 def assign(line, values, var=None, n=None):
     m = re.match(r"(?:Main\.)?(\w+)\[(\w+)\] = (true|false|\d+);", line)
-    if not m or m.group(1) not in FLAGS:
+    if not m or (m.group(1) not in FLAGS and m.group(1) not in LEVELS):
         return
     idx = m.group(2)
     idx = n if idx == var else int(idx) if idx.isdigit() else None
@@ -90,7 +93,9 @@ def main():
     lists = {}
     for field, name in FLAGS.items():
         lists[name] = sorted(k for k, v in values.get(field, {}).items() if v == "true")
-    large = {k: int(v) for k, v in values.get("tileLargeFrames", {}).items()}
+    for field, name in LEVELS.items():
+        for level in (1, 2):
+            lists[f"{name}_{level}"] = sorted(k for k, v in values.get(field, {}).items() if v == str(level))
     sets_text = tile_id[tile_id.index("public static class Sets"):]
     conv = sets_text[sets_text.index("public static class Conversion"):]
     for field, name in SETS.items():
