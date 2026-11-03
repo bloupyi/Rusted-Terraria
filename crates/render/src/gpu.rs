@@ -33,7 +33,7 @@ pub struct ColorRect {
     pub color: [f32; 4],
 }
 
-const MAX_RECTS: u64 = 64;
+const MAX_RECTS: u64 = 1024;
 
 #[derive(Default, Clone, Copy)]
 pub struct Stats {
