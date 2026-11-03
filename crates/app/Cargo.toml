@@ -12,3 +12,4 @@ render.workspace = true
 glam.workspace = true
 pollster.workspace = true
 winit.workspace = true
+wgpu.workspace = true

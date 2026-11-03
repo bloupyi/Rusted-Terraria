@@ -11,3 +11,5 @@ bytemuck.workspace = true
 glam.workspace = true
 rayon.workspace = true
 wgpu.workspace = true
+formats.workspace = true
+pollster.workspace = true

@@ -1461,7 +1461,9 @@ name = "render"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "formats",
  "glam",
+ "pollster",
  "rayon",
  "wgpu",
  "world",
@@ -1496,6 +1498,7 @@ dependencies = [
  "glam",
  "pollster",
  "render",
+ "wgpu",
  "winit",
  "world",
 ]
