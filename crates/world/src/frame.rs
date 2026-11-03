@@ -310,10 +310,67 @@ pub fn shape(world: &World, x: i64, y: i64) -> u8 {
     ((world.flags(x, y) & flags::SHAPE_MASK) >> flags::SHAPE_SHIFT) as u8
 }
 
+/// Variant forced by position for types drawn with large frames (4 variants
+/// laid out so neighbours never repeat), else `None`.
+fn large_variant(level1: bool, level2: bool, x: i64, y: i64) -> Option<usize> {
+    const SCATTER: [[usize; 3]; 4] = [[1, 3, 1], [0, 2, 0], [1, 1, 3], [0, 0, 2]];
+    if level1 {
+        Some(SCATTER[y.rem_euclid(4) as usize][x.rem_euclid(3) as usize])
+    } else if level2 {
+        Some((x.rem_euclid(2) + 2 * y.rem_euclid(2)) as usize)
+    } else {
+        None
+    }
+}
+
 /// Frame of block `(x, y)` in pixels on its sheet, `variant` in `0..3`.
 pub fn block(world: &World, x: i64, y: i64, variant: usize) -> (u32, u32) {
-    let (cx, cy) = block_cell(world, x, y, variant);
-    (cx as u32 * 18, cy as u32 * 18)
+    let t = world.tile(x, y);
+    let v = large_variant(LARGE_FRAMES_1.has(t), LARGE_FRAMES_2.has(t), x, y).unwrap_or(variant);
+    let (cx, cy) = block_cell(world, x, y, v.min(2));
+    // The fourth large variant sits five rows below the third.
+    (cx as u32 * 18, (cy as u32 + if v == 3 { 5 } else { 0 }) * 18)
+}
+
+/// Wall cells by which sides have a wall (1 up, 2 left, 4 right, 8 down),
+/// then 16..=19 for the centre variants; four variants each.
+const WALL_CELLS: [[(u8, u8); 4]; 20] = [
+    [(9, 3), (10, 3), (11, 3), (6, 6)],
+    [(6, 3), (7, 3), (8, 3), (4, 6)],
+    [(12, 0), (12, 1), (12, 2), (12, 5)],
+    [(1, 4), (3, 4), (5, 4), (3, 6)],
+    [(9, 0), (9, 1), (9, 2), (9, 5)],
+    [(0, 4), (2, 4), (4, 4), (2, 6)],
+    [(6, 4), (7, 4), (8, 4), (5, 6)],
+    [(1, 2), (2, 2), (3, 2), (3, 5)],
+    [(6, 0), (7, 0), (8, 0), (6, 5)],
+    [(5, 0), (5, 1), (5, 2), (5, 5)],
+    [(1, 3), (3, 3), (5, 3), (1, 6)],
+    [(4, 0), (4, 1), (4, 2), (4, 5)],
+    [(0, 3), (2, 3), (4, 3), (0, 6)],
+    [(0, 0), (0, 1), (0, 2), (0, 5)],
+    [(1, 0), (2, 0), (3, 0), (1, 5)],
+    [(1, 1), (2, 1), (3, 1), (2, 5)],
+    [(6, 1), (7, 1), (8, 1), (7, 5)],
+    [(6, 2), (7, 2), (8, 2), (8, 5)],
+    [(10, 0), (10, 1), (10, 2), (10, 5)],
+    [(11, 0), (11, 1), (11, 2), (11, 5)],
+];
+
+/// Surrounded walls cycle through centre cells on a 3x3 pattern.
+const WALL_CENTER: [[u8; 3]; 3] = [[2, 0, 0], [0, 1, 4], [0, 3, 0]];
+
+/// Frame of the wall at `(x, y)` in pixels on its sheet (36-pixel cells).
+pub fn wall(world: &World, x: i64, y: i64, variant: usize) -> (u32, u32) {
+    let joins = |dx: i64, dy: i64| world.wall(x + dx, y + dy) != 0 || TRUNCATES_WALLS.has(world.tile(x + dx, y + dy));
+    let mut sides = joins(0, -1) as usize | (joins(-1, 0) as usize) << 1 | (joins(1, 0) as usize) << 2 | (joins(0, 1) as usize) << 3;
+    if sides == 15 {
+        sides += WALL_CENTER[x.rem_euclid(3) as usize][y.rem_euclid(3) as usize] as usize;
+    }
+    let w = world.wall(x, y);
+    let v = large_variant(WALL_LARGE_FRAMES_1.has(w), WALL_LARGE_FRAMES_2.has(w), x, y).unwrap_or(variant);
+    let (cx, cy) = WALL_CELLS[sides][v];
+    (cx as u32 * 36, cy as u32 * 36)
 }
 
 fn block_cell(world: &World, x: i64, y: i64, variant: usize) -> (u8, u8) {
@@ -547,6 +604,13 @@ mod tests {
     fn bricks_join_each_other() {
         let w = world(&["www", "sss", "sss"]);
         assert_eq!(cell(&w, 1, 1), (1, 1));
+    }
+
+    #[test]
+    fn wall_cells() {
+        let w = world(&["..."]);
+        // No wall around: the lone cell.
+        assert_eq!(wall(&w, 7, 6, 1), (10 * 36, 3 * 36));
     }
 
     #[test]

@@ -39,7 +39,9 @@ Raccords des blocs : memes regles que le jeu (`world::frame`), lues dans la
 decompilation locale et reecrites en tables ordonnees : briques qui se joignent,
 pierre et minerais qui se fondent dans la terre, herbe sur sa terre ou sa boue,
 coins interieurs, demi-blocs et pentes (decoupees en colonnes de 2 pixels comme
-dans le jeu). Les ensembles de types (`world::tile_sets`) sont generes par
+dans le jeu). Murs : meme choix de cellule que le jeu selon les murs voisins, avec
+les motifs de centre 3x3 et les grandes trames fixees par la position (aussi pour
+les blocs concernes). Les ensembles de types (`world::tile_sets`) sont generes par
 `tools/gen_tile_sets.py`.
 
 Controles :
