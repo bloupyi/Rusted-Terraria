@@ -28,6 +28,25 @@ pub struct Header {
     pub world_id: i32,
     pub width: u32,
     pub height: u32,
+    /// Sky and background state; `None` when the flags section is cut short.
+    pub env: Option<Env>,
+}
+
+/// World flags that drive the sky and the surface backgrounds.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Env {
+    pub moon_type: u8,
+    /// Forest zone borders in tiles.
+    pub tree_x: [i32; 3],
+    pub world_surface: f64,
+    pub rock_layer: f64,
+    pub time: f64,
+    pub day_time: bool,
+    pub moon_phase: i32,
+    pub blood_moon: bool,
+    pub eclipse: bool,
+    /// Background style of each forest zone, left to right.
+    pub tree_bg: [u8; 4],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -125,6 +144,7 @@ impl Header {
         if !(1..=1 << 16).contains(&width) || !(1..=1 << 16).contains(&height) {
             return bad(format!("bad world size {width}x{height}"));
         }
+        let env = read_env(&mut r, version).ok();
         Ok(Self {
             version,
             revision,
@@ -135,8 +155,73 @@ impl Header {
             world_id,
             width: width as u32,
             height: height as u32,
+            env,
         })
     }
+}
+
+/// Flags following the world size, read up to the last forest background byte.
+fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
+    let mut e = Env::default();
+    let skip = |r: &mut Reader, n: usize| r.bytes(n).map(|_| ());
+    let f64 = |r: &mut Reader| Ok::<f64, Error>(f64::from_le_bytes(r.array()?));
+    let bool = |r: &mut Reader| Ok::<bool, Error>(r.u8()? != 0);
+    // Game mode, then one byte per special seed flag present at this version.
+    skip(r, 4)?;
+    let seeds = [222, 227, 238, 239, 241, 249, 266, 267, 302];
+    skip(r, seeds.iter().filter(|&&v| version >= v).count())?;
+    skip(r, 8)?;
+    if version >= 284 {
+        skip(r, 8)?;
+    }
+    e.moon_type = r.u8()?;
+    for x in &mut e.tree_x {
+        *x = r.i32()?;
+    }
+    // Tree styles (4), cave back x (3) and styles (4), ice/jungle/hell styles, spawn x/y.
+    skip(r, 4 * (4 + 3 + 4 + 3 + 2))?;
+    e.world_surface = f64(r)?;
+    e.rock_layer = f64(r)?;
+    e.time = f64(r)?;
+    e.day_time = bool(r)?;
+    e.moon_phase = r.i32()?;
+    e.blood_moon = bool(r)?;
+    e.eclipse = bool(r)?;
+    // Dungeon x/y, crimson, 10 bosses + slime king, 7 saved/downed, orb smashed, meteor.
+    skip(r, 8 + 1 + 11 + 7 + 2)?;
+    // Orb count, altar count, hard mode, after party.
+    skip(r, 1 + 4 + 1 + 1)?;
+    // Invasion delay/size/type/x, slime rain, sundial, rain flag/time/max.
+    skip(r, 12 + 8 + 8 + 1 + 1 + 4 + 4)?;
+    // Ore tiers.
+    skip(r, 12)?;
+    e.tree_bg[0] = r.u8()?;
+    // Other biome backgrounds, cloud bg, cloud count, wind.
+    skip(r, 7 + 4 + 2 + 4)?;
+    let anglers = r.i32()?;
+    for _ in 0..anglers {
+        r.string()?;
+    }
+    // Saved angler, angler quest, stylist, tax collector, golfer, invasion start, cultist delay.
+    skip(r, 1 + 4 + 1 + 1 + 1 + 4 + 4)?;
+    let kills = r.i16()?.max(0) as usize;
+    skip(r, kills * 4)?;
+    if version >= 289 {
+        let banners = r.i16()?.max(0) as usize;
+        skip(r, banners * 2)?;
+    }
+    // Fast forward, 9 downed, 4 towers downed, 4 active, lunar apocalypse.
+    skip(r, 1 + 9 + 4 + 4 + 1)?;
+    // Party manual/genuine/cooldown, celebrating NPCs.
+    skip(r, 2 + 4)?;
+    let party = r.i32()?.max(0) as usize;
+    skip(r, party * 4)?;
+    // Sandstorm, old one's army, two more biome backgrounds.
+    skip(r, 1 + 4 + 4 + 4 + 4 + 1 + 1)?;
+    for b in &mut e.tree_bg[1..] {
+        *b = r.u8()?;
+    }
+    Ok(e)
 }
 
 /// Parses section 2. Tiles are stored column-major (x outer, y inner) with
@@ -293,6 +378,8 @@ mod tests {
         assert_eq!((h.name.as_str(), h.seed.as_str(), h.world_id), ("Test", "1234", 42));
         assert_eq!(h.frame_important, vec![false, true]);
         assert!(Header::parse(&synthetic(100)).is_err());
+        // The flags section is missing: no sky state, the header still parses.
+        assert_eq!(h.env, None);
     }
 
     #[test]
@@ -320,6 +407,10 @@ mod tests {
         let data = std::fs::read(path).unwrap();
         let h = Header::parse(&data).unwrap();
         assert!(h.width >= 1000 && h.height >= 300);
+        // Flags read through to the last forest byte land on sane values.
+        let env = h.env.as_ref().expect("world flags");
+        assert!(env.world_surface > 0.0 && env.world_surface < env.rock_layer && env.rock_layer < h.height as f64);
+        assert!((0..8).contains(&env.moon_phase) && env.tree_x[0] <= env.tree_x[1]);
         let mut cells = 0u64;
         read_tiles(&data, &h, |_, _, n, _| cells += n as u64).unwrap();
         assert_eq!(cells, h.width as u64 * h.height as u64);

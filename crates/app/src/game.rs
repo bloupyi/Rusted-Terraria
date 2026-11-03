@@ -5,9 +5,11 @@ use render::atlas::SheetRef;
 use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
+use crate::backdrop;
 use crate::inventory::{Inventory, Item};
 use crate::items::{self, Furniture, Material, Out, Tool, RECIPES, USE_TIME};
 use crate::net::{MobState, Msg};
+use formats::wld::Env;
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::mob::{Kind, Mob};
@@ -151,8 +153,10 @@ pub struct Game {
     spawn_acc: f32,
     spawn_x: u32,
     rng: u64,
-    /// Per column, the first row of the underground backdrop.
+    /// Per column, the first solid row as loaded, two rows down.
     pub surface: Vec<u32>,
+    /// Sky and background state from the world file, or guessed from the terrain.
+    pub env: Env,
     stale: Vec<u8>,
     lod_queue: Vec<u32>,
     /// Per chunk, `DIRTY_*` bits not yet remeshed.
@@ -172,12 +176,18 @@ impl Game {
         let mesh_pending = vec![0; world.chunks.len()];
         let surface = surface(&world);
         let spawn_x = world.width / 2;
+        let env = world.header.env.clone().unwrap_or_else(|| guess_env(&world, &surface));
+        let time = match &world.header.env {
+            Some(e) if e.day_time => (e.time / (backdrop::DAY_TICKS + backdrop::NIGHT_TICKS)) as f32,
+            Some(e) => ((backdrop::DAY_TICKS + e.time) / (backdrop::DAY_TICKS + backdrop::NIGHT_TICKS)) as f32,
+            None => 0.25,
+        };
         let mut g = Self {
             world,
             scene,
             sim,
             player,
-            time: 0.25,
+            time,
             inventory: Inventory::new(&[
                 Item::Tool(Tool::Sword(items::Tier::Copper)),
                 Item::Tool(Tool::Pickaxe(items::Tier::Copper)),
@@ -204,6 +214,7 @@ impl Game {
             spawn_x,
             rng: 0x9E37_79B9_7F4A_7C15,
             surface,
+            env,
             stale,
             lod_queue: Vec::new(),
             tree_cells: vec![None; mesh_pending.len()],
@@ -528,22 +539,45 @@ impl Game {
         (4.5 + self.time * 24.0) % 24.0
     }
 
-    /// Skylight colour and background colour for the time of day.
-    pub fn sky(&self) -> ([f32; 3], [f32; 3]) {
-        let night = [0.10, 0.12, 0.22];
-        let (day_bg, night_bg) = ([0.42, 0.62, 0.95], [0.02, 0.03, 0.08]);
-        // 0 at night, 1 in full day, ramping over the first and last 8% of daytime.
-        let d = if self.time < DAYTIME {
-            let t = self.time / DAYTIME;
-            (t / 0.08).min((1.0 - t) / 0.08).min(1.0)
+    /// The game's day and its tick within it, from `time`.
+    pub fn ticks(&self) -> (bool, f64) {
+        let day = (backdrop::DAY_TICKS + backdrop::NIGHT_TICKS) * self.time as f64;
+        if self.time < DAYTIME {
+            (true, day)
         } else {
-            0.0
+            (false, day - backdrop::DAY_TICKS)
+        }
+    }
+
+    /// Skylight colour and the colour behind everything (the sky's lower tone).
+    pub fn sky(&self) -> ([f32; 3], [f32; 3]) {
+        let (day, t) = self.ticks();
+        let sky = backdrop::colors(day, t, self.env.blood_moon).sky;
+        let low = [132.0, 170.0, 248.0];
+        (backdrop::tile_light(sky), [0, 1, 2].map(|i| sky[i] * low[i] / (255.0 * 255.0)))
+    }
+
+    /// Sky, sun or moon and surface backgrounds, in world pixels for a view
+    /// centred on `center` at `zoom` in a `size` window. `ticks` drives animations.
+    pub fn backdrop(&self, center: [f32; 2], zoom: f32, size: (u32, u32), ticks: u32) -> Vec<Sprite> {
+        let (day, time) = self.ticks();
+        let (w, h) = (size.0 as f32, size.1 as f32);
+        let scene = backdrop::Scene {
+            env: &self.env,
+            width: self.world.width,
+            height: self.world.height,
+            day,
+            time,
+            ticks,
+            sheets: &self.scene.mesher.atlas.named,
         };
-        // Warm tint around sunrise and sunset.
-        let warm = 1.0 - (2.0 * d - 1.0).abs();
-        let day = [1.0, 1.0 - 0.25 * warm, 1.0 - 0.45 * warm];
-        let mix = |a: [f32; 3], b: [f32; 3]| [0, 1, 2].map(|i| a[i] + (b[i] - a[i]) * d);
-        (mix(night, day), mix(night_bg, day_bg))
+        let view = backdrop::View { x: center[0] - w / 2.0, y: center[1] - h / 2.0, w, h };
+        let mut v = backdrop::sprites(&scene, &view);
+        for s in &mut v {
+            s.pos = [0, 1].map(|i| center[i] + (s.pos[i] - [w, h][i] / 2.0) / zoom);
+            s.size = s.size.map(|k| k / zoom);
+        }
+        v
     }
 
     fn in_reach(&self, tx: i64, ty: i64, free: bool) -> bool {
@@ -972,18 +1006,12 @@ impl Game {
     /// Backdrop and tree tops (behind the world), then player, drops and cursor (in front).
     pub fn sprites(&self, view: Rect, cursor: Option<(i64, i64)>, free: bool) -> (Vec<Sprite>, Vec<Sprite>) {
         let mut under = Vec::new();
-        // One strip per column (or group of columns when zoomed out) below the ground line.
-        let step = ((view.x1 - view.x0) / 512).max(1);
+        // Below the surface line, as in the game.
+        let top = (self.env.world_surface as f32 * 16.0).max(view.y0 as f32 * 16.0);
         let bottom = view.y1 as f32 * 16.0;
-        for x in (view.x0 - view.x0 % step..view.x1).step_by(step as usize) {
-            let top = self.surface[x as usize].max(view.y0) as f32 * 16.0;
-            if top < bottom {
-                let pos = [x as f32 * 16.0, top];
-                under.push(Sprite {
-                    flags: SPRITE_LIT,
-                    ..Sprite::flat(pos, [step as f32 * 16.0, bottom - top], UNDERGROUND)
-                });
-            }
+        if top < bottom {
+            let (x0, x1) = (view.x0 as f32 * 16.0, view.x1 as f32 * 16.0);
+            under.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([x0, top], [x1 - x0, bottom - top], UNDERGROUND) });
         }
         self.tree_tops(view, &mut under);
 
@@ -1219,6 +1247,13 @@ fn tree_cells(world: &World, cx: u32, cy: u32) -> Vec<(u32, u32)> {
         .flat_map(|y| (r.x0..r.x1).map(move |x| (x, y)))
         .filter(|&(x, y)| world.tile(x as i64, y as i64) == TREE && world.frame(x as i64, y as i64).1 >= 198)
         .collect()
+}
+
+/// Background state for worlds without one: surface line at the average ground level.
+fn guess_env(world: &World, surface: &[u32]) -> Env {
+    let ground = surface.iter().map(|&y| y as f64).sum::<f64>() / surface.len().max(1) as f64;
+    let w = world.width as i32;
+    Env { world_surface: ground, rock_layer: ground + world.height as f64 * 0.1, tree_x: [w; 3], ..Env::default() }
 }
 
 /// Per column, the first block from the top as the world was loaded, a couple of rows down.
