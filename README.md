@@ -10,8 +10,10 @@ liquides qui s'ecoulent, joueur avec physique, creuser et poser des blocs.
 - Aucun asset ni code de Re-Logic dans ce depot (`.xnb`, `.wld`, `.plr`, textures,
   sons, code decompile). `.gitignore` et la CI les refusent.
 - Les textures sont lues au lancement depuis l'installation Steam du joueur.
-- Approche clean-room : comportement reimplemente a partir de documentation
-  publique et d'observation, jamais par traduction de code decompile.
+- Comme Horizon dans Rusted : la copie du jeu du joueur peut etre decompilee en
+  local (`.local/`, ignore par git) pour lire les regles reelles. Le comportement
+  est ensuite reecrit en Rust avec nos propres structures, jamais copie ni traduit
+  ligne a ligne. Voir [docs/decompilation.md](docs/decompilation.md).
 
 ## Lancer
 
