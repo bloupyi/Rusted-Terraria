@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 use game::Game;
 use glam::Vec2;
 use inventory::{Item, HOTBAR};
-use render::{Camera, ColorRect, Renderer, Scene};
+use render::{Camera, Renderer, Scene, Sprite};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -91,28 +91,25 @@ impl App {
         self.camera.time += dt;
     }
 
-    /// Hotbar in the top-left corner, as world rects under the current camera.
-    /// Each slot shows its item colour, with a bar for the stack size.
-    fn hotbar(&self, size: Vec2) -> Vec<ColorRect> {
+    /// Hotbar in the top-left corner, as world sprites under the current camera.
+    /// Each slot shows its item, with a bar for the stack size.
+    fn hotbar(&self, size: Vec2) -> Vec<Sprite> {
         const SLOT: f32 = 40.0;
         let z = self.camera.zoom;
-        let at = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| ColorRect {
-            pos: self.screen_to_world(Vec2::new(x, y), size).into(),
-            size: [w / z, h / z],
-            color,
-        };
+        let at = |x: f32, y: f32| -> [f32; 2] { self.screen_to_world(Vec2::new(x, y), size).into() };
+        let rect = |x: f32, y: f32, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(x, y), [w / z, h / z], color);
         let inv = &self.game.inventory;
         let mut rects = Vec::new();
         for i in 0..HOTBAR {
             let x = 10.0 + i as f32 * (SLOT + 4.0);
             let frame = if i == inv.selected { [0.9, 0.8, 0.3, 0.9] } else { [0.1, 0.1, 0.15, 0.6] };
-            rects.push(at(x, 10.0, SLOT, SLOT, frame));
-            rects.push(at(x + 3.0, 13.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
+            rects.push(rect(x, 10.0, SLOT, SLOT, frame));
+            rects.push(rect(x + 3.0, 13.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
             if let Some(s) = inv.slots[i] {
-                rects.push(at(x + 10.0, 16.0, SLOT - 20.0, SLOT - 20.0, self.game.item_color(s.item)));
+                rects.extend(self.game.item_icon(s.item, at(x + 8.0, 16.0), (SLOT - 16.0) / z, 0));
                 if s.count > 1 {
                     let w = (SLOT - 8.0) * s.count as f32 / inventory::MAX_STACK as f32;
-                    rects.push(at(x + 4.0, 10.0 + SLOT - 7.0, w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
+                    rects.push(rect(x + 4.0, 10.0 + SLOT - 7.0, w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
                 }
             }
         }
@@ -234,9 +231,9 @@ impl ApplicationHandler for App {
                 let hud = self.hotbar(size);
                 let Some(renderer) = &mut self.renderer else { return };
                 self.game.sync(renderer, view);
-                let mut rects = self.game.player_rects(Some(cursor), self.free);
-                rects.extend(hud);
-                let stats = renderer.render(&self.camera, &rects);
+                let (under, mut over) = self.game.sprites(view, Some(cursor), self.free);
+                over.extend(hud);
+                let stats = renderer.render(&self.camera, &under, &over);
                 self.frames += 1;
                 self.frame_time += dt;
                 if now - self.title_at >= TITLE_EVERY {
@@ -250,6 +247,7 @@ impl ApplicationHandler for App {
                             Item::Block(t) => format!("block {t} x{}", s.count),
                             Item::Bucket(None) => "empty bucket".to_string(),
                             Item::Bucket(Some(l)) => format!("{l:?} bucket"),
+                            Item::Object(i) => format!("object {} x{}", self.game.templates[i as usize].tile, s.count),
                         },
                     };
                     if let Some(window) = &self.window {
@@ -303,7 +301,7 @@ fn main() {
         Some(d) => println!("assets: {}", d.display()),
         None => println!("assets: Terraria install not found (set {}), using placeholders", formats::install::ENV_VAR),
     }
-    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES);
+    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &game::sprite_sheets());
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
         world.header.name,

@@ -26,6 +26,8 @@ pub struct Atlas {
     /// Average colour per type, for the zoomed-out map.
     pub tile_color: Vec<[u8; 4]>,
     pub wall_color: Vec<[u8; 4]>,
+    /// Other sheets by file stem (`Tree_Tops_0`, `NPC_1`, `Item_2`...), when present.
+    pub named: std::collections::HashMap<String, SheetRef>,
     /// Pixels to upload, in packing order.
     pub uploads: Vec<(SheetRef, Texture)>,
     pub missing: usize,
@@ -33,31 +35,42 @@ pub struct Atlas {
 
 impl Atlas {
     /// `images` is `<Terraria>/Content/Images`; `None` uses placeholders only.
-    pub fn load(images: Option<&Path>, tile_types: &[u16], wall_types: &[u16]) -> Self {
+    /// `named`: extra sheets by file stem, skipped when missing.
+    pub fn load(images: Option<&Path>, tile_types: &[u16], wall_types: &[u16], named: &[String]) -> Self {
         let jobs: Vec<(bool, u16)> =
             tile_types.iter().map(|&t| (false, t)).chain(wall_types.iter().map(|&w| (true, w))).collect();
-        let loaded: Vec<(bool, u16, Texture, bool)> = jobs
+        let read = |name: &str| {
+            images
+                .and_then(|d| std::fs::read(d.join(format!("{name}.xnb"))).ok())
+                .and_then(|data| xnb::read_texture(&data).ok())
+                .filter(|t| t.width <= LAYER_SIZE && t.height <= LAYER_SIZE)
+        };
+        let mut loaded: Vec<(bool, u16, Texture, bool)> = jobs
             .par_iter()
             .map(|&(wall, id)| {
-                let name = if wall { format!("Wall_{id}.xnb") } else { format!("Tiles_{id}.xnb") };
-                let tex = images
-                    .and_then(|d| std::fs::read(d.join(name)).ok())
-                    .and_then(|data| xnb::read_texture(&data).ok())
-                    .filter(|t| t.width <= LAYER_SIZE && t.height <= LAYER_SIZE);
-                match tex {
+                let name = if wall { format!("Wall_{id}") } else { format!("Tiles_{id}") };
+                match read(&name) {
                     Some(t) => (wall, id, t, false),
                     None => (wall, id, placeholder(wall, id), true),
                 }
             })
             .collect();
+        let (names, extra): (Vec<String>, Vec<Texture>) =
+            named.par_iter().filter_map(|n| read(n).map(|t| (n.clone(), t))).unzip();
+        let first_named = loaded.len();
+        // Named sheets ride along as tiles with ids past the table; only `named` keeps them.
+        loaded.extend(extra.into_iter().map(|t| (false, u16::MAX, t, false)));
 
-        let max = |wall: bool| loaded.iter().filter(|l| l.0 == wall).map(|l| l.1 as usize + 1).max().unwrap_or(0);
+        let max = |wall: bool| {
+            loaded[..first_named].iter().filter(|l| l.0 == wall).map(|l| l.1 as usize + 1).max().unwrap_or(0)
+        };
         let mut atlas = Atlas {
             layers: 1,
             tiles: vec![None; max(false)],
             walls: vec![None; max(true)],
             tile_color: vec![[0; 4]; max(false)],
             wall_color: vec![[0; 4]; max(true)],
+            named: Default::default(),
             uploads: Vec::new(),
             missing: loaded.iter().filter(|l| l.3).count(),
         };
@@ -78,7 +91,9 @@ impl Atlas {
             let r = SheetRef { layer, x, y, w: tex.width, h: tex.height, fallback };
             x += tex.width;
             shelf = shelf.max(tex.height);
-            if wall {
+            if i >= first_named {
+                atlas.named.insert(names[i - first_named].clone(), r);
+            } else if wall {
                 atlas.walls[id as usize] = Some(r);
                 atlas.wall_color[id as usize] = colors[i];
             } else {

@@ -1,7 +1,8 @@
 //! Game state outside the window: the world, liquids, player, time of day, and
 //! keeping the GPU copies (meshes, light, map) in step with edits.
 
-use render::{ColorRect, Renderer, Scene};
+use render::atlas::SheetRef;
+use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::inventory::{Inventory, Item};
 use world::light::Rect;
@@ -22,7 +23,49 @@ const LOD_BUDGET: usize = 256;
 /// Off-screen chunks remeshed per frame; on-screen ones always are.
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
-pub const EXTRA_TILES: [u16; 1] = [OBSIDIAN];
+pub const EXTRA_TILES: [u16; 2] = [OBSIDIAN, WOOD];
+pub const TREE: u16 = 5;
+pub const WOOD: u16 = 30;
+const TORCH: u16 = 4;
+/// Grass, vines and other plants: break without dropping anything.
+const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 233];
+/// Objects that hang from the tile above them.
+const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
+const MAX_OBJECT: usize = 64;
+/// Dirt-brown backdrop under the surface, lit like the tiles.
+const UNDERGROUND: [f32; 4] = [0.30, 0.21, 0.15, 1.0];
+/// Walked pixels per leg frame.
+const WALK_FRAME: f32 = 6.0;
+/// Body sheets back to front: sheet, column, row (`u32::MAX`: leg frame) and tint.
+const PLAYER_LAYERS: [(&str, u32, u32, [f32; 4]); 12] = [
+    ("Player_0_10", 0, u32::MAX, SKIN),
+    ("Player_0_11", 0, u32::MAX, [0.40, 0.30, 0.22, 1.0]),
+    ("Player_0_12", 0, u32::MAX, [0.25, 0.17, 0.12, 1.0]),
+    ("Player_0_3", 0, 0, SKIN),
+    ("Player_0_6", 0, 0, [0.85, 0.82, 0.70, 1.0]),
+    ("Player_0_0", 0, 0, SKIN),
+    ("Player_0_1", 0, 0, [1.0; 4]),
+    ("Player_0_2", 0, 0, [0.25, 0.45, 0.85, 1.0]),
+    ("Player_Hair_1", 0, 0, [0.50, 0.28, 0.14, 1.0]),
+    ("Player_0_4", 2, 0, SKIN),
+    ("Player_0_7", 2, 0, [0.30, 0.45, 0.75, 1.0]),
+    ("Player_0_5", 2, 0, SKIN),
+];
+const SKIN: [f32; 4] = [1.0, 0.80, 0.65, 1.0];
+/// Sheets packed beside the tiles for sprites.
+pub fn sprite_sheets() -> Vec<String> {
+    let mut v: Vec<String> = PLAYER_LAYERS.iter().map(|l| l.0.to_string()).collect();
+    v.extend(["Tree_Tops_0", "Tree_Branches_0", "Item_205", "Item_206", "Item_207", "Item_1128"].map(String::from));
+    v
+}
+
+/// An object as taken from the world, replayed when placed.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct Template {
+    pub tile: u16,
+    /// `(dx, dy, frame_x, frame_y)` from the bottom-left cell, `dy <= 0`.
+    pub cells: Vec<(i32, i32, i16, i16)>,
+}
 const DROP_SIZE: f32 = 10.0;
 /// Dropped items fly to the player from this far, and are picked up from `PICKUP`.
 const MAGNET: f32 = 5.0 * 16.0;
@@ -47,6 +90,9 @@ pub struct Game {
     pub time: f32,
     pub inventory: Inventory,
     pub drops: Vec<Drop>,
+    pub templates: Vec<Template>,
+    /// Per column, the first row of the underground backdrop.
+    pub surface: Vec<u32>,
     stale: Vec<u8>,
     lod_queue: Vec<u32>,
     /// Per chunk, `DIRTY_*` bits not yet remeshed.
@@ -61,6 +107,7 @@ impl Game {
         let player = Player::spawn(&world, world.width / 2);
         let stale = vec![0; world.chunks.len()];
         let mesh_pending = vec![0; world.chunks.len()];
+        let surface = surface(&world);
         Self {
             world,
             scene,
@@ -75,6 +122,8 @@ impl Game {
                 Item::Bucket(None),
             ]),
             drops: Vec::new(),
+            templates: Vec::new(),
+            surface,
             stale,
             lod_queue: Vec::new(),
             mesh_pending,
@@ -161,44 +210,137 @@ impl Game {
         self.world.in_bounds(tx, ty) && (free || (dx * dx + dy * dy).sqrt() <= REACH * 16.0)
     }
 
-    /// Removes the block at the tile, or the whole object if it is frame-important.
-    /// Blocks drop as items, except with the free camera.
+    fn important(&self, t: u16) -> bool {
+        self.world.header.frame_important.get(t as usize).copied().unwrap_or(false)
+    }
+
+    /// Breaks the block or object at the tile; with the free camera nothing drops.
     pub fn dig(&mut self, tx: i64, ty: i64, free: bool) {
-        if !self.in_reach(tx, ty, free) {
-            return;
+        if self.in_reach(tx, ty, free) {
+            self.break_tile(tx, ty, !free);
         }
+    }
+
+    /// Removes a block, a whole object or a whole tree, then whatever rested on it.
+    fn break_tile(&mut self, tx: i64, ty: i64, drop: bool) {
         let t = self.world.tile(tx, ty);
         if t == NO_TILE {
             return;
         }
-        let important = self.world.header.frame_important.get(t as usize).copied().unwrap_or(false);
-        let mut todo = vec![(tx, ty)];
-        let mut removed = 0;
-        while let Some((x, y)) = todo.pop() {
-            if self.world.tile(x, y) != t || removed >= 64 {
-                continue;
-            }
+        let (cells, item) = if t == TREE {
+            let cells = self.connected(tx, ty, |_, _| true, 512);
+            let n = cells.len() as u16;
+            (cells, Some((Item::Block(WOOD), n)))
+        } else if self.important(t) {
+            let cells = self.object_cells(tx, ty);
+            let item = (!PLANTS.contains(&t)).then(|| (Item::Object(self.template(t, &cells)), 1));
+            (cells, item)
+        } else {
+            (vec![(tx, ty)], Some((Item::Block(t), 1)))
+        };
+        for &(x, y) in &cells {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
             self.sim.wake(&self.world, x as u32, y as u32);
-            removed += 1;
-            if important {
-                todo.extend([(x - 1, y), (x + 1, y), (x, y - 1), (x, y + 1)]);
-            }
         }
-        // TODO: objects (furniture, torches) have no item of their own yet and drop nothing.
-        if !important && !free {
+        if let Some((item, count)) = item.filter(|_| drop) {
             self.drops.push(Drop {
                 x: tx as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
                 y: ty as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
                 vx: 0.0,
                 vy: -120.0,
-                item: Item::Block(t),
-                count: 1,
+                item,
+                count,
             });
+        }
+        for &(x, y) in &cells {
+            for (dx, dy) in [(0, -1), (0, 1), (-1, 0), (1, 0)] {
+                let (nx, ny) = (x + dx, y + dy);
+                let n = self.world.tile(nx, ny);
+                if n == NO_TILE {
+                    continue;
+                }
+                let rests = match dy {
+                    -1 => n == TREE || (self.important(n) && !HANGING.contains(&n)),
+                    1 => HANGING.contains(&n),
+                    _ => n == TORCH,
+                };
+                if rests && !(n == TORCH && self.torch_held(nx, ny)) {
+                    self.break_tile(nx, ny, drop);
+                }
+            }
         }
     }
 
-    /// Uses the selected item on the tile: places a block, pours or fills a bucket.
+    fn torch_held(&self, x: i64, y: i64) -> bool {
+        let w = &self.world;
+        w.wall(x, y) != 0 || w.solid(x, y + 1) || w.solid(x - 1, y) || w.solid(x + 1, y)
+    }
+
+    /// Cells of the same tile type reachable from `(tx, ty)` through steps that `link` accepts.
+    fn connected(
+        &self,
+        tx: i64,
+        ty: i64,
+        link: impl Fn((i64, i64), (i64, i64)) -> bool,
+        max: usize,
+    ) -> Vec<(i64, i64)> {
+        let t = self.world.tile(tx, ty);
+        let mut cells = vec![(tx, ty)];
+        let mut i = 0;
+        while i < cells.len() && cells.len() < max {
+            let (x, y) = cells[i];
+            i += 1;
+            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                let n = (x + dx, y + dy);
+                if self.world.tile(n.0, n.1) == t && !cells.contains(&n) && link((x, y), n) {
+                    cells.push(n);
+                }
+            }
+        }
+        cells
+    }
+
+    /// One object: neighbours of the same type whose frame continues this cell's
+    /// (one frame step of 16 to 20 px right or down), so side by side objects stay apart.
+    fn object_cells(&self, tx: i64, ty: i64) -> Vec<(i64, i64)> {
+        let w = &self.world;
+        let step = |a: i16, b: i16, d: i64| (16..=20).contains(&((b as i64 - a as i64) * d));
+        self.connected(
+            tx,
+            ty,
+            |(x, y), (nx, ny)| {
+                let ((fx, fy), (gx, gy)) = (w.frame(x, y), w.frame(nx, ny));
+                if ny == y {
+                    gy == fy && step(fx, gx, nx - x)
+                } else {
+                    gx == fx && step(fy, gy, ny - y)
+                }
+            },
+            MAX_OBJECT,
+        )
+    }
+
+    /// Index of the template for these cells, added if new.
+    fn template(&mut self, tile: u16, cells: &[(i64, i64)]) -> u16 {
+        let x0 = cells.iter().map(|c| c.0).min().unwrap();
+        let y1 = cells.iter().map(|c| c.1).max().unwrap();
+        let mut cells: Vec<_> = cells
+            .iter()
+            .map(|&(x, y)| {
+                let (fx, fy) = self.world.frame(x, y);
+                ((x - x0) as i32, (y - y1) as i32, fx, fy)
+            })
+            .collect();
+        cells.sort_unstable();
+        let tpl = Template { tile, cells };
+        let id = self.templates.iter().position(|t| *t == tpl).unwrap_or_else(|| {
+            self.templates.push(tpl);
+            self.templates.len() - 1
+        });
+        id as u16
+    }
+
+    /// Uses the selected item on the tile: places a block or object, pours or fills a bucket.
     /// Nothing is used up with the free camera.
     pub fn place(&mut self, tx: i64, ty: i64, free: bool) {
         let Some(stack) = self.inventory.selected() else { return };
@@ -216,8 +358,34 @@ impl Game {
                 }
                 self.world.set_liquid(x, y, 0, 0);
                 self.world.set_tile(x, y, t, -1, -1);
-                if !free {
-                    self.inventory.consume();
+            }
+            Item::Object(id) => {
+                let tpl = &self.templates[id as usize];
+                let w = &self.world;
+                let cells: Vec<_> =
+                    tpl.cells.iter().map(|&(dx, dy, fx, fy)| (tx + dx as i64, ty + dy as i64, fx, fy)).collect();
+                let blocked = |&(cx, cy, ..): &(i64, i64, i16, i16)| {
+                    !w.in_bounds(cx, cy) || w.tile(cx, cy) != NO_TILE || self.player.overlaps(cx, cy)
+                };
+                if cells.iter().any(blocked) {
+                    return;
+                }
+                // Stands on blocks, hangs from them, or sits on a wall; a single cell may cling to a side.
+                let top = cells.iter().map(|c| c.1).min().unwrap();
+                let held = cells.iter().any(|&(cx, cy, ..)| {
+                    (cy == ty && w.solid(cx, cy + 1))
+                        || (cy == top && w.solid(cx, cy - 1))
+                        || w.wall(cx, cy) != 0
+                        || (cells.len() == 1 && (w.solid(cx - 1, cy) || w.solid(cx + 1, cy)))
+                });
+                if !held {
+                    return;
+                }
+                let tile = tpl.tile;
+                for (cx, cy, fx, fy) in cells {
+                    self.world.set_liquid(cx as u32, cy as u32, 0, 0);
+                    self.world.set_tile(cx as u32, cy as u32, tile, fx, fy);
+                    self.sim.wake(&self.world, cx as u32, cy as u32);
                 }
             }
             Item::Bucket(Some(kind)) => {
@@ -247,41 +415,156 @@ impl Game {
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
         }
+        if matches!(stack.item, Item::Block(_) | Item::Object(_)) && !free {
+            self.inventory.consume();
+        }
         self.sim.wake(&self.world, x, y);
     }
 
-    /// Colour of an item for drops and the hotbar.
-    pub fn item_color(&self, item: Item) -> [f32; 4] {
-        let c = match item {
-            Item::Block(t) => self.scene.mesher.atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4]),
-            Item::Bucket(None) => [150, 150, 160, 255],
-            Item::Bucket(Some(l)) => render::mesh::LIQUID_LOD[l as usize],
-        };
-        c.map(|v| v as f32 / 255.0)
+    fn sheet(&self, name: &str) -> Option<&SheetRef> {
+        self.scene.mesher.atlas.named.get(name)
     }
 
-    pub fn player_rects(&self, cursor: Option<(i64, i64)>, free: bool) -> Vec<ColorRect> {
-        let mut rects = Vec::new();
+    /// Sprites drawing `item` fitted in a `size` square at `pos` (world pixels).
+    pub fn item_icon(&self, item: Item, pos: [f32; 2], size: f32, flags: u32) -> Vec<Sprite> {
+        let atlas = &self.scene.mesher.atlas;
+        let flat = |c: [u8; 4]| vec![Sprite::flat(pos, [size; 2], c.map(|v| v as f32 / 255.0))];
+        // One sheet region scaled to fit, centred.
+        let fit = |sheet: &SheetRef, src: [u32; 4]| {
+            let k = size / src[2].max(src[3]) as f32;
+            let mut s = Sprite::sheet(pos, sheet, src, flags);
+            s.size = [src[2] as f32 * k, src[3] as f32 * k];
+            s.pos = [pos[0] + (size - s.size[0]) / 2.0, pos[1] + (size - s.size[1]) / 2.0];
+            vec![s]
+        };
+        match item {
+            Item::Block(t) => match atlas.tiles.get(t as usize).copied().flatten() {
+                Some(s) if !s.fallback => fit(&s, [18, 18, 16, 16]),
+                _ => flat(atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4])),
+            },
+            Item::Bucket(l) => {
+                let name = match l {
+                    None => "Item_205",
+                    Some(Liquid::Water) => "Item_206",
+                    Some(Liquid::Lava) => "Item_207",
+                    Some(Liquid::Honey) => "Item_1128",
+                    Some(Liquid::Shimmer) => "",
+                };
+                match (self.sheet(name), l) {
+                    (Some(s), _) => fit(s, [0, 0, s.w, s.h]),
+                    (None, Some(l)) => flat(render::mesh::LIQUID_LOD[l as usize]),
+                    (None, None) => flat([150, 150, 160, 255]),
+                }
+            }
+            Item::Object(id) => {
+                let tpl = &self.templates[id as usize];
+                let Some(sheet) = atlas.tiles.get(tpl.tile as usize).copied().flatten().filter(|s| !s.fallback) else {
+                    return flat(atlas.tile_color.get(tpl.tile as usize).copied().unwrap_or([255; 4]));
+                };
+                let w = tpl.cells.iter().map(|c| c.0).max().unwrap() + 1;
+                let top = tpl.cells.iter().map(|c| c.1).min().unwrap();
+                let h = 1 - top;
+                let k = size / (w.max(h) * 16) as f32;
+                let (ox, oy) =
+                    (pos[0] + (size - w as f32 * 16.0 * k) / 2.0, pos[1] + (size - h as f32 * 16.0 * k) / 2.0);
+                tpl.cells
+                    .iter()
+                    .filter(|c| c.2 >= 0 && c.3 >= 0 && (c.2 as u32 + 16) <= sheet.w && (c.3 as u32 + 16) <= sheet.h)
+                    .map(|&(dx, dy, fx, fy)| {
+                        let mut s = Sprite::sheet([0.0; 2], &sheet, [fx as u32, fy as u32, 16, 16], flags);
+                        s.pos = [ox + dx as f32 * 16.0 * k, oy + (dy - top) as f32 * 16.0 * k];
+                        s.size = [16.0 * k; 2];
+                        s
+                    })
+                    .collect()
+            }
+        }
+    }
+
+    /// Backdrop and tree tops (behind the world), then player, drops and cursor (in front).
+    pub fn sprites(&self, view: Rect, cursor: Option<(i64, i64)>, free: bool) -> (Vec<Sprite>, Vec<Sprite>) {
+        let mut under = Vec::new();
+        // One strip per column (or group of columns when zoomed out) below the ground line.
+        let step = ((view.x1 - view.x0) / 512).max(1);
+        let bottom = view.y1 as f32 * 16.0;
+        for x in (view.x0 - view.x0 % step..view.x1).step_by(step as usize) {
+            let top = self.surface[x as usize].max(view.y0) as f32 * 16.0;
+            if top < bottom {
+                let pos = [x as f32 * 16.0, top];
+                under.push(Sprite {
+                    flags: SPRITE_LIT,
+                    ..Sprite::flat(pos, [step as f32 * 16.0, bottom - top], UNDERGROUND)
+                });
+            }
+        }
+        self.tree_tops(view, &mut under);
+
+        let mut over = Vec::new();
         if !free {
-            let p = &self.player;
-            rects.push(ColorRect {
-                pos: [p.x, p.y],
-                size: [player::WIDTH, player::HEIGHT],
-                color: [0.85, 0.65, 0.45, 1.0],
-            });
-            rects.push(ColorRect { pos: [p.x + 2.0, p.y + 22.0], size: [16.0, 20.0], color: [0.25, 0.35, 0.7, 1.0] });
+            self.player_sprites(&mut over);
         }
         for d in &self.drops {
-            rects.push(ColorRect { pos: [d.x, d.y], size: [DROP_SIZE; 2], color: self.item_color(d.item) });
+            over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
         }
         if let Some((tx, ty)) = cursor.filter(|&(x, y)| self.in_reach(x, y, free)) {
-            rects.push(ColorRect {
-                pos: [tx as f32 * 16.0, ty as f32 * 16.0],
-                size: [16.0, 16.0],
-                color: [0.25, 0.25, 0.25, 0.25],
-            });
+            over.push(Sprite::flat([tx as f32 * 16.0, ty as f32 * 16.0], [16.0, 16.0], [0.25, 0.25, 0.25, 0.25]));
         }
-        rects
+        (under, over)
+    }
+
+    /// Leafy tops and branches, drawn from the tree's top and branch cells.
+    fn tree_tops(&self, view: Rect, out: &mut Vec<Sprite>) {
+        let (Some(tops), Some(branches)) = (self.sheet("Tree_Tops_0"), self.sheet("Tree_Branches_0")) else { return };
+        // Tops reach 5 tiles over their cell, branches 2 to the side.
+        for y in view.y0..(view.y1 + 5).min(self.world.height) {
+            for x in view.x0.saturating_sub(2)..(view.x1 + 2).min(self.world.width) {
+                if self.world.tile(x as i64, y as i64) != TREE {
+                    continue;
+                }
+                let (fx, fy) = self.world.frame(x as i64, y as i64);
+                if fy < 198 {
+                    continue;
+                }
+                let style = ((fy - 198) / 22).clamp(0, 2) as u32;
+                let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
+                let s = match fx {
+                    22 => Sprite::sheet([px - 32.0, py + 16.0 - 80.0], tops, [style * 82, 0, 80, 80], SPRITE_LIT),
+                    44 => Sprite::sheet([px - 24.0, py - 12.0], branches, [0, style * 42, 40, 40], SPRITE_LIT),
+                    66 => Sprite::sheet([px, py - 12.0], branches, [42, style * 42, 40, 40], SPRITE_LIT),
+                    _ => continue,
+                };
+                out.push(s);
+            }
+        }
+    }
+
+    /// Layered body sheets, tinted, with the walk cycle on the legs.
+    fn player_sprites(&self, out: &mut Vec<Sprite>) {
+        let p = &self.player;
+        let pos = [p.x + player::WIDTH / 2.0 - 20.0, p.y + player::HEIGHT - 54.0];
+        let legs = if !p.on_ground {
+            5
+        } else if p.vx.abs() > 10.0 {
+            6 + (p.walked / WALK_FRAME) as u32 % 14
+        } else {
+            0
+        };
+        let flip = if p.facing_left { SPRITE_FLIP } else { 0 } | SPRITE_LIT;
+        let mut any = false;
+        for &(name, col, row, color) in &PLAYER_LAYERS {
+            let Some(sheet) = self.sheet(name) else { continue };
+            let row = if row == u32::MAX { legs } else { row };
+            if (col + 1) * 40 > sheet.w || (row + 1) * 56 > sheet.h {
+                continue;
+            }
+            let mut s = Sprite::sheet(pos, sheet, [col * 40, row * 56, 40, 56], flip);
+            s.color = color;
+            out.push(s);
+            any = true;
+        }
+        if !any {
+            out.push(Sprite::flat([p.x, p.y], [player::WIDTH, player::HEIGHT], [0.85, 0.65, 0.45, 1.0]));
+        }
     }
 
     /// Rebuilds what edits touched; relights and redraws the map within budgets.
@@ -364,5 +647,75 @@ impl Game {
             renderer.update_lod(cx * CHUNK, cy * CHUNK, CHUNK, &texels);
             self.stale[ci as usize] &= !STALE_LOD;
         }
+    }
+}
+
+/// Per column, the first block from the top as the world was loaded, a couple of rows down.
+fn surface(world: &World) -> Vec<u32> {
+    (0..world.width)
+        .map(|x| (0..world.height).find(|&y| world.solid(x as i64, y as i64)).map_or(world.height, |y| y + 2))
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use formats::wld::Tile;
+
+    const BENCH: u16 = 18;
+
+    /// Floor at y = 20; two 2x1 benches side by side at x = 10..14, a torch at (20, 19).
+    fn game() -> Game {
+        let mut important = vec![false; 20];
+        important[BENCH as usize] = true;
+        important[TORCH as usize] = true;
+        let world = World::parse(&formats::synth::write_world("g", 64, 64, &important, |x, y| {
+            let (tile, fx) = match (x, y) {
+                (_, 20..) => (1, 0),
+                (10..=13, 19) => (BENCH, ((x - 10) % 2) as i16 * 18),
+                (20, 19) => (TORCH, 0),
+                _ => (NO_TILE, 0),
+            };
+            Tile { tile, frame_x: fx, frame_y: 0, ..Tile::default() }
+        }))
+        .unwrap();
+        let scene = Scene::build(&world, None, &EXTRA_TILES, &[]);
+        let mut g = Game::new(world, scene);
+        g.player = Player::spawn(&g.world, 15);
+        g
+    }
+
+    fn pick_up(g: &mut Game) {
+        for d in &mut g.drops {
+            (d.x, d.y) = g.player.center();
+        }
+        g.update_drops(0.0);
+    }
+
+    #[test]
+    fn objects_drop_and_place_again() {
+        let mut g = game();
+        g.dig(11, 19, false);
+        assert_eq!((g.world.tile(10, 19), g.world.tile(11, 19)), (NO_TILE, NO_TILE));
+        assert_eq!(g.world.tile(12, 19), BENCH, "the bench beside stays");
+        g.dig(20, 19, false);
+        pick_up(&mut g);
+        let objects: Vec<_> =
+            g.inventory.slots.iter().flatten().filter(|s| matches!(s.item, Item::Object(_))).collect();
+        assert_eq!(objects.len(), 2, "bench and torch");
+        assert_eq!(g.templates[0], Template { tile: BENCH, cells: vec![(0, 0, 0, 0), (1, 0, 18, 0)] });
+
+        g.inventory.selected =
+            g.inventory.slots.iter().position(|s| s.is_some_and(|s| s.item == Item::Object(0))).unwrap();
+        g.place(17, 18, true); // floating: refused
+        assert_eq!(g.world.tile(17, 18), NO_TILE);
+        g.place(17, 19, false);
+        assert_eq!((g.world.tile(17, 19), g.world.tile(18, 19)), (BENCH, BENCH));
+        assert_eq!(g.world.frame(18, 19), (18, 0));
+        assert!(g.inventory.slots[g.inventory.selected].is_none(), "used up");
+
+        // Digging the floor under the other bench breaks it too.
+        g.dig(12, 20, false);
+        assert_eq!((g.world.tile(12, 19), g.world.tile(13, 19)), (NO_TILE, NO_TILE));
     }
 }

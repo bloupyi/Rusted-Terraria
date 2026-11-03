@@ -7,6 +7,8 @@ struct Camera {
     world: vec2<u32>,
     // Skylight colour for the time of day, seconds in w.
     sky: vec4<f32>,
+    // Per liquid kind: sheet x, y, layer, frame count (0: flat colour).
+    liquids: array<vec4<u32>, 4>,
 }
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -44,6 +46,9 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
         let local = vec2<f32>(c.x, mix(top, 1.0, c.y));
         out.pos = vec4<f32>((tile + local) * 16.0 * cam.scale + cam.offset, 0.0, 1.0);
         out.tile = tile + local;
+        // Sheet rows from the surface down; cells under liquid use the body rows only.
+        let v = select((1.0 - top) * 16.0 * c.y, 8.0 + 8.0 * c.y, amount >= 1.0);
+        out.texel = vec2<f32>(c.x * 16.0, v);
         out.liquid = ((b >> 8u) & 0xffu) + 1u;
         return out;
     }
@@ -58,7 +63,7 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
     return out;
 }
 
-// Premultiplied flat colours. TODO: liquid sheets and animated surface.
+// Premultiplied flat colours; alpha also scales the textured liquids.
 fn liquid_color(kind: u32) -> vec4<f32> {
     switch kind {
         case 1u: { return vec4<f32>(0.95, 0.40, 0.08, 1.0) * 0.95; }
@@ -71,7 +76,14 @@ fn liquid_color(kind: u32) -> vec4<f32> {
 @fragment
 fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
     if in.liquid != 0u {
-        let c = liquid_color(in.liquid - 1u);
+        var c = liquid_color(in.liquid - 1u);
+        let sheet = cam.liquids[(in.liquid - 1u) & 3u];
+        if sheet.w != 0u {
+            let frame = u32(cam.sky.w * 8.0) % sheet.w;
+            let t = clamp(vec2<i32>(floor(in.texel)), vec2<i32>(0), vec2<i32>(15));
+            let p = vec2<i32>(sheet.xy) + vec2<i32>(i32(frame) * 18, 0) + t;
+            c = vec4<f32>(textureLoad(atlas, p, i32(sheet.z), 0).rgb * c.a, c.a);
+        }
         return vec4<f32>(c.rgb * smooth_light(in.tile), c.a);
     }
     let c = textureLoad(atlas, vec2<i32>(floor(in.texel)), i32(in.layer), 0);
@@ -133,6 +145,10 @@ fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
 struct RectOut {
     @builtin(position) pos: vec4<f32>,
     @location(0) color: vec4<f32>,
+    @location(1) texel: vec2<f32>,
+    @location(2) @interpolate(flat) flags: u32,
+    @location(3) tile: vec2<f32>,
+    @location(4) @interpolate(flat) textured: u32,
 }
 
 @vertex
@@ -141,14 +157,35 @@ fn vs_rect(
     @location(0) pos: vec2<f32>,
     @location(1) size: vec2<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) uv: vec4<f32>,
+    @location(4) flags: u32,
 ) -> RectOut {
+    let c = corner(vi);
     var out: RectOut;
-    out.pos = vec4<f32>((pos + corner(vi) * size) * cam.scale + cam.offset, 0.0, 1.0);
+    let world = pos + c * size;
+    out.pos = vec4<f32>(world * cam.scale + cam.offset, 0.0, 1.0);
     out.color = color;
+    let u = select(c.x, 1.0 - c.x, (flags & 512u) != 0u);
+    out.texel = uv.xy + vec2<f32>(u, c.y) * uv.zw;
+    out.flags = flags;
+    out.tile = world / 16.0;
+    out.textured = u32(uv.z > 0.0);
     return out;
 }
 
 @fragment
 fn fs_rect(in: RectOut) -> @location(0) vec4<f32> {
-    return in.color;
+    var c = in.color;
+    if in.textured != 0u {
+        // Clamp inside the region so edge texels never bleed into a neighbour.
+        let t = textureLoad(atlas, vec2<i32>(floor(in.texel - 0.001)), i32(in.flags & 255u), 0);
+        if t.a == 0.0 {
+            discard;
+        }
+        c = t * in.color;
+    }
+    if (in.flags & 256u) != 0u {
+        c = vec4<f32>(c.rgb * smooth_light(in.tile), c.a);
+    }
+    return c;
 }

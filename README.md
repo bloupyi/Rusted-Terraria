@@ -33,9 +33,11 @@ mesurer les FPS).
 Controles :
 
 - ZQSD/WASD ou fleches : marcher, sauter (haut ou Espace), descendre des plateformes.
-- Clic gauche : creuser (un objet entier s'il est multi-tuiles) ; les blocs tombent
-  en objets que le joueur ramasse en passant pres. Clic droit : utiliser l'objet
-  choisi (poser un bloc, vider ou remplir un seau). Portee de 10 tuiles.
+- Clic gauche : creuser. Un meuble ou une torche part en entier et donne un objet
+  qui le repose a l'identique ; un arbre tombe en entier et donne du bois ; ce qui
+  reposait sur le bloc casse tombe aussi. Les objets ramasses vont dans
+  l'inventaire en passant pres. Clic droit : utiliser l'objet choisi (poser un bloc
+  ou un objet, vider ou remplir un seau). Portee de 10 tuiles.
 - 1 a 0 ou Q/E : choisir l'emplacement de la barre d'objets (en haut a gauche ;
   la barre blanche sous un objet donne la taille de la pile). Depart : seaux d'eau,
   de lave, de miel, de shimmer et un seau vide.
@@ -52,7 +54,7 @@ chunks de liquide actifs.
 
 | Crate | Role |
 |---|---|
-| `crates/formats` | Formats du jeu : XNB (LZX, LZ4, Texture2D), WLD, recherche de l'installation. Aucune dependance graphique |
+| `crates/formats` | Formats du jeu : XNB (LZX, Texture2D), WLD, recherche de l'installation. Aucune dependance graphique |
 | `crates/world` | Monde en chunks 32x32, struct of arrays, editions, lumiere, liquides, physique du joueur |
 | `crates/render` | Atlas de sheets, instances par chunk construites avec rayon, rendu wgpu |
 | `crates/app` | Binaire `rusted-terraria` : fenetre winit, boucle, camera, jeu (`game.rs`), inventaire |
@@ -101,7 +103,14 @@ Monde modifiable :
 Joueur (`world::player`) : boite de 20x42 px deplacee axe par axe contre les blocs,
 sous-pas de moins d'une demi-tuile, marches d'une tuile montees seules,
 plateformes traversables par dessous ou en descendant, nage ralentie dans les
-liquides. Dessine en rectangles de couleur faute de sprite.
+liquides. Dessine avec les sheets `Player_0_*` et `Player_Hair_1` teintees, jambes
+animees en marche.
+
+Sprites : joueur, objets au sol, barre d'objets (icones tirees des sheets de tuiles
+et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
+`Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
+eclaires comme les tuiles. Les liquides utilisent `Liquid_0` (eau animee),
+`Liquid_1` et `Liquid_11` ; le shimmer reste en couleur unie.
 
 ## Tests
 
@@ -121,18 +130,21 @@ cargo run --release -p world --example gen_world -- big.wld
 cargo run --release -p world --example load_world -- big.wld
 ```
 
+## Verifie sur les vrais fichiers
+
+Terraria 1.4.5 et un vrai monde (6400x1800, version 326) :
+
+- XNB : 13 993 fichiers en LZX, 22 non compresses, aucun en LZ4 ni en DXT ; tous
+  lus. Le chemin LZ4 a ete retire.
+- WLD : version 326 lue avec la meme disposition ; bit shimmer confirme.
+- Chargement : lecture 0.25 s, scene 0.4 s, envoi GPU 0.5 a 1.2 s.
+- 40 a 47 FPS en 800x600 avec le rendu logiciel lavapipe (pas de vrai GPU teste).
+
 ## Limites connues
 
 Marquees `TODO` dans le code :
 
-- WLD : versions 225 a 279 verifiees par la documentation ; les versions plus
-  recentes sont lues avec la meme disposition et refusees si la section des tuiles
-  ne tombe pas juste. Shimmer (bit 7 de l'en-tete 3) non verifie sur une vraie sauvegarde.
-- XNB : LZ4 suppose un bloc brut sans en-tete de frame (non verifie, Terraria
-  utilise LZX ou rien). Formats DXT non decodes.
+- WLD : versions anterieures a 225 non verifiees.
 - Cadrage des blocs approximatif (voisins identiques seulement), pas de fusion
-  terre/pierre, herbe, pentes, peinture ni arbres.
-- Les objets multi-tuiles (meubles, torches) disparaissent sans objet a ramasser.
-- Liquides, joueur et objets sans textures du jeu (couleurs unies) : les noms et la
-  disposition des sheets `Liquid_*` et `Player_*` ne sont pas verifies sans
-  installation.
+  terre/pierre, pentes ni peinture.
+- Un seul style d'arbre (foret) pour les cimes ; pas de shimmer texture.

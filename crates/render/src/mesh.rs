@@ -63,12 +63,15 @@ pub struct Scene {
 
 impl Scene {
     /// `extra_tiles`: types that edits may create, loaded even if absent from the world.
-    pub fn build(world: &World, images: Option<&std::path::Path>, extra_tiles: &[u16]) -> Self {
+    /// `named`: other sheets (sprites) to pack into the atlas.
+    pub fn build(world: &World, images: Option<&std::path::Path>, extra_tiles: &[u16], named: &[String]) -> Self {
         let (mut tiles, walls) = world.used_types();
         tiles.extend_from_slice(extra_tiles);
         tiles.sort_unstable();
         tiles.dedup();
-        let atlas = Atlas::load(images, &tiles, &walls);
+        let mut named = named.to_vec();
+        named.extend(LIQUID_SHEETS.iter().filter(|n| !n.is_empty()).map(|n| n.to_string()));
+        let atlas = Atlas::load(images, &tiles, &walls, &named);
         let ((mesher, rows), ((lod_pages_x, lod_pages_y, lod), light)) =
             rayon::join(|| Mesher::new(world, atlas), || rayon::join(|| build_lod(world), || LightMap::compute(world)));
         let mut scene = Self { mesher, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod, light };
@@ -259,6 +262,9 @@ fn block_frame(up: bool, down: bool, left: bool, right: bool, v: u32) -> (u32, u
 }
 
 /// Opaque versions of the shader's liquid colours.
+/// Liquid sheets by kind; shimmer has none (it is drawn by its own effect in the game).
+pub const LIQUID_SHEETS: [&str; 4] = ["Liquid_0", "Liquid_1", "Liquid_11", ""];
+
 pub const LIQUID_LOD: [[u8; 4]; 4] =
     [[40, 90, 230, 255], [240, 100, 20, 255], [240, 165, 25, 255], [205, 155, 255, 255]];
 
@@ -316,7 +322,7 @@ mod tests {
             ..Tile::default()
         }))
         .unwrap();
-        let (_, rows) = Mesher::new(&world, Atlas::load(None, &[], &[]));
+        let (_, rows) = Mesher::new(&world, Atlas::load(None, &[], &[], &[]));
         let liquids = &rows[0].liquids;
         let got: Vec<(u32, u32)> = liquids.iter().map(|i| ((i.a >> 15) & 0x7fff, i.b)).collect();
         let lava = (Liquid::Lava as u32) << 8;
