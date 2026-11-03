@@ -13,6 +13,7 @@ pub mod body;
 pub mod frame;
 pub mod light;
 pub mod liquid;
+pub mod tile_light;
 pub mod mob;
 pub mod player;
 pub mod tile_sets;

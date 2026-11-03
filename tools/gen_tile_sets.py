@@ -18,6 +18,8 @@ FLAGS = {
     "tileMoss": "MOSS",
     "tileMergeDirt": "MERGE_DIRT",
     "tileBlockLight": "BLOCK_LIGHT",
+    "tileNoSunLight": "NO_SUN_LIGHT",
+    "wallLight": "WALL_LIGHT",
 }
 # Integer arrays split into one set per value.
 LEVELS = {"tileLargeFrames": "LARGE_FRAMES", "wallLargeFrames": "WALL_LARGE_FRAMES"}
@@ -28,6 +30,7 @@ SETS = {
     "ForcedDirtMerging": "FORCED_DIRT_MERGING",
     "Ore": "ORE",
     "TruncatesWalls": "TRUNCATES_WALLS",
+    "CrackedBricks": "CRACKED_BRICKS",
 }
 CONVERSION = {"Grass": "GRASS", "MergesWithDirtInASpecialWay": "DIRT_SPECIAL"}
 
@@ -42,10 +45,12 @@ def run(lines, values):
     i = 0
     while i < len(lines):
         line = lines[i].strip()
-        m = re.match(r"for \((?:int|ushort) (\w+) = (\d+); \1 (<=|<) (\d+); \1\+\+\)", line)
+        m = re.match(r"for \((?:int|ushort) (\w+) = (\d+); \1 (<=|<) (\d+|TileID\.Count); \1\+\+\)", line)
         if m:
-            var, lo, op, hi = m.group(1), int(m.group(2)), m.group(3), int(m.group(4))
-            depth, body = 0, []
+            var, lo, op = m.group(1), int(m.group(2)), m.group(3)
+            hi = COUNT if m.group(4) == "TileID.Count" else int(m.group(4))
+            # Body lines, each with the flag array guarding it (`if (array[var])`), if any.
+            depth, body, cond = 0, [], None
             i += 1
             while True:
                 s = lines[i].strip()
@@ -54,11 +59,17 @@ def run(lines, values):
                 if depth == 0 and s == "}":
                     break
                 if depth == 1:
-                    body.append(s)
+                    c = re.match(rf"if \((?:Main\.)?(\w+)\[{var}\]\)$", s)
+                    cond = c.group(1) if c else None
+                    if not c and s != "}":
+                        body.append((None, s))
+                elif depth == 2 and cond:
+                    body.append((cond, s))
                 i += 1
             for n in range(lo, hi + (op == "<=")):
-                for s in body:
-                    assign(s, values, var, n)
+                for c, s in body:
+                    if c is None or values.get(c, {}).get(n) == "true":
+                        assign(s, values, var, n)
         else:
             assign(line, values)
         i += 1
@@ -86,7 +97,8 @@ def main():
     src = Path(sys.argv[1])
     main_cs = (src / "Terraria/Main.cs").read_text()
     tile_id = (src / "Terraria.ID/TileID.cs").read_text()
-    count = int(COUNT_RE.search(tile_id).group(1))
+    global COUNT
+    count = COUNT = int(COUNT_RE.search(tile_id).group(1))
     values = {}
     run(method(main_cs, "Initialize_TileAndNPCData1"), values)
     run(method(main_cs, "Initialize_TileAndNPCData2"), values)

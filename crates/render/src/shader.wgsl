@@ -140,9 +140,9 @@ fn light_at(t: vec2<i32>) -> vec3<f32> {
     return combine(textureLoad(light, p % 2048, page.y * i32(cam.lod_pages_x) + page.x, 0));
 }
 
-// RGB: tiles and liquids, alpha: skylight scaled by the time of day.
+// RGB: tiles and liquids, alpha: sunlight scaled by the sky colour; 1 is stored as 128.
 fn combine(l: vec4<f32>) -> vec3<f32> {
-    return max(l.rgb, l.a * cam.sky.rgb);
+    return min(max(l.rgb, l.a * cam.sky.rgb) * (255.0 / 128.0), vec3<f32>(1.0));
 }
 
 // Bilinear between tile centres.
