@@ -240,6 +240,12 @@ pub const RECIPES: &[Recipe] = &[
         station: Some(ANVIL),
     },
     Recipe {
+        out: Out::Item(Item::Id(crate::magic::AMETHYST_STAFF)),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 7), (Item::Id(181), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
         out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Iron))),
         count: 1,
         inputs: &[(Item::Material(Material::IronBar), 12), wood(4)],
