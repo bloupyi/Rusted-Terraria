@@ -223,8 +223,12 @@ impl Hud {
         p: &mut Painter,
         selected: usize,
         counts: &[u16],
+        title: &str,
         icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
     ) {
+        let c = self.text_color as f32 / 255.0;
+        let w = p.measure(FontId::MouseText, title)[0];
+        p.plain_text(FontId::MouseText, title, [236.0 - w / 2.0, 0.0], gray(c, c));
         for (i, &(at, s)) in self.hotbar_slots().iter().enumerate() {
             let light = gray(1.0, (75.0 + 150.0 * s) as i32 as f32 / 255.0);
             let (back, b) = if i == selected { ("Inventory_Back14", 1.0) } else { ("Inventory_Back", 200.0 / 255.0) };
@@ -242,14 +246,17 @@ impl Hud {
     }
 
     /// `ClassicPlayerResourcesDisplaySet.DrawLife` for up to 400 life (no golden hearts).
-    pub fn draw_life(&self, p: &mut Painter, screen_w: f32, life: i32, life_max: i32) {
+    /// `label`: the game's "Life:".
+    pub fn draw_life(&self, p: &mut Painter, screen_w: f32, life: i32, life_max: i32, label: &str) {
         let anchor = screen_w - 800.0;
         let hearts = (life_max / LIFE_PER_HEART).min(10);
         let c = self.text_color as f32 / 255.0;
-        // The "Life:" label is localised text; only the numbers are drawn, centred where the line is.
-        let numbers = format!("{}/{}", life.max(0), life_max);
-        let w = p.measure(FontId::MouseText, &numbers)[0];
-        p.plain_text(FontId::MouseText, &numbers, [500.0 + 13.0 * hearts as f32 + anchor - w / 2.0, 6.0], gray(c, c));
+        let w = p.measure(FontId::MouseText, &format!("{label} {life_max}/{life_max}"))[0];
+        let mid = 500.0 + 13.0 * hearts as f32 + anchor;
+        p.plain_text(FontId::MouseText, label, [mid - w / 2.0, 6.0], gray(c, c));
+        let numbers = format!("{life}/{life_max}");
+        let nw = p.measure(FontId::MouseText, &numbers)[0];
+        p.plain_text(FontId::MouseText, &numbers, [mid + w / 2.0 - nw, 6.0], gray(c, c));
         let size = p.sheets.get("Heart").map_or(22.0, |s| s.h as f32);
         let per = LIFE_PER_HEART as f32;
         for i in 1..=life_max / LIFE_PER_HEART {

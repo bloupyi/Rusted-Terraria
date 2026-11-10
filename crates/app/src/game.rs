@@ -8,7 +8,7 @@ use crate::audio::Sfx;
 use crate::inventory::{Inventory, Item};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::net::{MobState, Msg};
-use crate::{backdrop, cave};
+use crate::{backdrop, cave, item_ids};
 use formats::wld::Env;
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -121,6 +121,8 @@ pub struct Game {
     pub inventory: Inventory,
     pub drops: Vec<Drop>,
     pub templates: Vec<Template>,
+    /// The game's texts in the player's language; empty without an install.
+    pub texts: formats::lang::Texts,
     pub mobs: Vec<Mob>,
     /// Sounds to play this frame.
     pub sfx: Vec<Sfx>,
@@ -201,6 +203,7 @@ impl Game {
             ]),
             drops: Vec::new(),
             templates: Vec::new(),
+            texts: Default::default(),
             mobs: Vec::new(),
             sfx: Vec::new(),
             others: Vec::new(),
@@ -1178,6 +1181,33 @@ impl Game {
         self.scene.mesher.atlas.named.get(name)
     }
 
+    /// The game's item id of `item`, for its name.
+    pub fn item_id(&self, item: Item) -> Option<u16> {
+        let placing = |tile: u16| {
+            let i = item_ids::TILE_ITEM.binary_search_by_key(&tile, |e| e.0).ok()?;
+            Some(item_ids::TILE_ITEM[i].1)
+        };
+        let sheet = |name: &str| name.strip_prefix("Item_")?.parse().ok();
+        match item {
+            Item::Block(t) => placing(t),
+            Item::Object(id) => placing(self.templates[id as usize].tile),
+            Item::Tool(t) => sheet(t.sheet()),
+            Item::Material(m) => sheet(m.sheet()),
+            Item::Bucket(None) => Some(205),
+            Item::Bucket(Some(Liquid::Water)) => Some(206),
+            Item::Bucket(Some(Liquid::Lava)) => Some(207),
+            Item::Bucket(Some(Liquid::Honey)) => Some(1128),
+            Item::Bucket(Some(Liquid::Shimmer)) => None,
+        }
+    }
+
+    /// `item`'s name in the game's language (`Lang.GetItemName`).
+    pub fn item_name(&self, item: Item) -> Option<&str> {
+        let id = self.item_id(item)?;
+        let i = item_ids::ITEM_NAME.binary_search_by_key(&id, |e| e.0).ok()?;
+        self.texts.get(&format!("ItemName.{}", item_ids::ITEM_NAME[i].1))
+    }
+
     /// The larger side of `item`'s picture, in its own pixels.
     pub fn item_size(&self, item: Item) -> f32 {
         let sheet = |name: &str| self.sheet(name).map_or(16.0, |s| s.w.max(s.h) as f32);
@@ -1831,6 +1861,18 @@ mod tests {
             assert!(swings < 10, "never dies");
         }
         assert!((4..=6).contains(&swings), "{swings} swings");
+    }
+
+    #[test]
+    fn items_know_their_game_id() {
+        let g = game();
+        assert_eq!(g.item_id(Item::Tool(Tool::Pickaxe(items::Tier::Copper))), Some(3509));
+        assert_eq!(g.item_id(Item::Block(items::STONE)), Some(3));
+        assert_eq!(g.item_id(Item::Block(items::WOOD)), Some(9));
+        assert_eq!(g.item_id(Item::Bucket(Some(Liquid::Water))), Some(206));
+        assert_eq!(g.item_name(Item::Block(items::STONE)), None, "no texts without an install");
+        assert!(item_ids::TILE_ITEM.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(item_ids::ITEM_NAME.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

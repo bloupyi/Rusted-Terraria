@@ -3,6 +3,7 @@ mod backdrop;
 mod cave;
 mod game;
 mod inventory;
+mod item_ids;
 mod items;
 mod net;
 mod proto;
@@ -163,13 +164,18 @@ impl App {
         };
         let inv = &game.inventory;
         let counts: Vec<u16> = (0..HOTBAR).map(|i| inv.slots[i].map_or(0, |s| s.count)).collect();
-        self.hud.draw_hotbar(&mut p, inv.selected, &counts, |p, i, [cx, cy], s| {
+        let selected = inv.slots[inv.selected].map(|s| s.item);
+        // `Lang.inter[37]` ("Items") over an empty hand.
+        let title =
+            selected.and_then(|i| game.item_name(i)).or_else(|| game.texts.get("LegacyInterface.37")).unwrap_or("");
+        self.hud.draw_hotbar(&mut p, inv.selected, &counts, title, |p, i, [cx, cy], s| {
             let Some(stack) = inv.slots[i] else { return };
             let side = game.item_size(stack.item).min(ui::ICON_LIMIT) * s;
             let icon = game.item_icon(stack.item, p.world([cx - side / 2.0, cy - side / 2.0]), side / z, 0);
             p.out.extend(icon);
         });
-        self.hud.draw_life(&mut p, size.x, game.hp, game::MAX_HP);
+        let life = game.texts.get("LegacyInterface.0").unwrap_or("");
+        self.hud.draw_life(&mut p, size.x, game.hp.max(0), game::MAX_HP, life);
         if let Some(life) = game.boss_life() {
             let (w, x) = (size.x * 0.5, size.x * 0.25);
             p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
@@ -506,6 +512,10 @@ fn main() {
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
     let mut game = Game::new(world, scene);
+    let culture = formats::lang::culture();
+    let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
+    game.texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
+    println!("texts: {culture}, {} entries", game.texts.len());
     game.client = net.as_ref().is_some_and(|n| !n.host);
     let (cx, cy) = at.map_or(game.player.center(), |(x, y)| (x * 16.0, y * 16.0));
     let mut app = App {

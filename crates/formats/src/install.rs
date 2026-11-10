@@ -9,13 +9,20 @@ pub fn terraria_dir() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os(ENV_VAR).filter(|p| !p.is_empty()) {
         return Some(PathBuf::from(p));
     }
+    config_value("terraria_path")
+        .map(|v| PathBuf::from(v.trim_matches('"')))
+        .or_else(|| default_dirs().into_iter().find(|p| p.is_dir()))
+}
+
+/// `key = value` from `rusted-terraria.cfg`, in the current dir then next to the executable.
+pub fn config_value(key: &str) -> Option<String> {
     let exe_dir = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf));
-    for dir in [Some(PathBuf::from(".")), exe_dir].into_iter().flatten() {
-        if let Some(p) = read_config(&dir.join(CONFIG_FILE)) {
-            return Some(p);
-        }
-    }
-    default_dirs().into_iter().find(|p| p.is_dir())
+    [Some(PathBuf::from(".")), exe_dir].into_iter().flatten().find_map(|dir| read_config(&dir.join(CONFIG_FILE), key))
+}
+
+/// `<install>/Terraria.exe`, which holds the game's texts.
+pub fn exe_path() -> Option<PathBuf> {
+    terraria_dir().map(|p| p.join("Terraria.exe")).filter(|p| p.is_file())
 }
 
 /// `<install>/Content/Images`, where the Tiles_*.xnb / Wall_*.xnb live.
@@ -23,11 +30,11 @@ pub fn images_dir() -> Option<PathBuf> {
     terraria_dir().map(|p| p.join("Content").join("Images")).filter(|p| p.is_dir())
 }
 
-fn read_config(path: &Path) -> Option<PathBuf> {
+fn read_config(path: &Path, key: &str) -> Option<String> {
     let text = std::fs::read_to_string(path).ok()?;
     text.lines().find_map(|l| {
         let (k, v) = l.split_once('=')?;
-        (k.trim() == "terraria_path").then(|| PathBuf::from(v.trim().trim_matches('"')))
+        (k.trim() == key).then(|| v.trim().to_string())
     })
 }
 
