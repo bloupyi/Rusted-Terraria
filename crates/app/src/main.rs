@@ -136,6 +136,8 @@ impl App {
             a.music(self.game.music());
         }
         (self.camera.sky, self.camera.background) = self.game.sky();
+        self.camera.water_style = self.game.water_style(self.camera.center.y / 16.0);
+        self.camera.surface = self.game.env.world_surface as f32 * 16.0;
         self.camera.time += dt;
     }
 
@@ -508,6 +510,8 @@ fn main() {
             sky: [1.0; 3],
             background: [0.0; 3],
             time: 0.0,
+            water_style: 0,
+            surface: 0.0,
         },
         free,
         keys: Keys::default(),

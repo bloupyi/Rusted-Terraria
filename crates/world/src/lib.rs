@@ -204,21 +204,31 @@ impl World {
         let (c, i) = self.cell_mut(x, y);
         (c.tile[i], c.frame_x[i], c.frame_y[i]) = (tile, frame_x, frame_y);
         self.mark_around(x, y, DIRTY_TILES);
+        self.mark_liquid(x, y);
     }
 
     pub fn set_wall(&mut self, x: u32, y: u32, wall: u16) {
         let (c, i) = self.cell_mut(x, y);
         c.wall[i] = wall;
         self.mark_around(x, y, DIRTY_TILES);
+        self.mark_liquid(x, y);
     }
 
     pub fn set_liquid(&mut self, x: u32, y: u32, amount: u8, kind: u8) {
         let (c, i) = self.cell_mut(x, y);
         (c.liquid[i], c.liquid_kind[i]) = (amount, if amount == 0 { 0 } else { kind });
-        // The liquid mesh reads the cell above to fill full cells.
-        self.mark(x, y, DIRTY_LIQUID);
-        if y + 1 < self.height {
-            self.mark(x, y + 1, DIRTY_LIQUID);
+        self.mark_liquid(x, y);
+    }
+
+    /// Liquid quads read their neighbours and fall up to 10 cells below a
+    /// liquid cell, so a change reaches chunks around and under it.
+    fn mark_liquid(&mut self, x: u32, y: u32) {
+        let (x0, x1) = (x.saturating_sub(6) / CHUNK, (x + 6).min(self.width - 1) / CHUNK);
+        let (y0, y1) = (y.saturating_sub(6) / CHUNK, (y + 16).min(self.height - 1) / CHUNK);
+        for cy in y0..=y1 {
+            for cx in x0..=x1 {
+                self.mark(cx * CHUNK, cy * CHUNK, DIRTY_LIQUID);
+            }
         }
     }
 
@@ -268,6 +278,7 @@ impl World {
     pub fn set_cell(&mut self, x: u32, y: u32, t: &formats::wld::Tile) {
         self.put_cell(x, y, t);
         self.mark_around(x, y, DIRTY_TILES | DIRTY_LIQUID);
+        self.mark_liquid(x, y);
     }
 
     /// [`World::set_cell`] without marking chunks, for filling a world before its scene is built.
