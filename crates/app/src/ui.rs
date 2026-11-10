@@ -15,6 +15,7 @@ use crate::inventory::HOTBAR;
 const BACK: f32 = 52.0;
 /// Items bigger than this are shrunk to fit a slot (`DrawItemIcon`'s size limit).
 pub const ICON_LIMIT: f32 = 32.0;
+const MANA_PER_STAR: i32 = 20;
 const LIFE_PER_HEART: i32 = 20;
 
 pub struct Fonts {
@@ -512,6 +513,32 @@ impl Hud {
                 scale,
                 gray(v, (alpha as f32 * 0.9) as i32 as f32 / 255.0),
             );
+        }
+    }
+
+    /// `ClassicPlayerResourcesDisplaySet.DrawMana`: a star per 20 mana under `label` ("Mana").
+    pub fn draw_mana(&self, p: &mut Painter, screen_w: f32, mana: i32, mana_max: i32, label: &str) {
+        let anchor = screen_w - 800.0;
+        let c = self.text_color as f32 / 255.0;
+        let w = p.measure(FontId::MouseText, label)[0];
+        let left = if w >= 45.0 { w as i32 + 5 } else { 50 };
+        p.plain_text(FontId::MouseText, label, [800.0 - left as f32 + anchor, 6.0], gray(c, c));
+        let Some(&SheetRef { w: sw, h: sh, .. }) = p.sheets.get("Mana") else { return };
+        let (sw, sh) = (sw as f32, sh as f32);
+        for i in 1..=mana_max / MANA_PER_STAR {
+            let (alpha, mut scale, pulse) = if mana >= i * MANA_PER_STAR {
+                (255, 1.0, mana == i * MANA_PER_STAR)
+            } else {
+                let part = (mana - (i - 1) * MANA_PER_STAR) as f32 / MANA_PER_STAR as f32;
+                (((30.0 + 225.0 * part) as i32).max(30), (part / 4.0 + 0.75).max(0.75), part > 0.0)
+            };
+            if pulse {
+                scale += self.cursor_scale() - 1.0;
+            }
+            let y = 30.0 + (sh / 2.0).floor() + (sh - sh * scale) / 2.0 + 28.0 * (i - 1) as f32;
+            let v = alpha as f32 / 255.0;
+            let origin = [(sw / 2.0).floor(), (sh / 2.0).floor()];
+            p.image("Mana", [775.0 + anchor, y], origin, scale, gray(v, (alpha as f32 * 0.9) as i32 as f32 / 255.0));
         }
     }
 }

@@ -49,6 +49,8 @@ const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
 pub const MAX_HP: i32 = 100;
+/// `statManaMax`: one star; nothing spends mana yet.
+pub const MAX_MANA: i32 = 20;
 const MAX_MOBS: usize = 5;
 const SPAWN_EVERY: f32 = 2.0;
 /// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
@@ -85,7 +87,10 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
-    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back13", "Inventory_Back14", "Heart"].map(String::from));
+    v.extend(
+        ["Inventory_Back", "Inventory_Back9", "Inventory_Back13", "Inventory_Back14", "Heart", "Mana"]
+            .map(String::from),
+    );
     v.extend(items::sheets());
     v
 }
@@ -142,6 +147,9 @@ pub struct Game {
     pub hp: i32,
     /// Ticks without damage after a hit.
     immune: i32,
+    /// `lifeRegenTime` and `lifeRegenCount`.
+    regen_time: f32,
+    regen_count: i32,
     /// Ticks before the swing can hit another monster.
     attack_cd: i32,
     /// World point the held item is used at this frame.
@@ -219,6 +227,8 @@ impl Game {
             outbox: Vec::new(),
             hp: MAX_HP,
             immune: 0,
+            regen_time: 0.0,
+            regen_count: 0,
             attack_cd: 0,
             use_target: None,
             release_use: true,
@@ -264,6 +274,7 @@ impl Game {
                     self.player.facing_left = facing;
                 }
                 self.contact_damage();
+                self.life_regen();
             }
             for (_, p) in &mut self.others {
                 p.animate();
@@ -372,6 +383,7 @@ impl Game {
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
         let damage = self.damage_var(m.kind.damage()).max(1);
         self.hp -= damage;
+        self.regen_time = 0.0;
         let b = self.player.body;
         self.text_at([b.x, b.y, b.w, b.h], combat_text::DAMAGED_FRIENDLY, damage, false);
         self.immune = if damage == 1 { 20 } else { 40 };
@@ -380,6 +392,26 @@ impl Game {
         if self.hp <= 0 {
             self.hp = MAX_HP;
             self.player = Player::spawn(&self.world, self.spawn_x);
+        }
+    }
+
+    /// `UpdateLifeRegen` without buffs, debuffs or accessories: after five
+    /// seconds unhurt life comes back faster and faster, more when standing still.
+    fn life_regen(&mut self) {
+        self.regen_time = (self.regen_time + 1.0).min(3600.0);
+        let t = self.regen_time;
+        let steps = [300.0, 600.0, 900.0, 1200.0, 1500.0, 1800.0, 2400.0, 3000.0, 3600.0];
+        let mut regen = steps.iter().filter(|&&s| t >= s).count() as f32;
+        regen *= if self.player.vx != 0.0 { 0.5 } else { 1.25 };
+        if self.env.expert {
+            regen /= 2.0;
+        }
+        regen *= MAX_HP as f32 / 400.0 * 0.85 + 0.15;
+        // `Math.Round` rounds halves to even.
+        self.regen_count += regen.round_ties_even() as i32;
+        while self.regen_count >= 120 {
+            self.regen_count -= 120;
+            self.hp = (self.hp + 1).min(MAX_HP);
         }
     }
 
@@ -1960,6 +1992,21 @@ mod tests {
         assert!(g.drops.is_empty(), "picked up again");
         g.throw_held(true);
         assert_eq!(g.drops.len(), 0, "not during the 10 ticks");
+    }
+
+    #[test]
+    fn life_comes_back_after_a_while_unhurt() {
+        let mut g = game();
+        let mut healed = |vx: f32| {
+            (g.hp, g.regen_time, g.regen_count, g.player.vx) = (50, 0.0, 0, vx);
+            for _ in 0..1200 {
+                g.life_regen();
+            }
+            g.hp - 50
+        };
+        // Nothing before ten seconds at 100 life, then one count a tick.
+        assert_eq!(healed(0.0), 5);
+        assert_eq!(healed(1.0), 2, "slower on the move");
     }
 
     #[test]

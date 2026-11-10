@@ -235,6 +235,8 @@ impl App {
         }
         let life = game.texts.get("LegacyInterface.0").unwrap_or("");
         self.hud.draw_life(&mut p, size.x, game.hp.max(0), game::MAX_HP, life);
+        let mana = game.texts.get("LegacyInterface.2").unwrap_or("");
+        self.hud.draw_mana(&mut p, size.x, game::MAX_MANA, game::MAX_MANA, mana);
         if let Some(life) = game.boss_life() {
             let (w, x) = (size.x * 0.5, size.x * 0.25);
             p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
