@@ -5,7 +5,7 @@ use render::atlas::SheetRef;
 use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
-use crate::backdrop;
+use crate::{backdrop, cave};
 use crate::inventory::{Inventory, Item};
 use crate::items::{self, Furniture, Material, Out, Tool, RECIPES, USE_TIME};
 use crate::net::{MobState, Msg};
@@ -60,7 +60,6 @@ const FIST_DAMAGE: i32 = 2;
 const STATION_REACH: i64 = 4;
 const ATTACK_EVERY: f32 = 0.35;
 /// Dirt-brown backdrop under the surface, lit like the tiles.
-const UNDERGROUND: [f32; 4] = [0.30, 0.21, 0.15, 1.0];
 /// Walked pixels per leg frame.
 const WALK_FRAME: f32 = 6.0;
 /// Body sheets back to front: sheet, column, row (`u32::MAX`: leg frame) and tint.
@@ -587,11 +586,22 @@ impl Game {
             sheets: &self.scene.mesher.atlas.named,
         };
         let view = backdrop::View { x: center[0] - w / 2.0, y: center[1] - h / 2.0, w, h };
+        let sheets = &self.scene.mesher.atlas.named;
         let mut v = backdrop::sprites(&scene, &view);
+        v.extend(cave::underworld(&self.env, self.world.height, center, (w, h), zoom, ticks, sheets));
         for s in &mut v {
             s.pos = [0, 1].map(|i| center[i] + (s.pos[i] - [w, h][i] / 2.0) / zoom);
             s.size = s.size.map(|k| k / zoom);
         }
+        let (hw, hh) = (w / (2.0 * zoom), h / (2.0 * zoom));
+        let cave_view = cave::View {
+            screen_x: (center[0] - w / 2.0) as f64,
+            x0: (center[0] - hw) as f64,
+            y0: (center[1] - hh) as f64,
+            x1: (center[0] + hw) as f64,
+            y1: (center[1] + hh) as f64,
+        };
+        v.extend(cave::layers(&self.env, self.world.header.world_id, self.world.height, &cave_view, ticks, sheets));
         v
     }
 
@@ -1021,13 +1031,6 @@ impl Game {
     /// Backdrop and tree tops (behind the world), then player, drops and cursor (in front).
     pub fn sprites(&self, view: Rect, cursor: Option<(i64, i64)>, free: bool) -> (Vec<Sprite>, Vec<Sprite>) {
         let mut under = Vec::new();
-        // Below the surface line, as in the game.
-        let top = (self.env.world_surface as f32 * 16.0).max(view.y0 as f32 * 16.0);
-        let bottom = view.y1 as f32 * 16.0;
-        if top < bottom {
-            let (x0, x1) = (view.x0 as f32 * 16.0, view.x1 as f32 * 16.0);
-            under.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([x0, top], [x1 - x0, bottom - top], UNDERGROUND) });
-        }
         self.tree_tops(view, &mut under);
 
         let mut over = Vec::new();
