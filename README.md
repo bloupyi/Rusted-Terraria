@@ -51,6 +51,16 @@ comme dans le jeu (echelle, parallaxe, hauteur selon la position de la vue, a zo
 de fond 1 quel que soit le zoom de jeu), avec la couleur du ciel du jeu selon
 l'heure ; la lumiere du ciel sur les tuiles en derive.
 
+Fonds souterrains (`app::cave`) : zones et styles de caverne, styles de glace, de
+jungle, d'enfer et du monde souterrain lus dans le fichier monde. Comme dans le
+jeu : bande de surface, couches de terre (rangees de 96 px depuis la surface
+jusqu'a la transition de roche), roche, puis magma anime (3 images, 8 ticks)
+jusqu'a l'enfer, en espace monde avec une parallaxe horizontale de 0,88 et
+eclairees par la lumiere des tuiles (teinte 0,9). En enfer, les cinq plans du
+monde souterrain avec leur parallaxe, leurs decalages et leurs animations. Les
+biomes (neige, jungle, corruption, plage, champignons) ne changent pas encore le
+style, faute de detection de biome.
+
 Controles :
 
 - ZQSD/WASD ou fleches : marcher, sauter (haut ou Espace), descendre des plateformes.
@@ -179,7 +189,7 @@ envoyes a zero, shimmer transmis comme de l'eau, objets au sol locaux.
 
 Sprites : joueur, monstres (`NPC_1` a `NPC_4`, `NPC_22`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
-`Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
+`Tree_Branches_0`) et fonds souterrains sont des rectangles textures du meme atlas,
 eclaires comme les tuiles. Les liquides utilisent `Liquid_0` (eau animee),
 `Liquid_1` et `Liquid_11` ; le shimmer reste en couleur unie.
 

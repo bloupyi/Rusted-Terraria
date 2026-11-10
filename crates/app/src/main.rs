@@ -1,5 +1,6 @@
 mod audio;
 mod backdrop;
+mod cave;
 mod game;
 mod inventory;
 mod items;
@@ -473,7 +474,9 @@ fn main() {
         None => println!("assets: Terraria install not found (set {}), using placeholders", formats::install::ENV_VAR),
     }
     let mut sheets = game::sprite_sheets();
-    sheets.extend(backdrop::sheets(&world.header.env.clone().unwrap_or_default()));
+    let env = world.header.env.clone().unwrap_or_default();
+    sheets.extend(backdrop::sheets(&env));
+    sheets.extend(cave::sheets(&env, world.header.world_id));
     let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",

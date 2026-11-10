@@ -47,6 +47,13 @@ pub struct Env {
     pub eclipse: bool,
     /// Background style of each forest zone, left to right.
     pub tree_bg: [u8; 4],
+    /// Cavern background zone borders in tiles, and the style of each zone.
+    pub cave_x: [i32; 3],
+    pub cave_style: [i32; 4],
+    pub ice_style: i32,
+    pub jungle_style: i32,
+    pub hell_style: i32,
+    pub underworld_bg: u8,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -178,8 +185,18 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     for x in &mut e.tree_x {
         *x = r.i32()?;
     }
-    // Tree styles (4), cave back x (3) and styles (4), ice/jungle/hell styles, spawn x/y.
-    skip(r, 4 * (4 + 3 + 4 + 3 + 2))?;
+    skip(r, 4 * 4)?;
+    for x in &mut e.cave_x {
+        *x = r.i32()?;
+    }
+    for s in &mut e.cave_style {
+        *s = r.i32()?;
+    }
+    e.ice_style = r.i32()?;
+    e.jungle_style = r.i32()?;
+    e.hell_style = r.i32()?;
+    // Spawn x/y.
+    skip(r, 8)?;
     e.world_surface = f64(r)?;
     e.rock_layer = f64(r)?;
     e.time = f64(r)?;
@@ -216,8 +233,9 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     skip(r, 2 + 4)?;
     let party = r.i32()?.max(0) as usize;
     skip(r, party * 4)?;
-    // Sandstorm, old one's army, two more biome backgrounds.
-    skip(r, 1 + 4 + 4 + 4 + 4 + 1 + 1)?;
+    // Sandstorm, old one's army, mushroom background.
+    skip(r, 1 + 4 + 4 + 4 + 4 + 1)?;
+    e.underworld_bg = r.u8()?;
     for b in &mut e.tree_bg[1..] {
         *b = r.u8()?;
     }
@@ -411,6 +429,7 @@ mod tests {
         let env = h.env.as_ref().expect("world flags");
         assert!(env.world_surface > 0.0 && env.world_surface < env.rock_layer && env.rock_layer < h.height as f64);
         assert!((0..8).contains(&env.moon_phase) && env.tree_x[0] <= env.tree_x[1]);
+        assert!(env.cave_x[0] <= env.cave_x[1] && env.cave_style.iter().all(|s| (0..8).contains(s)) && env.underworld_bg < 3);
         let mut cells = 0u64;
         read_tiles(&data, &h, |_, _, n, _| cells += n as u64).unwrap();
         assert_eq!(cells, h.width as u64 * h.height as u64);
