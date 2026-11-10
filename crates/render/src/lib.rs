@@ -1,5 +1,6 @@
 pub mod atlas;
 mod gpu;
+pub mod liquid;
 pub mod mesh;
 
 pub use atlas::Atlas;

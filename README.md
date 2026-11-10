@@ -133,8 +133,15 @@ Liquides (`world::liquid`) :
 - Automate par cellule sur les chunks actifs, 30 fois par seconde : chute, puis
   nivellement avec les voisins une fois pose. Eau et lave donnent de l'obsidienne.
   Un chunk ou rien ne bouge s'endort jusqu'a ce qu'un voisin change.
-- Rendu en quads de couleur entre murs et tuiles, hauteur selon la quantite, plein
-  si du liquide est au-dessus, surface ondulee. Couleur opaque sur la carte.
+- Rendu (`render::liquid`) selon le LiquidRenderer du jeu : niveau visible (trous
+  entre deux cases de liquide combles), cascades qui s'estompent sur 10 cases
+  (eau, shimmer), 3 (lave) ou 2 (miel), fractions de bord lissees avec les
+  voisins, cadre dans les sheets `Misc/water_N` (bords, coins, surface), 16 images
+  d'animation a 6 par seconde sans vent, 0,5 pour les chutes. Dessine deux fois
+  comme le jeu : opaque derriere les murs au-dessus du fond souterrain, puis devant
+  les tuiles avec l'opacite du jeu (eau 0,6, lave et miel 0,95, shimmer 0,75).
+  Style d'eau selon la profondeur (foret, caverne, roche) et la lune de sang.
+  Shimmer non eclaire, teinte ondulante et paillettes. Couleur opaque sur la carte.
 
 Monde modifiable :
 
@@ -190,8 +197,7 @@ envoyes a zero, shimmer transmis comme de l'eau, objets au sol locaux.
 Sprites : joueur, monstres (`NPC_1` a `NPC_4`, `NPC_22`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
 et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
 `Tree_Branches_0`) et fonds souterrains sont des rectangles textures du meme atlas,
-eclaires comme les tuiles. Les liquides utilisent `Liquid_0` (eau animee),
-`Liquid_1` et `Liquid_11` ; le shimmer reste en couleur unie.
+eclaires comme les tuiles. Les liquides utilisent `Misc/water_0` a `water_14`.
 
 ## Tests
 

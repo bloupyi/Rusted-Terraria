@@ -10,11 +10,10 @@ use crate::atlas::{Atlas, SheetRef};
 
 pub const LOD_PAGE: u32 = 2048;
 const WALL_BIT: u32 = 1 << 30;
-const LIQUID_BIT: u32 = 1 << 31;
 
-/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30 | liquid << 31.
-/// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29,
-/// or for a liquid: amount (8) | kind (8) << 8.
+/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30.
+/// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29.
+/// Liquids have their own layout, see [`crate::liquid::chunk`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Instance {
@@ -70,7 +69,7 @@ impl Scene {
         tiles.sort_unstable();
         tiles.dedup();
         let mut named = named.to_vec();
-        named.extend(LIQUID_SHEETS.iter().filter(|n| !n.is_empty()).map(|n| n.to_string()));
+        named.extend((0..WATER_SHEETS).map(water_sheet));
         let atlas = Atlas::load(images, &tiles, &walls, &named);
         let ((mesher, rows), ((lod_pages_x, lod_pages_y, lod), light)) =
             rayon::join(|| Mesher::new(world, atlas), || rayon::join(|| build_lod(world), || LightMap::compute(world)));
@@ -172,7 +171,11 @@ impl Mesher {
 fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: bool) -> [Vec<Instance>; 3] {
     let important = &world.header.frame_important;
     let c: &Chunk = world.chunk(cx, cy);
-    let (mut walls, mut liquids, mut tiles) = (Vec::new(), Vec::new(), Vec::new());
+    let liquids = crate::liquid::chunk(world, cx, cy);
+    let (mut walls, mut tiles) = (Vec::new(), Vec::new());
+    if liquids_only {
+        return [walls, liquids, tiles];
+    }
     let is_block = |t: u16| t != NO_TILE && !important.get(t as usize).copied().unwrap_or(false);
     for lx in 0..CHUNK {
         let x = cx * CHUNK + lx;
@@ -186,14 +189,6 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
             }
             let i = Chunk::index(lx, ly);
             let (xi, yi) = (x as i64, y as i64);
-            if c.liquid[i] != 0 {
-                // Liquid below more liquid fills its tile.
-                let amount = if world.liquid(xi, yi - 1) != 0 { 255 } else { c.liquid[i] as u32 };
-                liquids.push(Instance { a: x | (y << 15) | LIQUID_BIT, b: amount | (c.liquid_kind[i] as u32) << 8 });
-            }
-            if liquids_only {
-                continue;
-            }
             let wall = c.wall[i];
             if let Some(Some(s)) = atlas.walls.get(wall as usize).filter(|_| wall != 0) {
                 let (fx, fy) = world::frame::wall(world, xi, yi, variant(x, y) as usize);
@@ -236,10 +231,14 @@ fn variant(x: u32, y: u32) -> u32 {
     (x.wrapping_mul(0x9E37_79B1) ^ y.wrapping_mul(0x85EB_CA77)).rotate_right(13) % 3
 }
 
-/// Opaque versions of the shader's liquid colours.
-/// Liquid sheets by kind; shimmer has none (it is drawn by its own effect in the game).
-pub const LIQUID_SHEETS: [&str; 4] = ["Liquid_0", "Liquid_1", "Liquid_11", ""];
+/// Liquid sheets: water styles, lava (1), honey (11), shimmer (14).
+pub const WATER_SHEETS: usize = 15;
 
+pub fn water_sheet(i: usize) -> String {
+    format!("Misc/water_{i}")
+}
+
+/// Opaque versions of the shader's liquid colours.
 pub const LIQUID_LOD: [[u8; 4]; 4] =
     [[40, 90, 230, 255], [240, 100, 20, 255], [240, 165, 25, 255], [205, 155, 255, 255]];
 
@@ -280,28 +279,5 @@ fn colorize(world: &World, atlas: &Atlas, ox: u32, oy: u32, size: u32, img: &mut
         img.par_chunks_mut((size * 4) as usize).enumerate().for_each(line);
     } else {
         img.chunks_mut((size * 4) as usize).enumerate().for_each(line);
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use formats::wld::{Liquid, Tile};
-
-    #[test]
-    fn liquid_instances() {
-        // Lava column at x = 3: partial surface at y = 5, full below.
-        let world = World::parse(&formats::synth::write_world("l", 40, 40, &[], |x, y| Tile {
-            liquid: if x == 3 && (5..8).contains(&y) { 100 } else { 0 },
-            liquid_kind: Liquid::Lava,
-            ..Tile::default()
-        }))
-        .unwrap();
-        let (_, rows) = Mesher::new(&world, Atlas::load(None, &[], &[], &[]));
-        let liquids = &rows[0].liquids;
-        let got: Vec<(u32, u32)> = liquids.iter().map(|i| ((i.a >> 15) & 0x7fff, i.b)).collect();
-        let lava = (Liquid::Lava as u32) << 8;
-        assert_eq!(got, vec![(5, 100 | lava), (6, 255 | lava), (7, 255 | lava)]);
-        assert!(liquids.iter().all(|i| i.a & LIQUID_BIT != 0 && i.a & 0x7fff == 3));
     }
 }
