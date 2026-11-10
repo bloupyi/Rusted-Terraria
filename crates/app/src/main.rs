@@ -122,8 +122,8 @@ impl App {
         if self.drag.is_none() && !self.ui_click {
             let (tx, ty) = self.cursor_tile(size);
             let w = self.screen_to_world(self.cursor, size);
-            if self.buttons[0] && !self.game.attack(w.x, w.y, self.free) {
-                self.game.dig(tx, ty, self.free);
+            if self.buttons[0] {
+                self.game.use_at(w.x, w.y, self.free);
             }
             if self.buttons[1] {
                 self.game.place(tx, ty, self.free);

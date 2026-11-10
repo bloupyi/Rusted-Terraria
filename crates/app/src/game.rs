@@ -48,18 +48,17 @@ const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
 pub const MAX_HP: i32 = 100;
-/// Seconds without damage after a hit.
-const INVULNERABLE: f32 = 0.67;
 const MAX_MOBS: usize = 5;
 const SPAWN_EVERY: f32 = 2.0;
 /// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
 const SPAWN_DIST: (i64, i64) = (35, 55);
 const DESPAWN: f32 = 100.0 * 16.0;
-/// Damage with no weapon in hand.
-const FIST_DAMAGE: i32 = 2;
 /// Crafting stations count within this many tiles of the player.
 const STATION_REACH: i64 = 4;
-const ATTACK_EVERY: f32 = 0.35;
+/// Knockback for hits other players send, which carry only the damage.
+const CLIENT_KNOCK_BACK: f32 = 5.0;
+/// `Player.GetWeaponCrit` with no bonuses: 4 in 100.
+const CRIT_CHANCE: u64 = 4;
 /// Body sheets back to front: sheet, column, row (`u32::MAX`: leg frame) and tint.
 const PLAYER_LAYERS: [(&str, u32, u32, [f32; 4]); 12] = [
     ("Player_0_10", 0, u32::MAX, SKIN),
@@ -131,10 +130,14 @@ pub struct Game {
     /// Edits to send to the other players.
     pub outbox: Vec<Msg>,
     pub hp: i32,
-    invulnerable: f32,
-    attack_cd: f32,
-    /// Tile the held tool is aimed at this frame.
-    use_target: Option<(i64, i64)>,
+    /// Ticks without damage after a hit.
+    immune: i32,
+    /// Ticks before the swing can hit another monster.
+    attack_cd: i32,
+    /// World point the held item is used at this frame.
+    use_target: Option<(f32, f32)>,
+    /// The use button was up last tick, so a swing without auto reuse can start.
+    release_use: bool,
     /// Ticks left in the swing and before the next hit.
     item_animation: i32,
     item_time: i32,
@@ -203,9 +206,10 @@ impl Game {
             client: false,
             outbox: Vec::new(),
             hp: MAX_HP,
-            invulnerable: 0.0,
-            attack_cd: 0.0,
+            immune: 0,
+            attack_cd: 0,
             use_target: None,
+            release_use: true,
             item_animation: 0,
             item_time: 0,
             hits: HitTiles::default(),
@@ -242,7 +246,12 @@ impl Game {
             self.wind.tick(self.env.wind);
             self.use_item(target);
             if let Some(input) = input {
+                let facing = self.player.facing_left;
                 self.player.tick(&self.world, input);
+                if self.item_animation > 0 && !self.held_tool().use_turn {
+                    self.player.facing_left = facing;
+                }
+                self.contact_damage();
             }
             for (_, p) in &mut self.others {
                 p.animate();
@@ -283,8 +292,6 @@ impl Game {
 
     /// Spawns, moves and despawns monsters; contact hurts the player when `fight`.
     fn update_mobs(&mut self, dt: f32, fight: bool) {
-        self.invulnerable -= dt;
-        self.attack_cd -= dt;
         self.spawn_acc += dt;
         if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
             self.spawn_acc = 0.0;
@@ -313,20 +320,6 @@ impl Game {
                         && !(day && m.kind == Kind::EyeBoss))
             });
         }
-        if !fight || self.invulnerable > 0.0 {
-            return;
-        }
-        if let Some(m) = self.mobs.iter().find(|m| !m.kind.friendly() && m.body.touches(&self.player.body)) {
-            self.hp -= m.kind.damage();
-            self.invulnerable = INVULNERABLE;
-            self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
-            let away = if self.player.center().0 < m.body.center().0 { -1.0 } else { 1.0 };
-            (self.player.vx, self.player.vy) = (away * 4.5, -3.5);
-            if self.hp <= 0 {
-                self.hp = MAX_HP;
-                self.player = Player::spawn(&self.world, self.spawn_x);
-            }
-        }
     }
 
     /// A monster on open ground to one side, off screen: slimes by day, zombies too at night.
@@ -354,45 +347,36 @@ impl Game {
         self.mobs.push(Mob::new(kind, x as f32 * 16.0 + 8.0, y as f32 * 16.0));
     }
 
-    /// Hits the monster under the world point if in reach. True if one was there.
-    pub fn attack(&mut self, wx: f32, wy: f32, free: bool) -> bool {
-        let (tx, ty) = ((wx / 16.0).floor() as i64, (wy / 16.0).floor() as i64);
-        if !self.in_reach(tx, ty, free) {
-            return false;
+    /// `Update_NPCCollision` and `Hurt`: touching a monster costs its damage,
+    /// varied, then 40 ticks without damage and a knockback away from it.
+    fn contact_damage(&mut self) {
+        if self.immune > 0 {
+            self.immune -= 1;
+            return;
         }
-        let Some(i) = self.mobs.iter().position(|m| {
-            let b = &m.body;
-            if m.kind.friendly() {
-                return false;
-            }
-            wx >= b.x && wx < b.x + b.w && wy >= b.y && wy < b.y + b.h
-        }) else {
-            return false;
-        };
-        let damage = self.weapon_damage();
-        if self.attack_cd <= 0.0 && self.client {
-            self.attack_cd = ATTACK_EVERY;
-            self.sfx.extend([Sfx::Swing, Sfx::MobHit]);
-            self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
-        } else if self.attack_cd <= 0.0 {
-            self.attack_cd = ATTACK_EVERY;
-            self.sfx.push(Sfx::Swing);
-            let from = self.player.center().0;
-            self.hit_mob(i, damage, from);
+        let p = self.player.body;
+        let Some(m) = self.mobs.iter().find(|m| m.kind.damage() > 0 && m.body.touches(&p)) else { return };
+        let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
+        let damage = self.damage_var(m.kind.damage()).max(1);
+        self.hp -= damage;
+        self.immune = if damage == 1 { 20 } else { 40 };
+        (self.player.vx, self.player.vy) = (4.5 * dir, -3.5);
+        self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
+        if self.hp <= 0 {
+            self.hp = MAX_HP;
+            self.player = Player::spawn(&self.world, self.spawn_x);
         }
-        true
     }
 
-    fn weapon_damage(&self) -> i32 {
-        match self.inventory.selected().map(|s| s.item) {
-            Some(Item::Tool(t)) => t.damage(),
-            _ => FIST_DAMAGE,
-        }
+    /// `Main.DamageVar`: within 15% either way.
+    fn damage_var(&mut self, damage: i32) -> i32 {
+        let k = (self.random() % 31) as i32 - 15;
+        (damage as f32 * (1.0 + k as f32 * 0.01)) as i32
     }
 
     /// Hurts a monster; a dead slime leaves gel.
-    fn hit_mob(&mut self, i: usize, damage: i32, from_x: f32) {
-        if !self.mobs[i].hit(damage, from_x) {
+    fn hit_mob(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32, crit: bool) {
+        if !self.mobs[i].strike(damage, knock_back, dir, crit).1 {
             self.sfx.push(Sfx::MobHit);
             return;
         }
@@ -484,7 +468,8 @@ impl Game {
             }
             Msg::Hit { index, damage } if !self.client && (index as usize) < self.mobs.len() => {
                 let from_x = self.others.iter().find(|o| o.0 == from).map_or(0.0, |o| o.1.center().0);
-                self.hit_mob(index as usize, damage as i32, from_x);
+                let dir = if self.mobs[index as usize].body.center().0 < from_x { -1.0 } else { 1.0 };
+                self.hit_mob(index as usize, damage as i32, CLIENT_KNOCK_BACK, dir, false);
             }
             Msg::Leave { id } => self.others.retain(|o| o.0 != id),
             Msg::Time(t) if self.client => self.time = t,
@@ -648,16 +633,17 @@ impl Game {
         self.world.header.frame_important.get(t as usize).copied().unwrap_or(false)
     }
 
-    /// Aims the held tool at the tile for this frame; with the free camera the
-    /// tile breaks at once and drops nothing.
-    pub fn dig(&mut self, tx: i64, ty: i64, free: bool) {
+    /// Uses the held item at a world point for this frame; with the free
+    /// camera the tile there breaks at once and drops nothing.
+    pub fn use_at(&mut self, wx: f32, wy: f32, free: bool) {
+        let (tx, ty) = ((wx / 16.0).floor() as i64, (wy / 16.0).floor() as i64);
         if free {
             if self.world.in_bounds(tx, ty) {
                 self.break_tile(tx, ty, false);
             }
             return;
         }
-        self.use_target = Some((tx, ty));
+        self.use_target = Some((wx, wy));
     }
 
     fn held_tool(&self) -> ToolStats {
@@ -667,24 +653,136 @@ impl Game {
         }
     }
 
-    /// One tick of the held tool, as the game's `ItemCheck` counts it: a swing
-    /// starts while the button is held, and a hit lands whenever the item time
-    /// has run out during a swing.
-    fn use_item(&mut self, target: Option<(i64, i64)>) {
+    /// One tick of the held item, as the game's `ItemCheck` counts it: a swing
+    /// starts while the button is held (again only after a release without
+    /// auto reuse), a tool hits whenever the item time has run out during a
+    /// swing, and the blade hits monsters all through it.
+    fn use_item(&mut self, target: Option<(f32, f32)>) {
         let s = self.held_tool();
-        let held = target.is_some() && s.use_animation > 0;
-        if held && self.item_animation == 0 {
+        let held = target.is_some();
+        if held && self.item_animation == 0 && s.use_animation > 0 && (self.release_use || s.auto_reuse) {
             self.item_animation = s.use_animation;
+            if let Some((wx, _)) = target {
+                self.player.facing_left = wx < self.player.center().0;
+            }
+            if s.damage > 0 {
+                self.sfx.push(Sfx::Swing);
+            }
         }
         if self.item_animation > 0 {
             self.item_animation -= 1;
         }
+        self.release_use = !held;
         if self.item_time > 0 {
             self.item_time -= 1;
         }
-        let Some((x, y)) = target else { return };
-        if held && self.item_time == 0 && self.item_animation > 0 && self.in_tool_range(x, y, s.tile_boost) {
-            self.hit_with(s, x, y);
+        if self.attack_cd > 0 {
+            self.attack_cd -= 1;
+        }
+        for m in &mut self.mobs {
+            m.melee_cooldown = (m.melee_cooldown - 1).max(0);
+        }
+        if let Some((wx, wy)) = target {
+            let (x, y) = ((wx / 16.0).floor() as i64, (wy / 16.0).floor() as i64);
+            let tool = s.pick > 0 || s.axe > 0 || s.hammer > 0;
+            if tool && self.item_time == 0 && self.item_animation > 0 && self.in_tool_range(x, y, s.tile_boost) {
+                self.hit_with(s, x, y);
+            }
+        }
+        if self.item_animation > 0 && s.damage > 0 {
+            self.melee(s);
+        }
+    }
+
+    /// Size of the held item's picture, which the swing's reach follows.
+    fn held_frame(&self) -> (f32, f32) {
+        let sheet = match self.inventory.selected().map(|s| s.item) {
+            Some(Item::Tool(t)) => self.sheet(t.sheet()),
+            _ => None,
+        };
+        sheet.map_or((32.0, 32.0), |s| (s.w as f32, s.h as f32))
+    }
+
+    /// `ItemCheck_ApplyUseStyle` for a swing: where the item is held and its
+    /// angle at this point of the swing.
+    fn swing_pose(&self, s: ToolStats) -> ([f32; 2], f32) {
+        let (w, h) = self.held_frame();
+        let p = &self.player;
+        let dir = if p.facing_left { -1.0 } else { 1.0 };
+        let (anim, max) = (self.item_animation as f32, s.use_animation as f32);
+        let mid = p.x + player::WIDTH * 0.5;
+        let step =
+            |table: &[(f32, f32)], v: f32, base: f32| table.iter().rev().find(|t| v >= t.0).map_or(base, |t| t.1);
+        let at = if anim < max * 0.333 {
+            let n = step(&[(33.0, 14.0), (52.0, 24.0), (64.0, 28.0), (92.0, 38.0)], w, 10.0);
+            [mid + (w * 0.5 - n) * dir, p.y + 24.0]
+        } else if anim < max * 0.666 {
+            let n = step(&[(33.0, 18.0), (52.0, 24.0), (64.0, 28.0), (92.0, 38.0)], w, 10.0);
+            let m = step(&[(33.0, 8.0), (53.0, 12.0), (65.0, 14.0)], h, 10.0);
+            [mid + (w * 0.5 - n) * dir, p.y + m]
+        } else {
+            let n = step(&[(33.0, 14.0), (48.0, 18.0), (52.0, 24.0), (64.0, 28.0), (92.0, 38.0)], w, 6.0);
+            let m = step(&[(53.0, 12.0), (65.0, 14.0)], h, 10.0);
+            [mid - (w * 0.5 - n) * dir, p.y + m]
+        };
+        (at, (anim / max - 0.5) * -dir * 3.5 - dir * 0.3)
+    }
+
+    /// `ItemCheck_GetMeleeHitbox` for a swing: x, y, width, height.
+    fn melee_hitbox(&self, s: ToolStats) -> [i32; 4] {
+        let (w, h) = self.held_frame();
+        let ([x, y], _) = self.swing_pose(s);
+        let dir = if self.player.facing_left { -1 } else { 1 };
+        let (mut rx, mut ry) = (x as i32, y as i32);
+        let (mut rw, mut rh) = ((w * s.scale) as i32, (h * s.scale) as i32);
+        if dir == -1 {
+            rx -= rw;
+        }
+        ry -= rh;
+        let (anim, max) = (self.item_animation as f64, s.use_animation as f64);
+        if anim < max * 0.333 {
+            if dir == -1 {
+                rx -= (rw as f64 * 1.4 - rw as f64) as i32;
+            }
+            rw = (rw as f64 * 1.4) as i32;
+            ry += (rh as f64 * 0.5) as i32;
+            rh = (rh as f64 * 1.1) as i32;
+        } else if anim >= max * 0.666 {
+            if dir == 1 {
+                rx -= (rw as f64 * 1.2) as i32;
+            }
+            rw *= 2;
+            ry -= (rh as f64 * 1.4 - rh as f64) as i32;
+            rh = (rh as f64 * 1.4) as i32;
+        }
+        [rx, ry, rw, rh]
+    }
+
+    /// `ItemCheck_MeleeHitNPCs`: each monster in the swing once per swing, and
+    /// after a hit none for a third of it.
+    fn melee(&mut self, s: ToolStats) {
+        let [x, y, w, h] = self.melee_hitbox(s).map(|v| v as f32);
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        for i in 0..self.mobs.len() {
+            let m = &self.mobs[i];
+            let b = &m.body;
+            let inside = x < b.x + b.w && b.x < x + w && y < b.y + b.h && b.y < y + h;
+            if m.kind.friendly() || m.melee_cooldown > 0 || self.attack_cd > 0 || !inside {
+                continue;
+            }
+            let damage = self.damage_var(s.damage);
+            let crit = self.random() % 100 < CRIT_CHANCE;
+            self.mobs[i].melee_cooldown = self.item_animation;
+            self.attack_cd = ((s.use_animation as f64 * 0.33) as i32).max(1);
+            if self.client {
+                let damage = if crit { damage * 2 } else { damage };
+                self.sfx.push(Sfx::MobHit);
+                self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
+            } else {
+                self.hit_mob(i, damage, s.knock_back, dir, crit);
+            }
+            // A kill shifts the list; the cooldown stops more hits this tick anyway.
+            break;
         }
     }
 
@@ -1160,7 +1258,8 @@ impl Game {
             self.player_sprites(p, false, &mut over);
         }
         if !free {
-            self.player_sprites(&self.player, self.invulnerable > 0.0, &mut over);
+            self.player_sprites(&self.player, self.immune > 0, &mut over);
+            self.held_item_sprite(&mut over);
         }
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
@@ -1335,6 +1434,26 @@ impl Game {
                 None => out.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([b.x, b.y], [b.w, b.h], color) }),
             }
         }
+    }
+
+    /// The item in the player's hand during a swing, turning about its grip
+    /// (`useStyle` 1 in `DrawPlayer`).
+    fn held_item_sprite(&self, out: &mut Vec<Sprite>) {
+        let Some(Item::Tool(t)) = self.inventory.selected().map(|s| s.item) else { return };
+        let s = t.stats();
+        let Some(sheet) = self.sheet(t.sheet()).filter(|_| self.item_animation > 0) else { return };
+        let ([x, y], rot) = self.swing_pose(s);
+        // Drawn where the player is drawn, between ticks and after a step.
+        let [dx, dy] = self.player.drawn(self.tick_acc);
+        let (x, y) = (x + dx - self.player.x, y + dy - self.player.y + self.player.gfx_off_y);
+        let (w, h) = (sheet.w as f32 * s.scale, sheet.h as f32 * s.scale);
+        let left = self.player.facing_left;
+        let grip = [if left { w } else { 0.0 }, h];
+        let flags = SPRITE_LIT | if left { SPRITE_FLIP } else { 0 };
+        let mut sprite = Sprite::sheet([x - grip[0], y - grip[1]], sheet, [0, 0, sheet.w, sheet.h], flags);
+        sprite.size = [w, h];
+        (sprite.rot, sprite.pivot) = (rot, grip);
+        out.push(sprite);
     }
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
@@ -1529,7 +1648,7 @@ mod tests {
 
     /// One tick with the tool held on a tile.
     fn swing(g: &mut Game, x: i64, y: i64) {
-        g.dig(x, y, false);
+        g.use_at(x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0, false);
         let target = g.use_target.take();
         g.use_item(target);
     }
@@ -1620,8 +1739,12 @@ mod tests {
     fn guide_is_left_alone_and_the_boss_comes_at_night() {
         let mut g = game();
         let (gx, gy) = g.mobs[0].body.center();
-        assert!(!g.attack(gx, gy, false), "the guide cannot be hit");
-        g.update_mobs(0.0, true);
+        g.mobs[0].body.x = g.player.x + 20.0;
+        for _ in 0..30 {
+            g.use_at(gx, gy, false);
+            g.update(Some(Input::default()), 1.0 / 60.0, 1.0);
+        }
+        assert_eq!(g.mobs[0].hp, Kind::Guide.max_hp(), "the guide cannot be hit");
         assert_eq!(g.hp, MAX_HP, "nor hurts");
 
         g.inventory.slots[9] = Some(Stack { item: Item::Material(Material::SuspiciousEye), count: 1 });
@@ -1632,7 +1755,7 @@ mod tests {
         assert!(g.inventory.slots[9].is_none(), "used up");
         assert_eq!(g.boss_life(), Some(1.0));
         let i = g.mobs.iter().position(|m| m.kind == Kind::EyeBoss).unwrap();
-        g.hit_mob(i, Kind::EyeBoss.max_hp(), 0.0);
+        g.hit_mob(i, Kind::EyeBoss.max_hp() * 2, 0.0, 1.0, false);
         assert_eq!(g.boss_life(), None);
         assert!(g.drops.iter().any(|d| d.item == Item::Block(items::DEMONITE_ORE) && d.count >= 30));
         g.time = 0.8;
@@ -1660,15 +1783,63 @@ mod tests {
         g.mobs.clear();
         let (px, py) = g.player.center();
         g.mobs.push(Mob::new(Kind::Slime, px, py + 21.0));
-        g.update_mobs(0.0, true);
-        assert_eq!(g.hp, MAX_HP - Kind::Slime.damage());
-        g.update_mobs(0.1, true);
-        assert_eq!(g.hp, MAX_HP - Kind::Slime.damage(), "invulnerable for a moment");
-        for _ in 0..3 {
+        g.contact_damage();
+        let lost = MAX_HP - g.hp;
+        assert!((5..=8).contains(&lost), "7 within 15%: {lost}");
+        assert_eq!(g.immune, 40);
+        assert_eq!((g.player.vx, g.player.vy), (-4.5, -3.5), "knocked away");
+        g.contact_damage();
+        assert_eq!(MAX_HP - g.hp, lost, "immune for a moment");
+
+        // A wooden sword: 7 a hit less 1 for the slime's defense, so four or five swings.
+        g.inventory.slots[0] = Some(Stack { item: Item::Tool(Tool::Sword(Tier::Wood)), count: 1 });
+        g.inventory.selected = 0;
+        g.mobs[0].body.x = g.player.x + player::WIDTH;
+        let mut swings = 0;
+        while !g.mobs.is_empty() {
             let (mx, my) = g.mobs[0].body.center();
-            assert!(g.attack(mx, my, false));
-            g.attack_cd = 0.0;
+            g.mobs[0].body.x = g.player.x + player::WIDTH;
+            (g.mobs[0].body.vx, g.mobs[0].body.vy) = (0.0, 0.0);
+            g.use_at(mx, my, false);
+            let target = g.use_target.take();
+            g.use_item(target);
+            if g.item_animation == Tool::Sword(Tier::Wood).stats().use_animation - 1 {
+                swings += 1;
+            }
+            // No auto reuse: let go between swings.
+            if g.item_animation == 0 {
+                g.use_item(None);
+            }
+            assert!(swings < 10, "never dies");
         }
-        assert!(g.mobs.is_empty());
+        assert!((4..=6).contains(&swings), "{swings} swings");
+    }
+
+    #[test]
+    fn swing_hitbox_follows_the_arc() {
+        let mut g = game();
+        g.inventory.slots[0] = Some(Stack { item: Item::Tool(Tool::Sword(Tier::Wood)), count: 1 });
+        g.inventory.selected = 0;
+        let s = Tool::Sword(Tier::Wood).stats();
+        let (px, py) = (g.player.x as i32, g.player.y as i32);
+        // Start of the swing: up and behind, twice as wide.
+        g.item_animation = 19;
+        let [x, y, w, h] = g.melee_hitbox(s);
+        let (fw, fh) = g.held_frame();
+        assert_eq!((w, h), ((fw * 2.0) as i32, (fh * 1.4) as i32));
+        assert!(x < px && y < py);
+        // End: low and in front.
+        g.item_animation = 2;
+        let [x, y, ..] = g.melee_hitbox(s);
+        assert!(x > px && y > py - 16, "{x},{y} from {px},{py}");
+        // A swing to the left faces left and ends on that side.
+        g.item_animation = 0;
+        g.release_use = true;
+        let (cx, cy) = g.player.center();
+        g.use_item(Some((cx - 40.0, cy)));
+        assert!(g.player.facing_left);
+        g.item_animation = 2;
+        let [x, _, w, _] = g.melee_hitbox(s);
+        assert!(x + w < px + 20, "{x}+{w} from {px}");
     }
 }

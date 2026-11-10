@@ -58,8 +58,8 @@ pub const COPPER_ORE: u16 = 7;
 pub const IRON_ORE: u16 = 6;
 pub const DEMONITE_ORE: u16 = 22;
 
-/// Mining stats of a tool, from the game's item defaults.
-#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+/// Use stats of a tool or weapon, from the game's item defaults.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct ToolStats {
     pub pick: i32,
     pub axe: i32,
@@ -70,37 +70,50 @@ pub struct ToolStats {
     pub use_animation: i32,
     /// Extra reach in tiles.
     pub tile_boost: i32,
+    pub damage: i32,
+    pub knock_back: f32,
+    pub scale: f32,
+    /// Swings again while the button stays down.
+    pub auto_reuse: bool,
+    /// The player may turn during the swing.
+    pub use_turn: bool,
 }
 
 impl Tool {
     /// Wooden tiers that the game lacks use the copper ones.
     pub fn stats(self) -> ToolStats {
-        let s = |pick, axe, hammer, use_time, use_animation, tile_boost| ToolStats {
+        let tool = |pick, axe, hammer, use_time, use_animation, tile_boost, damage, knock_back| ToolStats {
             pick,
             axe,
             hammer,
             use_time,
             use_animation,
             tile_boost,
+            damage,
+            knock_back,
+            scale: 1.0,
+            auto_reuse: true,
+            use_turn: true,
+        };
+        let sword = |use_animation, damage, knock_back| ToolStats {
+            use_time: 20,
+            use_animation,
+            damage,
+            knock_back,
+            scale: 1.0,
+            ..ToolStats::default()
         };
         match self {
-            Tool::Pickaxe(Tier::Iron) => s(40, 0, 0, 13, 20, 0),
-            Tool::Pickaxe(_) => s(35, 0, 0, 15, 23, -1),
-            Tool::Axe(Tier::Iron) => s(0, 9, 0, 19, 27, 0),
-            Tool::Axe(_) => s(0, 7, 0, 21, 30, -1),
-            Tool::Hammer(Tier::Wood) => s(0, 0, 25, 25, 37, -1),
-            Tool::Hammer(Tier::Copper) => s(0, 0, 35, 23, 33, -1),
-            Tool::Hammer(Tier::Iron) => s(0, 0, 40, 20, 30, 0),
-            Tool::Sword(_) => ToolStats::default(),
-        }
-    }
-
-    pub fn damage(self) -> i32 {
-        match self {
-            Tool::Sword(Tier::Wood) => 7,
-            Tool::Sword(Tier::Copper) => 10,
-            Tool::Sword(Tier::Iron) => 13,
-            Tool::Pickaxe(_) | Tool::Axe(_) | Tool::Hammer(_) => 5,
+            Tool::Pickaxe(Tier::Iron) => tool(40, 0, 0, 13, 20, 0, 5, 2.0),
+            Tool::Pickaxe(_) => ToolStats { scale: 0.9, ..tool(35, 0, 0, 15, 23, -1, 4, 2.0) },
+            Tool::Axe(Tier::Iron) => tool(0, 9, 0, 19, 27, 0, 5, 4.5),
+            Tool::Axe(_) => tool(0, 7, 0, 21, 30, -1, 3, 4.5),
+            Tool::Hammer(Tier::Wood) => tool(0, 0, 25, 25, 37, -1, 2, 5.5),
+            Tool::Hammer(Tier::Copper) => tool(0, 0, 35, 23, 33, -1, 4, 5.5),
+            Tool::Hammer(Tier::Iron) => tool(0, 0, 40, 20, 30, 0, 7, 5.5),
+            Tool::Sword(Tier::Wood) => sword(20, 7, 5.0),
+            Tool::Sword(Tier::Copper) => sword(21, 9, 5.5),
+            Tool::Sword(Tier::Iron) => sword(20, 12, 5.5),
         }
     }
 

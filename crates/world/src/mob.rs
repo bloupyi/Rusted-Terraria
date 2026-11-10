@@ -24,35 +24,43 @@ impl Kind {
         Kind::ALL.get(v as usize).copied()
     }
 
-    pub fn size(self) -> (f32, f32) {
+    /// The game's `NPC.SetDefaults` for the blue slime, zombie, demon eye,
+    /// guide and eye of Cthulhu: size, life, contact damage, defense and
+    /// knockback taken.
+    fn stats(self) -> (f32, f32, i32, i32, i32, f32) {
         match self {
-            Kind::Slime => (28.0, 20.0),
-            Kind::Zombie => (18.0, 40.0),
-            Kind::DemonEye => (30.0, 30.0),
-            Kind::Guide => (18.0, 40.0),
-            Kind::EyeBoss => (100.0, 100.0),
+            Kind::Slime => (24.0, 18.0, 25, 7, 2, 1.0),
+            Kind::Zombie => (18.0, 40.0, 45, 14, 6, 0.5),
+            Kind::DemonEye => (30.0, 32.0, 60, 18, 2, 0.8),
+            Kind::Guide => (18.0, 40.0, 250, 10, 15, 0.5),
+            Kind::EyeBoss => (100.0, 110.0, 2800, 15, 12, 0.0),
         }
     }
 
+    pub fn size(self) -> (f32, f32) {
+        let (w, h, ..) = self.stats();
+        (w, h)
+    }
+
     pub fn max_hp(self) -> i32 {
-        match self {
-            Kind::Slime => 25,
-            Kind::Zombie => 45,
-            Kind::DemonEye => 60,
-            Kind::Guide => 250,
-            Kind::EyeBoss => 1200,
-        }
+        self.stats().2
     }
 
     /// Damage dealt to the player on contact.
     pub fn damage(self) -> i32 {
-        match self {
-            Kind::Slime => 7,
-            Kind::Zombie => 14,
-            Kind::DemonEye => 18,
-            Kind::Guide => 0,
-            Kind::EyeBoss => 15,
+        if self.friendly() {
+            0
+        } else {
+            self.stats().3
         }
+    }
+
+    pub fn defense(self) -> i32 {
+        self.stats().4
+    }
+
+    pub fn knock_back_resist(self) -> f32 {
+        self.stats().5
     }
 
     pub fn friendly(self) -> bool {
@@ -92,6 +100,8 @@ pub struct Mob {
     pub state: i32,
     /// Where it appeared, for the guide's home.
     pub home: f32,
+    /// Ticks before the player's swing can hit it again.
+    pub melee_cooldown: i32,
 }
 
 impl Mob {
@@ -107,6 +117,7 @@ impl Mob {
             stun: 0.0,
             state: 0,
             home: x,
+            melee_cooldown: 0,
         }
     }
 
@@ -243,16 +254,53 @@ impl Mob {
         world.solid(tx, feet) && world.solid(tx, feet - 1)
     }
 
-    /// Takes damage with a knockback away from `from_x`. Returns true when it dies.
-    pub fn hit(&mut self, damage: i32, from_x: f32) -> bool {
-        self.hp -= damage;
-        if self.kind == Kind::EyeBoss {
-            return self.hp <= 0;
+    /// `NPC.StrikeNPC`: takes `damage` less half the defense, doubled on a
+    /// crit, and a knockback toward `dir` scaled by how much it resists.
+    /// Returns the damage taken and whether it died.
+    pub fn strike(&mut self, damage: i32, knock_back: f32, dir: f32, crit: bool) -> (i32, bool) {
+        let taken = ((damage as f64 - self.kind.defense() as f64 * 0.5).max(1.0) * if crit { 2.0 } else { 1.0 }) as i32;
+        let taken = taken.max(1);
+        self.hp -= taken;
+        let resist = self.kind.knock_back_resist();
+        if knock_back > 0.0 && resist > 0.0 {
+            let mut k = knock_back * resist;
+            // Soft caps past 8, 10, 12 and 14, and 16 at most.
+            for (over, keep) in [(8.0, 0.9), (10.0, 0.8), (12.0, 0.7), (14.0, 0.6)] {
+                if k > over {
+                    k = over + (k - over) * keep;
+                }
+            }
+            k = k.min(16.0);
+            if crit {
+                k *= 1.4;
+            }
+            // The body moves in pixels per second; the game's knockback is per tick.
+            let (mut vx, mut vy) = (self.body.vx / 60.0, self.body.vy / 60.0);
+            let lift = if self.kind.flies() { 0.5 } else { 0.75 };
+            if taken * 10 > self.kind.max_hp() {
+                if dir < 0.0 && vx > -k {
+                    if vx > 0.0 {
+                        vx -= k;
+                    }
+                    vx = (vx - k).max(-k);
+                } else if dir > 0.0 && vx < k {
+                    if vx < 0.0 {
+                        vx += k;
+                    }
+                    vx = (vx + k).min(k);
+                }
+                let ky = -k * lift;
+                if vy > ky {
+                    vy = (vy + ky).max(ky);
+                }
+            } else {
+                vy = -k * lift * resist;
+                vx = k * dir * resist;
+            }
+            (self.body.vx, self.body.vy) = (vx * 60.0, vy * 60.0);
+            self.stun = STUN;
         }
-        let away = if self.body.center().0 < from_x { -1.0 } else { 1.0 };
-        (self.body.vx, self.body.vy) = (away * 220.0, -200.0);
-        self.stun = STUN;
-        self.hp <= 0
+        (taken, self.hp <= 0)
     }
 }
 
@@ -328,15 +376,20 @@ mod tests {
         run(&mut m, &w, target, 1.0);
         assert!(m.state > 0, "charging");
         assert!(m.body.vy > 300.0, "toward the target below");
-        assert!(!m.hit(700, 0.0) && m.body.vy > 300.0, "no knockback");
+        assert!(!m.strike(1500, 5.0, -1.0, false).1 && m.body.vy > 300.0, "no knockback");
         assert!(m.enraged());
     }
 
     #[test]
     fn hits_knock_back_and_kill() {
         let mut m = Mob::new(Kind::Slime, 100.0, 100.0);
-        assert!(!m.hit(10, 0.0));
-        assert!(m.body.vx > 0.0 && m.stun > 0.0);
-        assert!(m.hit(20, 0.0));
+        // 10 less half of 2 defense; 9 is over a tenth of 25 life, so a full 5 back and up.
+        assert_eq!(m.strike(10, 5.0, 1.0, false), (9, false));
+        assert_eq!((m.body.vx, m.body.vy), (300.0, -225.0));
+        assert!(m.stun > 0.0);
+        let mut z = Mob::new(Kind::Zombie, 100.0, 100.0);
+        assert_eq!(z.strike(4, 5.0, -1.0, false), (1, false), "at least 1");
+        assert_eq!((z.body.vx, z.body.vy), (-75.0, -56.25), "a light hit: scaled by the resist twice");
+        assert_eq!(m.strike(9, 0.0, 1.0, true), (16, true), "crits double");
     }
 }
