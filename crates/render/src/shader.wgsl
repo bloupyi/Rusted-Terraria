@@ -35,16 +35,23 @@ fn corner(vi: u32) -> vec2<f32> {
 }
 
 @vertex
-fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32) -> VOut {
+fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32, @location(2) d: u32) -> VOut {
     let c = corner(vi);
     var out: VOut;
     let tile = vec2<f32>(f32(a & 0x7fffu), f32((a >> 15u) & 0x7fffu));
     let wall = ((a >> 30u) & 1u) != 0u;
-    let size = select(16.0, 32.0, wall);
-    let pad = select(0.0, -8.0, wall);
+    var size = vec2<f32>(select(16.0, 32.0, wall));
+    var pad = vec2<f32>(select(0.0, -8.0, wall));
+    var u = c.x;
+    if d != 0u {
+        // The game's draw of the cell: centred sideways, shifted down by `top`.
+        size = vec2<f32>(f32(d & 127u), f32((d >> 7u) & 127u));
+        pad = vec2<f32>((16.0 - size.x) / 2.0, f32((d >> 14u) & 127u) - 64.0);
+        u = select(c.x, 1.0 - c.x, ((d >> 21u) & 1u) != 0u);
+    }
     out.pos = vec4<f32>((tile * 16.0 + pad + c * size) * cam.scale + cam.offset, 0.0, 1.0);
     out.base = vec2<u32>(b & 0xfffu, (b >> 12u) & 0xfffu);
-    out.texel = vec2<f32>(out.base) + c * size;
+    out.texel = vec2<f32>(out.base) + vec2<f32>(u, c.y) * size;
     out.layer = (b >> 24u) & 31u;
     out.shape = b >> 29u;
     out.tile = tile + (pad + c * size) / 16.0;
@@ -207,7 +214,7 @@ const OPACITY = array<f32, 4>(0.6, 0.95, 0.95, 0.75);
 
 // See `liquid::chunk` for the instance layout.
 @vertex
-fn vs_liquid(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32) -> LiquidOut {
+fn vs_liquid(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32, @location(2) d: u32) -> LiquidOut {
     let c = corner(vi);
     var out: LiquidOut;
     let cell = vec2<u32>(a & 0x3fffu, (a >> 14u) & 0xfffu);

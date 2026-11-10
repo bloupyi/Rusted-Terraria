@@ -271,7 +271,7 @@ impl Renderer {
         let instance_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Instance>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32],
+            attributes: &wgpu::vertex_attr_array![0 => Uint32, 1 => Uint32, 2 => Uint32],
         };
         let pipeline = |vs: &str, fs: &str, buffers: &[Option<wgpu::VertexBufferLayout>]| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
