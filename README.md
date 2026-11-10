@@ -82,10 +82,12 @@ Controles :
   reposait sur le bloc casse tombe aussi. Les objets ramasses vont dans
   l'inventaire en passant pres. Clic droit : utiliser l'objet choisi (poser un bloc
   ou un objet, vider ou remplir un seau). Portee de 10 tuiles.
-- 1 a 0 ou Q/E : choisir l'emplacement de la barre d'objets (en haut a gauche ;
-  la barre blanche sous un objet donne la taille de la pile). Depart : epee, pioche
+- 1 a 0 ou Q/E : choisir l'emplacement de la barre d'objets (en haut a gauche,
+  comme dans le jeu). Depart : epee, pioche
   et hache en cuivre, seaux d'eau, de lave, de miel, de shimmer et un seau vide.
-- C : ouvrir l'artisanat. Sous la barre, les recettes faisables avec ce qu'on porte
+- Echap : ouvrir l'inventaire (50 cases, comme dans le jeu : clic gauche pour
+  prendre, poser, echanger ou empiler, clic droit maintenu pour prendre un par un).
+  Sous l'inventaire, les recettes faisables avec ce qu'on porte
   et les stations a 4 tuiles ; clic pour fabriquer. Etabli (10 bois), torches
   (bois et gel des slimes), outils en bois a l'etabli, fourneau (pierre et bois),
   lingots de cuivre et de fer au fourneau, enclume (5 lingots de fer), outils et
@@ -94,7 +96,7 @@ Controles :
   glisser, edition sans limite de portee ni consommation d'objets) ; `--free` pour
   demarrer ainsi.
 - Molette : zoom autour du curseur. L : couper l'eclairage. T (maintenu) : accelerer
-  le temps. Echap : quitter.
+  le temps. Fermer la fenetre pour quitter.
 
 Le titre affiche FPS, temps de frame, draws, instances, heure, outil et nombre de
 chunks de liquide actifs.

@@ -84,7 +84,7 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
-    v.extend(["Inventory_Back", "Inventory_Back14", "Heart"].map(String::from));
+    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back14", "Heart"].map(String::from));
     v.extend(items::sheets());
     v
 }
@@ -1179,6 +1179,11 @@ impl Game {
 
     fn sheet(&self, name: &str) -> Option<&SheetRef> {
         self.scene.mesher.atlas.named.get(name)
+    }
+
+    /// A swing or use is under way (the inventory ignores clicks then).
+    pub fn using_item(&self) -> bool {
+        self.item_animation != 0 || self.item_time != 0
     }
 
     /// The game's item id of `item`, for its name.
