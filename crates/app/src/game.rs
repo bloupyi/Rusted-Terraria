@@ -549,6 +549,21 @@ impl Game {
         }
     }
 
+    /// `water_N` sheet for water seen from tile row `y`: the forest style above
+    /// ground, the cavern ones below, blood red on a blood moon night.
+    pub fn water_style(&self, y: f32) -> u32 {
+        let y = y as f64;
+        if self.env.blood_moon && !self.ticks().0 {
+            9
+        } else if y > self.env.rock_layer + 40.0 {
+            8
+        } else if y > self.env.world_surface {
+            7
+        } else {
+            0
+        }
+    }
+
     /// Skylight colour and the colour behind everything (the sky's lower tone).
     pub fn sky(&self) -> ([f32; 3], [f32; 3]) {
         let (day, t) = self.ticks();

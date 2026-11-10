@@ -5,7 +5,7 @@ use wgpu::util::DeviceExt;
 use crate::atlas::LAYER_SIZE;
 use world::light::{LightMap, Rect};
 
-use crate::mesh::{Instance, RowUpdate, Scene, LOD_PAGE};
+use crate::mesh::{water_sheet, Instance, RowUpdate, Scene, LOD_PAGE, WATER_SHEETS};
 
 /// Below this many screen pixels per tile, the map texture replaces tile instances.
 const LOD_PIXELS_PER_TILE: f32 = 2.0;
@@ -20,8 +20,12 @@ pub struct Camera {
     /// Skylight colour for the time of day, and the background behind the world.
     pub sky: [f32; 3],
     pub background: [f32; 3],
-    /// Seconds, for animated liquid surfaces.
+    /// Seconds, for animated liquids.
     pub time: f32,
+    /// `water_N` sheet for water, from the biome and depth.
+    pub water_style: u32,
+    /// Top of the underground backdrop, world pixels: liquid behind tiles stops there.
+    pub surface: f32,
 }
 
 /// A rectangle in world pixels: flat colour, or an atlas region tinted by
@@ -78,8 +82,10 @@ struct CameraUniform {
     lighting: u32,
     world: [u32; 2],
     sky: [f32; 4],
-    /// Per liquid kind: sheet x, y, layer, frame count (0: flat colour).
-    liquids: [[u32; 4]; 4],
+    /// Per `water_N` sheet: x, y, layer, 1 if loaded.
+    water: [[u32; 4]; WATER_SHEETS],
+    /// Water style, surface in world pixels.
+    liquid: [f32; 4],
 }
 
 struct Row {
@@ -97,6 +103,8 @@ pub struct Renderer {
     tile_pipeline: wgpu::RenderPipeline,
     lod_pipeline: wgpu::RenderPipeline,
     rect_pipeline: wgpu::RenderPipeline,
+    liquid_back: wgpu::RenderPipeline,
+    liquid_front: wgpu::RenderPipeline,
     rects: wgpu::Buffer,
     light_tex: wgpu::Texture,
     lod_tex: wgpu::Texture,
@@ -106,7 +114,7 @@ pub struct Renderer {
     chunks_x: u32,
     lod_pages: (u32, u32),
     world: [u32; 2],
-    liquids: [[u32; 4]; 4],
+    water: [[u32; 4]; WATER_SHEETS],
 }
 
 impl Renderer {
@@ -120,9 +128,8 @@ impl Renderer {
         let (pages_x, pages_y, chunks_x) = (scene.lod_pages_x, scene.lod_pages_y, scene.chunks_x);
         let (rows, pages) = (std::mem::take(&mut scene.rows), std::mem::take(&mut scene.lod));
         let atlas = &mut scene.mesher.atlas;
-        // Frames sit side by side, 16 px wide with a 2 px gap.
-        let liquids = crate::mesh::LIQUID_SHEETS
-            .map(|n| atlas.named.get(n).map_or([0; 4], |s| [s.x, s.y, s.layer, (s.w + 2) / 18]));
+        let water: [[u32; 4]; WATER_SHEETS] =
+            std::array::from_fn(|i| atlas.named.get(&water_sheet(i)).map_or([0; 4], |s| [s.x, s.y, s.layer, 1]));
         let light = &scene.light;
         let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
             power_preference: wgpu::PowerPreference::HighPerformance,
@@ -296,7 +303,9 @@ impl Renderer {
                 cache: None,
             })
         };
-        let tile_pipeline = pipeline("vs_tile", "fs_tile", &[Some(instance_layout)]);
+        let tile_pipeline = pipeline("vs_tile", "fs_tile", &[Some(instance_layout.clone())]);
+        let liquid_back = pipeline("vs_liquid", "fs_liquid_back", &[Some(instance_layout.clone())]);
+        let liquid_front = pipeline("vs_liquid", "fs_liquid_front", &[Some(instance_layout)]);
         let lod_pipeline = pipeline("vs_lod", "fs_lod", &[]);
         let rect_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Sprite>() as u64,
@@ -328,6 +337,8 @@ impl Renderer {
             tile_pipeline,
             lod_pipeline,
             rect_pipeline,
+            liquid_back,
+            liquid_front,
             rects,
             light_tex,
             lod_tex,
@@ -337,7 +348,7 @@ impl Renderer {
             chunks_x,
             lod_pages: (pages_x, pages_y),
             world,
-            liquids,
+            water,
         }
     }
 
@@ -418,7 +429,8 @@ impl Renderer {
             lighting: cam.lighting as u32,
             world: self.world,
             sky: [cam.sky[0], cam.sky[1], cam.sky[2], cam.time],
-            liquids: self.liquids,
+            water: self.water,
+            liquid: [cam.water_style as f32, cam.surface, 0.0, 0.0],
         };
         self.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
         let under = &under[..under.len().min(MAX_RECTS as usize / 4)];
@@ -465,7 +477,6 @@ impl Renderer {
                 pass.draw(0..4, 0..self.lod_pages.0 * self.lod_pages.1);
                 stats.draws = 1;
             } else {
-                pass.set_pipeline(&self.tile_pipeline);
                 // Walls overhang their tile by 8 px: widen by one tile.
                 let half = size / (2.0 * cam.zoom) + 16.0;
                 let lo = ((cam.center - half) / CHUNK_PX).floor().max(Vec2::ZERO);
@@ -473,7 +484,12 @@ impl Renderer {
                 let (x0, x1) = (lo.x as usize, (hi.x as usize).min(self.chunks_x as usize));
                 let (y0, y1) = (lo.y as usize, (hi.y as usize).min(self.rows.len()));
                 // Each layer over all visible rows before the next, so tiles cover wall overhang.
-                for layer in 0..3 {
+                // Liquids go twice, as in the game: opaque behind walls above the
+                // underground backdrop, then translucent in front of tiles.
+                for (layer, pipeline) in
+                    [(1, &self.liquid_back), (0, &self.tile_pipeline), (2, &self.tile_pipeline), (1, &self.liquid_front)]
+                {
+                    pass.set_pipeline(pipeline);
                     for row in self.rows.get(y0..y1).unwrap_or(&[]) {
                         let off = &row.offsets[layer];
                         let buf = if layer == 1 { &row.liquids } else { &row.statics };
