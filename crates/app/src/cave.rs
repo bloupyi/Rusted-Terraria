@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use formats::wld::Env;
 use render::atlas::SheetRef;
 use render::{Sprite, SPRITE_LIT};
+use world::scene::Zones;
 
 /// The game's default cave parallax (background scroll setting 60).
 const PARALLAX: f64 = 0.88;
@@ -73,10 +74,39 @@ pub fn textures(style: i32, env: &Env, world_id: i32) -> [i32; 7] {
     t
 }
 
-/// Style under tile column `x`: the world's cavern zones (biomes are not tracked).
-pub fn style(env: &Env, x: i32) -> i32 {
+/// Style for an unzoomed screen at `(sx, sy)` of height `sh` (world pixels):
+/// the cavern zone under its centre column, then the biomes around it.
+pub fn style(env: &Env, height: u32, z: &Zones, (sx, sy, sh): (f64, f64, f64), sw: f64) -> i32 {
+    let x = ((sx + (sw as i32 / 2) as f64) / 16.0) as i32;
     let zone = env.cave_x.iter().position(|&b| x <= b).unwrap_or(3);
-    env.cave_style[zone] + 3
+    let mut s = env.cave_style[zone] + 3;
+    if z.snow_tiles > 1500 && (sy + sh + 1200.0) / 16.0 < height as f64 - 250.0 {
+        s = 1;
+    }
+    if z.jungle_tiles > 140 && (s != 1 || z.jungle_tiles > z.snow_tiles) {
+        s = 11;
+    }
+    let ty = sy / 16.0;
+    if z.beach {
+        s = if z.corrupt {
+            19
+        } else if z.crimson {
+            21
+        } else if z.hallow {
+            20
+        } else {
+            18
+        };
+    } else if ty > env.rock_layer + 60.0 && ty < magma_layer(env, height) - 60.0 {
+        let evil = [z.corrupt, z.crimson, z.hallow].iter().position(|&b| b);
+        if let Some(i) = evil {
+            s = if z.snow { 15 } else { 12 } + i as i32;
+        }
+    }
+    if z.glowshroom {
+        s = 2;
+    }
+    s
 }
 
 const UNDERWORLD: [[usize; 5]; 3] = [[0, 1, 2, 3, 4], [5, 6, 7, 8, 9], [10, 11, 12, 13, 9]];
@@ -87,13 +117,7 @@ fn underworld_set(env: &Env) -> [usize; 5] {
 
 /// Every sheet the world's underground may draw.
 pub fn sheets(env: &Env, world_id: i32) -> Vec<String> {
-    let mut v: Vec<String> = env
-        .cave_style
-        .iter()
-        .flat_map(|&s| textures(s + 3, env, world_id))
-        .filter(|&t| t >= 0)
-        .map(name)
-        .collect();
+    let mut v: Vec<String> = (0..22).flat_map(|s| textures(s, env, world_id)).filter(|&t| t >= 0).map(name).collect();
     v.extend(underworld_set(env).map(underworld_name));
     v.sort();
     v.dedup();
@@ -121,6 +145,10 @@ fn ieee_rem(a: f64, b: f64) -> f64 {
 pub struct View {
     /// Left edge of the unzoomed screen, world pixels: drives the parallax.
     pub screen_x: f64,
+    /// Top edge and size of the unzoomed screen, world pixels.
+    pub screen_y: f64,
+    pub screen_w: f64,
+    pub screen_h: f64,
     pub x0: f64,
     pub y0: f64,
     pub x1: f64,
@@ -139,8 +167,8 @@ impl Out<'_> {
     #[allow(clippy::too_many_arguments)]
     fn rows(&mut self, tex: i32, period: f64, top: f64, bottom: f64, row: f64, src_y: u32) {
         let Some(r) = self.sheets.get(&name(tex)) else { return };
-        let origin = self.v.screen_x
-            + (-ieee_rem(period + self.v.screen_x * PARALLAX, period) - (period / 2.0).floor()).trunc();
+        let origin =
+            self.v.screen_x + (-ieee_rem(period + self.v.screen_x * PARALLAX, period) - (period / 2.0).floor()).trunc();
         let first = ((self.v.y0 - top) / row).floor().max(0.0);
         let mut y = top + first * row;
         while y < bottom.min(self.v.y1) {
@@ -162,13 +190,22 @@ impl Out<'_> {
 }
 
 /// Dirt, rock and magma layers in world pixels, back to front.
-pub fn layers(env: &Env, world_id: i32, height: u32, v: &View, ticks: u32, sheets: &HashMap<String, SheetRef>) -> Vec<Sprite> {
+#[allow(clippy::too_many_arguments)]
+pub fn layers(
+    env: &Env,
+    world_id: i32,
+    height: u32,
+    zones: &Zones,
+    v: &View,
+    ticks: u32,
+    sheets: &HashMap<String, SheetRef>,
+) -> Vec<Sprite> {
     let mut o = Out { sheets, v, sprites: Vec::new() };
     let surface = env.world_surface * 16.0;
     if surface > v.y1 {
         return o.sprites;
     }
-    let tex = textures(style(env, ((v.x0 + v.x1) / 32.0) as i32), env, world_id);
+    let tex = textures(style(env, height, zones, (v.screen_x, v.screen_y, v.screen_h), v.screen_w), env, world_id);
     if !sheets.contains_key(&name(tex[1])) {
         let top = surface.max(v.y0);
         o.sprites.push(Sprite {
@@ -341,14 +378,38 @@ mod tests {
         assert_eq!(magma_layer(&e, 1800), 465.0 + 167.0 * 6.0 - 5.0);
     }
 
+    fn at(e: &Env, z: &Zones, x: f64, y: f64) -> i32 {
+        style(e, 1800, z, (x * 16.0 - 800.0, y * 16.0, 900.0), 1600.0)
+    }
+
     #[test]
     fn zones_pick_styles() {
         let e = env();
-        assert_eq!(style(&e, 100), 10);
-        assert_eq!(style(&e, 2853), 10);
-        assert_eq!(style(&e, 2854), 9);
-        assert_eq!(style(&e, 6399), 8);
-        assert_eq!(style(&e, 7000), 7);
+        let z = Zones::default();
+        assert_eq!(at(&e, &z, 100.0, 700.0), 10);
+        assert_eq!(at(&e, &z, 2853.0, 700.0), 10);
+        assert_eq!(at(&e, &z, 2854.0, 700.0), 9);
+        assert_eq!(at(&e, &z, 6399.0, 700.0), 8);
+        assert_eq!(at(&e, &z, 7000.0, 700.0), 7);
         assert_eq!(textures(10, &e, 0), [121, 122, 123, 124, 142, 127, 187]);
+    }
+
+    #[test]
+    fn biomes_override_zones() {
+        let e = env();
+        let snow = Zones { snow_tiles: 2000, snow: true, ..Zones::default() };
+        assert_eq!(at(&e, &snow, 100.0, 700.0), 1);
+        // Snow needs the screen bottom 1200 px above the underworld.
+        assert_eq!(at(&e, &snow, 100.0, 1500.0), 10);
+        // More jungle than snow wins.
+        let mixed = Zones { jungle_tiles: 2500, jungle: true, ..snow };
+        assert_eq!(at(&e, &mixed, 100.0, 700.0), 11);
+        // Evil only between rock + 60 and magma - 60.
+        let ice_evil = Zones { crimson: true, ..snow };
+        assert_eq!(at(&e, &ice_evil, 100.0, 700.0), 1);
+        assert_eq!(at(&e, &ice_evil, 100.0, 900.0), 16);
+        assert_eq!(at(&e, &Zones { corrupt: true, ..Zones::default() }, 100.0, 900.0), 12);
+        assert_eq!(at(&e, &Zones { beach: true, hallow: true, ..Zones::default() }, 100.0, 300.0), 20);
+        assert_eq!(at(&e, &Zones { glowshroom: true, beach: true, ..Zones::default() }, 100.0, 300.0), 2);
     }
 }
