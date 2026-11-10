@@ -95,6 +95,10 @@ impl<'a> Reader<'a> {
         Ok(String::from_utf8_lossy(self.bytes(n)?).into_owned())
     }
 
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
     pub fn seek(&mut self, pos: usize) -> Result<(), Error> {
         if pos > self.data.len() {
             return Err(Error::Eof);

@@ -1,0 +1,310 @@
+//! The interface as the game draws it: the hotbar of `GUIHotbarDrawInner` and
+//! `ItemSlot.Draw`, the classic life hearts of `ClassicPlayerResourcesDisplaySet`,
+//! and text in the game's own fonts.
+
+use std::collections::HashMap;
+use std::path::Path;
+
+use formats::xnb::{self, Font, Texture};
+use render::atlas::SheetRef;
+use render::Sprite;
+
+use crate::inventory::HOTBAR;
+
+/// `Inventory_Back`'s size.
+const BACK: f32 = 52.0;
+/// Items bigger than this are shrunk to fit a slot (`DrawItemIcon`'s size limit).
+pub const ICON_LIMIT: f32 = 32.0;
+const LIFE_PER_HEART: i32 = 20;
+
+pub struct Fonts {
+    pub item_stack: Option<Font>,
+    pub mouse_text: Option<Font>,
+}
+
+#[derive(Clone, Copy)]
+pub enum FontId {
+    ItemStack,
+    MouseText,
+}
+
+impl FontId {
+    fn file(self) -> &'static str {
+        match self {
+            FontId::ItemStack => "Item_Stack",
+            FontId::MouseText => "Mouse_Text",
+        }
+    }
+}
+
+fn page_sheet(id: FontId, page: usize) -> String {
+    format!("Font_{}_{page}", id.file())
+}
+
+impl Fonts {
+    /// Reads the Latin glyphs of the fonts under `dir` (`Content/Fonts`); their
+    /// pages are returned to be packed into the atlas.
+    pub fn load(dir: Option<&Path>) -> (Self, Vec<(String, Texture)>) {
+        let mut pages = Vec::new();
+        let mut read = |id: FontId| {
+            let data = std::fs::read(dir?.join(format!("{}.xnb", id.file()))).ok()?;
+            let mut font = xnb::read_font(&data, |c| c < '\u{250}').ok()?;
+            for (i, p) in font.pages.iter_mut().enumerate().filter(|(_, p)| !p.rgba.is_empty()) {
+                pages
+                    .push((page_sheet(id, i), std::mem::replace(p, Texture { width: 0, height: 0, rgba: Vec::new() })));
+            }
+            Some(font)
+        };
+        let fonts = Fonts { item_stack: read(FontId::ItemStack), mouse_text: read(FontId::MouseText) };
+        (fonts, pages)
+    }
+
+    fn get(&self, id: FontId) -> Option<&Font> {
+        match id {
+            FontId::ItemStack => self.item_stack.as_ref(),
+            FontId::MouseText => self.mouse_text.as_ref(),
+        }
+    }
+}
+
+/// Interface state the game animates every tick.
+pub struct Hud {
+    hotbar_scale: [f32; HOTBAR],
+    /// `Main.mouseTextColor`: pulses between 190 and 255.
+    text_color: u8,
+    text_up: bool,
+    /// `Main.cursorAlpha`, which sets `cursorScale`.
+    cursor_alpha: f32,
+    cursor_up: bool,
+    tick_acc: f32,
+}
+
+impl Default for Hud {
+    fn default() -> Self {
+        Self {
+            hotbar_scale: [0.75; HOTBAR],
+            text_color: 255,
+            text_up: false,
+            cursor_alpha: 1.0,
+            cursor_up: false,
+            tick_acc: 0.0,
+        }
+    }
+}
+
+impl Hud {
+    pub fn update(&mut self, dt: f32, selected: usize) {
+        self.tick_acc = (self.tick_acc + dt * 60.0).min(4.0);
+        while self.tick_acc >= 1.0 {
+            self.tick_acc -= 1.0;
+            self.tick(selected);
+        }
+    }
+
+    fn tick(&mut self, selected: usize) {
+        self.text_color = if self.text_up { self.text_color + 1 } else { self.text_color - 1 };
+        if self.text_color == 255 {
+            self.text_up = false;
+        }
+        if self.text_color <= 190 {
+            self.text_up = true;
+        }
+        self.cursor_alpha += if self.cursor_up { 0.015 } else { -0.015 };
+        if self.cursor_alpha >= 1.0 {
+            (self.cursor_alpha, self.cursor_up) = (1.0, false);
+        }
+        if self.cursor_alpha <= 0.6 {
+            (self.cursor_alpha, self.cursor_up) = (0.6, true);
+        }
+        for (i, s) in self.hotbar_scale.iter_mut().enumerate() {
+            if i == selected {
+                if *s < 1.0 {
+                    *s += 0.05;
+                }
+            } else if *s > 0.75 {
+                *s -= 0.05;
+            }
+        }
+    }
+
+    fn cursor_scale(&self) -> f32 {
+        self.cursor_alpha * 0.3 + 0.8
+    }
+
+    /// Top-left and scale of each hotbar slot, in screen pixels.
+    pub fn hotbar_slots(&self) -> [([f32; 2], f32); HOTBAR] {
+        let mut x = 20;
+        std::array::from_fn(|i| {
+            let s = self.hotbar_scale[i];
+            let at = [x as f32, (20.0 + 22.0 * (1.0 - s)) as i32 as f32];
+            x += (BACK * s) as i32 + 4;
+            (at, s)
+        })
+    }
+
+    pub fn hotbar_under(&self, p: [f32; 2]) -> Option<usize> {
+        self.hotbar_slots()
+            .iter()
+            .position(|&([x, y], s)| p[0] >= x && p[0] <= x + BACK * s && p[1] >= y && p[1] <= y + BACK * s)
+    }
+}
+
+/// Draws in screen pixels onto world sprites under the camera.
+pub struct Painter<'a> {
+    pub sheets: &'a HashMap<String, SheetRef>,
+    pub fonts: &'a Fonts,
+    /// World position of the screen's top-left, and world pixels per screen pixel.
+    pub origin: [f32; 2],
+    pub unit: f32,
+    pub out: Vec<Sprite>,
+}
+
+impl Painter<'_> {
+    pub fn world(&self, p: [f32; 2]) -> [f32; 2] {
+        [self.origin[0] + p[0] * self.unit, self.origin[1] + p[1] * self.unit]
+    }
+
+    pub fn rect(&mut self, p: [f32; 2], w: f32, h: f32, color: [f32; 4]) {
+        self.out.push(Sprite::flat(self.world(p), [w * self.unit, h * self.unit], color));
+    }
+
+    /// A whole sheet scaled about `origin` (in its own pixels), drawn with its origin at `p`.
+    pub fn image(&mut self, name: &str, p: [f32; 2], origin: [f32; 2], scale: f32, color: [f32; 4]) {
+        let Some(sheet) = self.sheets.get(name) else { return };
+        let mut s = Sprite::sheet([0.0; 2], sheet, [0, 0, sheet.w, sheet.h], 0);
+        s.pos = self.world([p[0] - origin[0] * scale, p[1] - origin[1] * scale]);
+        s.size = [sheet.w as f32 * scale * self.unit, sheet.h as f32 * scale * self.unit];
+        s.color = color;
+        self.out.push(s);
+    }
+
+    fn glyphs(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4]) {
+        let Some(font) = self.fonts.get(id) else { return };
+        for ([x, y], g) in font.layout(text) {
+            let Some(sheet) = self.sheets.get(&page_sheet(id, g.page)) else { continue };
+            let [gx, gy, gw, gh] = g.rect.map(|v| v.max(0) as u32);
+            let mut s = Sprite::sheet([0.0; 2], sheet, [gx, gy, gw, gh], 0);
+            s.pos = self.world([p[0] + x * scale, p[1] + y * scale]);
+            s.size = [gw as f32 * scale * self.unit, gh as f32 * scale * self.unit];
+            s.color = color;
+            self.out.push(s);
+        }
+    }
+
+    /// `DrawColorCodedStringWithShadow`: the text over four black copies `spread` away.
+    pub fn text(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4], spread: f32) {
+        let shadow = [0.0, 0.0, 0.0, color[3]];
+        for [dx, dy] in [[-1.0, 0.0], [1.0, 0.0], [0.0, -1.0], [0.0, 1.0]] {
+            self.glyphs(id, text, [p[0] + dx * spread, p[1] + dy * spread], scale, shadow);
+        }
+        self.glyphs(id, text, p, scale, color);
+    }
+
+    /// Plain `DrawString`.
+    pub fn plain_text(&mut self, id: FontId, text: &str, p: [f32; 2], color: [f32; 4]) {
+        self.glyphs(id, text, p, 1.0, color);
+    }
+
+    pub fn measure(&self, id: FontId, text: &str) -> [f32; 2] {
+        self.fonts.get(id).map_or([0.0; 2], |f| f.measure(text).into())
+    }
+}
+
+fn gray(v: f32, a: f32) -> [f32; 4] {
+    [v, v, v, a]
+}
+
+impl Hud {
+    /// `GUIHotbarDrawInner` with `ItemSlot.Draw` for context 13.
+    /// `counts`: the stack in each slot (0 when empty); `icon` draws slot `i`'s item
+    /// centred on a screen point at a scale.
+    pub fn draw_hotbar(
+        &self,
+        p: &mut Painter,
+        selected: usize,
+        counts: &[u16],
+        icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
+    ) {
+        for (i, &(at, s)) in self.hotbar_slots().iter().enumerate() {
+            let light = gray(1.0, (75.0 + 150.0 * s) as i32 as f32 / 255.0);
+            let (back, b) = if i == selected { ("Inventory_Back14", 1.0) } else { ("Inventory_Back", 200.0 / 255.0) };
+            p.image(back, at, [0.0; 2], s, gray(b, b));
+            let count = counts.get(i).copied().unwrap_or(0);
+            if count > 0 {
+                icon(p, i, [at[0] + BACK * s / 2.0, at[1] + BACK * s / 2.0], s);
+            }
+            if count > 1 {
+                p.text(FontId::ItemStack, &count.to_string(), [at[0] + 10.0 * s, at[1] + 26.0 * s], s, light, s);
+            }
+            let n = ((i + 1) % 10).to_string();
+            p.text(FontId::ItemStack, &n, [at[0] + 8.0 * s, at[1] + 4.0 * s], s, light, s);
+        }
+    }
+
+    /// `ClassicPlayerResourcesDisplaySet.DrawLife` for up to 400 life (no golden hearts).
+    pub fn draw_life(&self, p: &mut Painter, screen_w: f32, life: i32, life_max: i32) {
+        let anchor = screen_w - 800.0;
+        let hearts = (life_max / LIFE_PER_HEART).min(10);
+        let c = self.text_color as f32 / 255.0;
+        // The "Life:" label is localised text; only the numbers are drawn, centred where the line is.
+        let numbers = format!("{}/{}", life.max(0), life_max);
+        let w = p.measure(FontId::MouseText, &numbers)[0];
+        p.plain_text(FontId::MouseText, &numbers, [500.0 + 13.0 * hearts as f32 + anchor - w / 2.0, 6.0], gray(c, c));
+        let size = p.sheets.get("Heart").map_or(22.0, |s| s.h as f32);
+        let per = LIFE_PER_HEART as f32;
+        for i in 1..=life_max / LIFE_PER_HEART {
+            let (alpha, mut scale, pulse) = if life as f32 >= i as f32 * per {
+                (255, 1.0, life as f32 == i as f32 * per)
+            } else {
+                let part = (life as f32 - (i - 1) as f32 * per) / per;
+                (((30.0 + 225.0 * part) as i32).max(30), (part / 4.0 + 0.75).max(0.75), part > 0.0)
+            };
+            if pulse {
+                scale += self.cursor_scale() - 1.0;
+            }
+            let (dx, dy) = if i > 10 { (-260.0, 26.0) } else { (0.0, 0.0) };
+            let x = 500.0 + 26.0 * (i - 1) as f32 + dx + anchor + (size / 2.0).floor();
+            let y = 32.0 + (size - size * scale) / 2.0 + dy + (size / 2.0).floor();
+            let v = alpha as f32 / 255.0;
+            p.image(
+                "Heart",
+                [x, y],
+                [(size / 2.0).floor(); 2],
+                scale,
+                gray(v, (alpha as f32 * 0.9) as i32 as f32 / 255.0),
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn selected_slot_grows_and_pushes_the_others() {
+        let mut h = Hud::default();
+        let before = h.hotbar_slots();
+        for _ in 0..10 {
+            h.tick(2);
+        }
+        let after = h.hotbar_slots();
+        assert!((after[2].1 - 1.0).abs() < 1e-3, "{}", after[2].1);
+        assert_eq!(after[2].0[1], 20.0, "a full slot sits at the top");
+        assert_eq!(before[3].0[1], 25.0);
+        assert_eq!(after[3].0[0] - after[2].0[0], 56.0, "52 wide and 4 apart");
+        assert_eq!(h.hotbar_under([after[2].0[0] + 1.0, 30.0]), Some(2));
+        assert_eq!(h.hotbar_under([5.0, 5.0]), None);
+    }
+
+    #[test]
+    fn text_colour_pulses() {
+        let mut h = Hud::default();
+        for _ in 0..65 {
+            h.tick(0);
+        }
+        assert_eq!(h.text_color, 190);
+        h.tick(0);
+        assert_eq!(h.text_color, 191);
+    }
+}
