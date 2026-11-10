@@ -155,6 +155,9 @@ pub struct Game {
     liquid_light_at: std::time::Instant,
     mesh_queue: std::collections::VecDeque<u32>,
     liquid_acc: f32,
+    /// Surface background areas fading in and out, and the tick they were last stepped.
+    bg_fade: crate::surface::Fade,
+    bg_tick: Option<u32>,
 }
 
 impl Game {
@@ -211,6 +214,8 @@ impl Game {
             mesh_pending,
             mesh_queue: Default::default(),
             liquid_acc: 0.0,
+            bg_fade: Default::default(),
+            bg_tick: None,
         };
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
@@ -563,9 +568,18 @@ impl Game {
 
     /// Sky, sun or moon and surface backgrounds, in world pixels for a view
     /// centred on `center` at `zoom` in a `size` window. `ticks` drives animations.
-    pub fn backdrop(&self, center: [f32; 2], zoom: f32, size: (u32, u32), ticks: u32) -> Vec<Sprite> {
+    pub fn backdrop(&mut self, center: [f32; 2], zoom: f32, size: (u32, u32), ticks: u32) -> Vec<Sprite> {
         let (day, time) = self.ticks();
         let (w, h) = (size.0 as f32, size.1 as f32);
+        let zones = world::scene::scan(&self.world, &self.env, (center[0] / 16.0) as i64, (center[1] / 16.0) as i64);
+        let want =
+            crate::surface::preferred(&self.env, &zones, ((center[0] - w / 2.0 + (w as i32 / 2) as f32) / 16.0) as i32);
+        // The game steps the fades once per frame at 60 frames a second.
+        let steps = self.bg_tick.map_or(1, |t| ticks.saturating_sub(t).min(600));
+        for _ in 0..steps {
+            self.bg_fade.step(&self.env, want);
+        }
+        self.bg_tick = Some(ticks);
         let scene = backdrop::Scene {
             env: &self.env,
             width: self.world.width,
@@ -577,7 +591,7 @@ impl Game {
         };
         let view = backdrop::View { x: center[0] - w / 2.0, y: center[1] - h / 2.0, w, h };
         let sheets = &self.scene.mesher.atlas.named;
-        let mut v = backdrop::sprites(&scene, &view);
+        let mut v = backdrop::sprites(&scene, &view, &self.bg_fade, zones.holy_tiles);
         v.extend(cave::underworld(&self.env, self.world.height, center, (w, h), zoom, ticks, sheets));
         for s in &mut v {
             s.pos = [0, 1].map(|i| center[i] + (s.pos[i] - [w, h][i] / 2.0) / zoom);
@@ -594,7 +608,6 @@ impl Game {
             x1: (center[0] + hw) as f64,
             y1: (center[1] + hh) as f64,
         };
-        let zones = world::scene::scan(&self.world, &self.env, (center[0] / 16.0) as i64, (center[1] / 16.0) as i64);
         v.extend(cave::layers(
             &self.env,
             self.world.header.world_id,

@@ -1,6 +1,7 @@
 mod audio;
 mod backdrop;
 mod cave;
+mod surface;
 mod game;
 mod inventory;
 mod items;
