@@ -24,7 +24,7 @@ INGREDIENT_RE = re.compile(r"requiredItem\[\d+\]\.SetDefaults\((\d+)\);")
 GROUP_RE = re.compile(r"RecipeGroups\.(\w+) = new RecipeGroup\([^,]+, ([\d, ]+)\)")
 NEEDS_GROUP_RE = re.compile(r"RequireGroup\(RecipeGroups\.(\w+)\)")
 END = ("\t\t\tbreak;", "\t\t\treturn;")
-FLAGS = ["melee", "ranged", "magic", "summon", "consumable", "material", "ammo", "equip", "places", "container"]
+FLAGS = ["melee", "ranged", "magic", "summon", "consumable", "material", "ammo", "equip", "places", "container", "potion"]
 
 
 def item_defaults(item_cs):
@@ -88,18 +88,20 @@ def stats(f, material):
         "magic": f.get("magic") == "true",
         "summon": f.get("summon") == "true",
         "consumable": f.get("consumable") == "true",
-        "material": material,
+        "material": material and f.get("material") != "false",
         "ammo": f.get("ammo", "0") != "0" and f.get("notAmmo") != "true",
         "equip": any(num(f, k) > 0 for k in ("headSlot", "bodySlot", "legSlot")) or f.get("accessory") == "true",
         "places": num(f, "createTile", -1) > -1 or num(f, "createWall") > 0,
         "container": num(f, "createTile", -1) in (21, 467),
+        "potion": f.get("potion") == "true",
     }
     bits = " | ".join(f"{k.upper()}" for k in FLAGS if flag[k]) or "0"
     kb = float(num(f, "knockBack"))
     return (f"rare: {int(num(f, 'rare'))}, damage: {int(num(f, 'damage'))}, crit: {int(num(f, 'crit'))}, "
             f"knock_back: {kb!r}, use_style: {int(num(f, 'useStyle'))}, use_animation: {int(num(f, 'useAnimation'))}, "
             f"pick: {int(num(f, 'pick'))}, axe: {int(num(f, 'axe'))}, hammer: {int(num(f, 'hammer'))}, "
-            f"tile_boost: {int(num(f, 'tileBoost'))}, defense: {int(num(f, 'defense'))}, flags: {bits}")
+            f"tile_boost: {int(num(f, 'tileBoost'))}, defense: {int(num(f, 'defense'))}, "
+            f"heal_life: {int(num(f, 'healLife'))}, max_stack: {int(num(f, 'maxStack', 9999))}, flags: {bits}")
 
 
 def placing_items(item_cs):
@@ -170,6 +172,8 @@ def main():
         "    pub hammer: i16,",
         "    pub tile_boost: i8,",
         "    pub defense: i16,",
+        "    pub heal_life: i16,",
+        "    pub max_stack: u16,",
         "    pub flags: u16,",
         "}",
         "",
@@ -177,7 +181,14 @@ def main():
         "pub const ITEMS: &[(u16, &str, Stats)] = &[",
     ]
     lines += [f'    ({i}, "{names[i]}", Stats {{ {stats(defaults(i), i in material)} }}),' for i in ids if i in names]
-    lines += ["];", ""]
+    lines += [
+        "];",
+        "",
+        "pub fn stats(id: u16) -> Option<Stats> {",
+        "    ITEMS.binary_search_by_key(&id, |e| e.0).ok().map(|i| ITEMS[i].2)",
+        "}",
+        "",
+    ]
     (root / "crates/app/src/item_ids.rs").write_text("\n".join(lines))
 
 

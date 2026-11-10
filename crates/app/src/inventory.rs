@@ -16,6 +16,8 @@ pub enum Item {
     Object(u16),
     Tool(Tool),
     Material(Material),
+    /// Any other item, by its game id: carried and stacked, used only where the engine knows how.
+    Id(u16),
 }
 
 impl Item {
@@ -25,6 +27,7 @@ impl Item {
             Item::Bucket(_) | Item::Tool(_) => 1,
             Item::Material(_) => MAX_STACK,
             Item::Object(_) => 99,
+            Item::Id(id) => crate::item_ids::stats(id).map_or(MAX_STACK, |s| s.max_stack.min(MAX_STACK)),
         }
     }
 }

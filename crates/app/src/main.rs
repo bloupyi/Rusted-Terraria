@@ -7,6 +7,7 @@ mod inventory;
 mod item_ids;
 mod items;
 mod net;
+mod pots;
 mod proto;
 mod surface;
 mod tooltip;
@@ -261,7 +262,8 @@ impl App {
         let cursor = self.cursor.into();
         if let Some(stack) = self.slot_under_cursor().and_then(|i| inv.slots[i]) {
             if let (Some(name), Some((key, stats))) = (game.item_name(stack.item), game.item_data(stack.item)) {
-                let lines = tooltip::lines(&game.texts, name, key, &stats, stack.count);
+                let id = game.item_id(stack.item).unwrap_or(0);
+                let lines = tooltip::lines(&game.texts, id, name, key, &stats, stack.count);
                 self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &lines, inv.mouse.is_some());
             }
         }
@@ -384,6 +386,7 @@ impl ApplicationHandler for App {
                     KeyCode::KeyY => k.fast_time = down,
                     // The game's Throw key.
                     KeyCode::KeyT if press => self.game.throw_held(true),
+                    KeyCode::KeyH if press => self.game.quick_heal(),
                     KeyCode::Escape if press => {
                         self.inventory_open = !self.inventory_open;
                         if !self.inventory_open {
@@ -492,6 +495,7 @@ impl ApplicationHandler for App {
                             Item::Object(i) => format!("object {} x{}", self.game.templates[i as usize].tile, s.count),
                             Item::Tool(t) => format!("{t:?}"),
                             Item::Material(m) => format!("{m:?} x{}", s.count),
+                            Item::Id(id) => format!("item {id} x{}", s.count),
                         },
                     };
                     if let Some(window) = &self.window {

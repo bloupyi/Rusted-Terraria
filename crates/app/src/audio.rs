@@ -27,6 +27,9 @@ pub enum Sfx {
     Zombie,
     Roar,
     MenuTick,
+    Shatter,
+    Grass,
+    Drink,
 }
 
 impl Sfx {
@@ -45,6 +48,9 @@ impl Sfx {
             Sfx::Zombie => ("Zombie", 3),
             Sfx::Roar => ("Roar_0", 1),
             Sfx::MenuTick => ("Menu_Tick", 1),
+            Sfx::Shatter => ("Shatter", 1),
+            Sfx::Grass => ("Grass", 1),
+            Sfx::Drink => ("Item_3", 1),
         }
     }
 }

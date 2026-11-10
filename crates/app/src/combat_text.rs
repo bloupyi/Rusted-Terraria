@@ -4,6 +4,7 @@ pub const DAMAGED_FRIENDLY: [u8; 4] = [255, 80, 90, 255];
 pub const DAMAGED_FRIENDLY_CRIT: [u8; 4] = [255, 100, 30, 255];
 pub const DAMAGED_HOSTILE: [u8; 4] = [255, 160, 80, 255];
 pub const DAMAGED_HOSTILE_CRIT: [u8; 4] = [255, 100, 30, 255];
+pub const HEAL_LIFE: [u8; 4] = [100, 255, 100, 255];
 /// `OthersDamagedHostile`: what another player's hits show, at 40%.
 pub fn others(c: [u8; 4]) -> [u8; 4] {
     c.map(|v| (v as f32 * 0.4) as u8)

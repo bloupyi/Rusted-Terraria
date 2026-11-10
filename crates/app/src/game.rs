@@ -6,10 +6,10 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
-use crate::inventory::{Inventory, Item};
+use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::net::{MobState, Msg};
-use crate::{backdrop, cave, item_ids};
+use crate::{backdrop, cave, item_ids, pots};
 use formats::wld::Env;
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -41,6 +41,9 @@ pub const EXTRA_TILES: [u16; 6] = [OBSIDIAN, WOOD, 4, items::WORK_BENCH, items::
 pub const TREE: u16 = 5;
 pub const WOOD: u16 = 30;
 const TORCH: u16 = 4;
+const POT: u16 = 28;
+/// `Item.potionDelay`: a minute of potion sickness.
+const POTION_DELAY: i32 = 3600;
 /// Grass, vines and other plants: break without dropping anything.
 const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 233];
 /// Objects that hang from the tile above them.
@@ -92,6 +95,7 @@ pub fn sprite_sheets() -> Vec<String> {
             .map(String::from),
     );
     v.extend(items::sheets());
+    v.extend(pots::SHEETS.iter().map(|s| s.to_string()));
     v
 }
 
@@ -150,6 +154,8 @@ pub struct Game {
     /// `lifeRegenTime` and `lifeRegenCount`.
     regen_time: f32,
     regen_count: i32,
+    /// `potionDelay`: ticks of potion sickness left.
+    pub potion_delay: i32,
     /// Ticks before the swing can hit another monster.
     attack_cd: i32,
     /// World point the held item is used at this frame.
@@ -229,6 +235,7 @@ impl Game {
             immune: 0,
             regen_time: 0.0,
             regen_count: 0,
+            potion_delay: 0,
             attack_cd: 0,
             use_target: None,
             release_use: true,
@@ -275,6 +282,7 @@ impl Game {
                 }
                 self.contact_damage();
                 self.life_regen();
+                self.potion_delay = (self.potion_delay - 1).max(0);
             }
             for (_, p) in &mut self.others {
                 p.animate();
@@ -412,6 +420,104 @@ impl Game {
         while self.regen_count >= 120 {
             self.regen_count -= 120;
             self.hp = (self.hp + 1).min(MAX_HP);
+        }
+    }
+
+    /// `Player.Heal`: life back, shown in green over the player.
+    fn heal(&mut self, n: i32) {
+        self.hp = (self.hp + n).min(MAX_HP);
+        let b = self.player.body;
+        self.text_at([b.x, b.y, b.w, b.h], combat_text::HEAL_LIFE, n, false);
+    }
+
+    /// Drinks `id` if it heals (`ItemCheck` with `ApplyPotionDelay` and
+    /// `ApplyLifeAndOrMana`): potion sickness for a minute, life back at once.
+    fn drink(&mut self, id: u16) -> bool {
+        let Some(s) = item_ids::stats(id) else { return false };
+        let potion = s.flags & item_ids::POTION != 0;
+        if s.heal_life <= 0 || (potion && self.potion_delay > 0) {
+            return false;
+        }
+        if potion {
+            self.potion_delay = POTION_DELAY;
+        }
+        self.item_animation = s.use_animation as i32;
+        self.sfx.push(Sfx::Drink);
+        self.heal(s.heal_life as i32);
+        true
+    }
+
+    /// `QuickHeal` (H): the potion whose healing best fits the missing life.
+    pub fn quick_heal(&mut self) {
+        if self.hp >= MAX_HP || self.potion_delay > 0 || self.item_animation > 0 {
+            return;
+        }
+        let missing = MAX_HP - self.hp;
+        let mut best: Option<(usize, i32)> = None;
+        for (i, slot) in self.inventory.slots.iter().enumerate() {
+            let Some(Stack { item: Item::Id(id), .. }) = slot else { continue };
+            let Some(s) = item_ids::stats(*id) else { continue };
+            if s.flags & item_ids::POTION == 0 || s.heal_life <= 0 {
+                continue;
+            }
+            let d = s.heal_life as i32 - missing;
+            let better = match best {
+                None => true,
+                Some((_, b)) if b < 0 => d > b,
+                Some((_, b)) => d < b && d >= 0,
+            };
+            if better {
+                best = Some((i, d));
+            }
+        }
+        let Some((i, _)) = best else { return };
+        let Some(Stack { item: Item::Id(id), .. }) = self.inventory.slots[i] else { return };
+        if self.drink(id) {
+            self.inventory.remove(Item::Id(id), 1);
+        }
+    }
+
+    /// `WorldGen.SpawnThingsFromPot`, for the pot whose top-left cell is `(x, y)`, broken at row `ty`.
+    fn shatter_pot(&mut self, x: i64, y: i64, ty: i64) {
+        let style = self.world.frame(x, y).1 as i32 / 36;
+        self.sfx.push(match style {
+            7..=9 => Sfx::Grass,
+            16..=24 => Sfx::MobKilled,
+            _ => Sfx::Shatter,
+        });
+        let torches = self
+            .inventory
+            .slots
+            .iter()
+            .flatten()
+            .filter(|s| matches!(s.item, Item::Object(t) if self.templates[t as usize].tile == TORCH))
+            .map(|s| s.count as u32)
+            .sum();
+        let wall = self.world.wall(x, ty);
+        let pot = pots::Pot {
+            style,
+            y: ty as f64,
+            world_surface: self.env.world_surface,
+            rock_layer: self.env.rock_layer,
+            height: self.world.height as f64,
+            dungeon_wall: matches!(wall, 7..=9 | 94..=99),
+            in_liquid: self.world.liquid(x, ty) > 0,
+            expert: self.env.expert,
+            hurt: self.hp < MAX_HP,
+            torches,
+        };
+        let loot = pots::loot(&pot, |n| (self.random() % n.max(1) as u64) as i32);
+        for (id, count) in loot {
+            let item = match id {
+                pots::TORCH => self.furniture(Furniture::Torch),
+                965 => Item::Block(213),
+                _ => Item::Id(id),
+            };
+            // `Item.NewItem`: a small random toss.
+            let vx = ((self.random() % 61) as f32 - 30.0) * 0.1 * 60.0;
+            let vy = ((self.random() % 26) as f32 - 40.0) * 0.1 * 60.0;
+            let (px, py) = (x as f32 * 16.0 + 8.0, ty as f32 * 16.0);
+            self.drops.push(Drop { x: px, y: py, vx, vy, item, count, grab_delay: 0.0 });
         }
     }
 
@@ -555,11 +661,17 @@ impl Game {
         let world = &self.world;
         let inventory = &mut self.inventory;
         let sfx = &mut self.sfx;
+        let mut hearts = 0;
         self.drops.retain_mut(|d| {
             let (dx, dy) = (px - (d.x + DROP_SIZE / 2.0), py - (d.y + DROP_SIZE / 2.0));
             d.grab_delay = (d.grab_delay - dt).max(0.0);
             // Out of reach while the thrower's delay runs.
             let dist = if d.grab_delay > 0.0 { f32::INFINITY } else { (dx * dx + dy * dy).sqrt() };
+            if dist < PICKUP && d.item == Item::Id(pots::HEART) {
+                hearts += 1;
+                sfx.push(Sfx::Grab);
+                return false;
+            }
             if dist < PICKUP {
                 let before = d.count;
                 d.count = inventory.add(d.item, d.count);
@@ -589,6 +701,10 @@ impl Game {
             }
             true
         });
+        // `PickupItem`: a heart is 20 life, never an item.
+        for _ in 0..hearts {
+            self.heal(20);
+        }
     }
 
     /// Music cue for where the player is: underground (4), night (3) or day (1).
@@ -734,6 +850,11 @@ impl Game {
     fn use_item(&mut self, target: Option<(f32, f32)>) {
         let s = self.held_tool();
         let held = target.is_some();
+        if let Some(Stack { item: Item::Id(id), .. }) = self.inventory.selected() {
+            if held && self.item_animation == 0 && self.release_use && self.drink(id) {
+                self.inventory.consume();
+            }
+        }
         if held && self.item_animation == 0 && s.use_animation > 0 && (self.release_use || s.auto_reuse) {
             self.item_animation = s.use_animation;
             if let Some((wx, _)) = target {
@@ -980,6 +1101,13 @@ impl Game {
             let cells = self.connected(tx, ty, |_, _| true, 512);
             let n = cells.len() as u16;
             (cells, Some((Item::Block(WOOD), n)))
+        } else if t == POT {
+            let cells = self.object_cells(tx, ty);
+            let (x0, y0) = (cells.iter().map(|c| c.0).min().unwrap(), cells.iter().map(|c| c.1).min().unwrap());
+            if drop {
+                self.shatter_pot(x0, y0, ty);
+            }
+            (cells, None)
         } else if self.important(t) {
             let cells = self.object_cells(tx, ty);
             let item = (!PLANTS.contains(&t)).then(|| (Item::Object(self.template(t, &cells)), 1));
@@ -1170,7 +1298,7 @@ impl Game {
                 self.summon_boss();
                 return;
             }
-            Item::Tool(_) | Item::Material(_) => return,
+            Item::Tool(_) | Item::Material(_) | Item::Id(_) => return,
             Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
                     self.world.tile(tx + dx, ty + dy) != NO_TILE || self.world.wall(tx + dx, ty + dy) != 0
@@ -1302,6 +1430,7 @@ impl Game {
             Item::Bucket(Some(Liquid::Lava)) => Some(207),
             Item::Bucket(Some(Liquid::Honey)) => Some(1128),
             Item::Bucket(Some(Liquid::Shimmer)) => None,
+            Item::Id(id) => Some(id),
         }
     }
 
@@ -1325,6 +1454,7 @@ impl Game {
             Item::Tool(t) => sheet(t.sheet()),
             Item::Material(m) => sheet(m.sheet()),
             Item::Bucket(_) => sheet("Item_205"),
+            Item::Id(id) => sheet(&format!("Item_{id}")),
             Item::Object(id) => {
                 let cells = &self.templates[id as usize].cells;
                 let w = cells.iter().map(|c| c.0).max().unwrap_or(0) + 1;
@@ -1364,6 +1494,10 @@ impl Game {
                     v
                 }
                 None => flat([90, 140, 255, 255]),
+            },
+            Item::Id(id) => match self.sheet(&format!("Item_{id}")) {
+                Some(s) => fit(s, [0, 0, s.w, s.h]),
+                None => flat([200, 200, 200, 255]),
             },
             Item::Bucket(l) => {
                 let name = match l {
@@ -1777,17 +1911,20 @@ mod tests {
 
     /// Floor at y = 20; two 2x1 benches side by side at x = 10..14, a torch at (20, 19).
     fn game() -> Game {
-        let mut important = vec![false; 20];
+        let mut important = vec![false; 30];
         important[BENCH as usize] = true;
         important[TORCH as usize] = true;
+        important[POT as usize] = true;
         let world = World::parse(&formats::synth::write_world("g", 64, 64, &important, |x, y| {
             let (tile, fx) = match (x, y) {
                 (_, 20..) => (1, 0),
                 (10..=13, 19) => (BENCH, ((x - 10) % 2) as i16 * 18),
                 (20, 19) => (TORCH, 0),
+                (30..=31, 18..=19) => (POT, ((x - 30) * 18) as i16),
                 _ => (NO_TILE, 0),
             };
-            Tile { tile, frame_x: fx, frame_y: 0, ..Tile::default() }
+            let fy = if tile == POT { (y - 18) as i16 * 18 } else { 0 };
+            Tile { tile, frame_x: fx, frame_y: fy, ..Tile::default() }
         }))
         .unwrap();
         let scene = Scene::build(&world, None, &EXTRA_TILES, &[], Vec::new());
@@ -1860,6 +1997,32 @@ mod tests {
         assert!(g.craft(sword));
         assert_eq!(g.inventory.count(Item::Block(items::WOOD)), 0);
         assert_eq!(g.inventory.count(Item::Tool(Tool::Sword(Tier::Wood))), 1);
+    }
+
+    #[test]
+    fn pots_shatter_into_loot() {
+        let mut g = game();
+        g.break_tile(31, 19, true);
+        assert_eq!(g.world.tile(30, 18), NO_TILE, "the whole pot");
+        assert!(!g.drops.is_empty(), "always something");
+        assert!(g.drops.iter().all(|d| !matches!(d.item, Item::Object(t) if g.templates[t as usize].tile == POT)));
+    }
+
+    #[test]
+    fn potions_heal_then_sicken() {
+        let mut g = game();
+        g.inventory.slots[5] = Some(Stack { item: Item::Id(28), count: 2 });
+        g.hp = 30;
+        g.quick_heal();
+        assert_eq!((g.hp, g.potion_delay), (80, POTION_DELAY));
+        assert_eq!(g.inventory.count(Item::Id(28)), 1);
+        g.item_animation = 0;
+        g.quick_heal();
+        assert_eq!(g.hp, 80, "sick for a minute");
+        g.drops.push(Drop { x: 0.0, y: 0.0, vx: 0.0, vy: 0.0, item: Item::Id(pots::HEART), count: 1, grab_delay: 0.0 });
+        pick_up(&mut g);
+        assert_eq!(g.hp, 100, "a heart is 20 life");
+        assert_eq!(g.inventory.count(Item::Id(pots::HEART)), 0);
     }
 
     #[test]

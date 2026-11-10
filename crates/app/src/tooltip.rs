@@ -28,13 +28,14 @@ pub fn rarity_color(rare: i8) -> [u8; 3] {
 }
 
 /// The lines and their colours, the hover name first. `key` is the `ItemID` name.
-pub fn lines(texts: &Texts, name: &str, key: &str, s: &Stats, stack: u16) -> Vec<(String, [u8; 3])> {
+pub fn lines(texts: &Texts, id: u16, name: &str, key: &str, s: &Stats, stack: u16) -> Vec<(String, [u8; 3])> {
     let tip = |n: usize| texts.get(&format!("LegacyTooltip.{n}")).unwrap_or("").to_string();
     let has = |f: u16| s.flags & f != 0;
     let name = if stack > 1 { format!("{name} ({stack})") } else { name.to_string() };
     let mut out = vec![(name, rarity_color(s.rare))];
     let mut add = |text: String| out.push((text, WHITE));
-    if s.damage > 0 {
+    // Coins have damage (the coin gun's) that the tooltip leaves out.
+    if s.damage > 0 && !(71..=74).contains(&id) {
         let class = if has(MELEE) {
             2
         } else if has(RANGED) {
@@ -82,6 +83,11 @@ pub fn lines(texts: &Texts, name: &str, key: &str, s: &Stats, stack: u16) -> Vec
         let sign = if s.tile_boost > 0 { "+" } else { "" };
         add(format!("{sign}{}{}", s.tile_boost, tip(54)));
     }
+    let common = |key: &str| texts.get(&format!("CommonItemTooltip.{key}")).unwrap_or("").to_string();
+    if s.heal_life > 0 {
+        add(common("RestoresLife").replace("{0}", &s.heal_life.to_string()));
+        add(common("Healing"));
+    }
     if has(PLACES) {
         if has(CONSUMABLE) {
             add(tip(33));
@@ -95,14 +101,27 @@ pub fn lines(texts: &Texts, name: &str, key: &str, s: &Stats, stack: u16) -> Vec
         add(tip(36));
     }
     if has(CONTAINER) {
-        add(texts.get("CommonItemTooltip.Container").unwrap_or("").to_string());
+        add(common("Container"));
     }
     if let Some(t) = texts.get(&format!("ItemTooltip.{key}")) {
         for l in t.split('\n') {
             add(l.to_string());
         }
     }
-    out
+    out.into_iter().map(|(l, c)| (substitute(texts, &l), c)).collect()
+}
+
+/// `Lang.InitGlobalSubstitutions` for the keys the engine binds, written as
+/// `GenerateRawInputList` writes keyboard bindings.
+fn substitute(texts: &Texts, line: &str) -> String {
+    let click = |key: &str| texts.get(key).unwrap_or("").to_string();
+    [
+        ("{InputTrigger_Healing}", "H".to_string()),
+        ("{InputTrigger_UseOrAttack}", click("Controls.LeftClick")),
+        ("{InputTrigger_InteractWithTile}", click("Controls.RightClick")),
+    ]
+    .iter()
+    .fold(line.to_string(), |l, (tag, key)| l.replace(tag, key))
 }
 
 #[cfg(test)]
@@ -116,7 +135,7 @@ mod tests {
     #[test]
     fn copper_pickaxe_lines() {
         let s = find("CopperPickaxe");
-        let lines = lines(&Texts::default(), "Pick", "CopperPickaxe", &s, 1);
+        let lines = lines(&Texts::default(), 3509, "Pick", "CopperPickaxe", &s, 1);
         let text: Vec<&str> = lines.iter().map(|l| l.0.as_str()).collect();
         // Damage, crit, speed, knockback, pick power, range.
         assert_eq!(text, ["Pick", "4", "4", "", "", "35", "-1"]);
@@ -124,12 +143,12 @@ mod tests {
 
     #[test]
     fn blocks_and_materials() {
-        let wood = lines(&Texts::default(), "Wood", "Wood", &find("Wood"), 12);
+        let wood = lines(&Texts::default(), 9, "Wood", "Wood", &find("Wood"), 12);
         assert_eq!(wood.len(), 3, "placeable, material");
         assert_eq!(wood[0].0, "Wood (12)");
-        let gel = lines(&Texts::default(), "Gel", "Gel", &find("Gel"), 1);
+        let gel = lines(&Texts::default(), 23, "Gel", "Gel", &find("Gel"), 1);
         assert_eq!(gel.len(), 3, "ammo, material");
-        let eye = lines(&Texts::default(), "Eye", "SuspiciousLookingEye", &find("SuspiciousLookingEye"), 1);
+        let eye = lines(&Texts::default(), 43, "Eye", "SuspiciousLookingEye", &find("SuspiciousLookingEye"), 1);
         assert_eq!(eye[0].1, [150, 150, 255]);
         assert_eq!(eye.len(), 2, "consumable");
     }
