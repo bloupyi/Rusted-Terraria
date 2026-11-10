@@ -294,6 +294,7 @@ pub fn chunk(world: &World, cx: u32, cy: u32) -> Vec<Instance> {
                     | ox.min(15) << 20
                     | oy.min(15) << 24
                     | (surface as u32) << 28,
+                c: 0,
             });
         }
     }

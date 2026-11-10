@@ -44,6 +44,16 @@ les motifs de centre 3x3 et les grandes trames fixees par la position (aussi pou
 les blocs concernes). Les ensembles de types (`world::tile_sets`) sont generes par
 `tools/gen_tile_sets.py`.
 
+Dessin des objets (`world::draw`) : taille, decalage vertical et miroir de chaque
+type comme dans le jeu (herbes de 20 px miroir une colonne sur deux, bas des
+meubles de 18 px, torches 20x20, objets poses 2 px plus bas...), generes par
+`tools/gen_tile_draw.py` avec leurs conditions de cadre ou de colonne. Arbres :
+tronc selon le sol sous l'arbre (foret, corruption, jungle, sacre, neige,
+carmin, jungle souterraine, champignons), cimes et branches selon le sol et le
+style d'arbre de chaque zone lu dans le fichier monde, avec la taille de cadre du
+style. Pas encore : vent sur les arbres et l'herbe, animations d'objets, style
+sacre selon le fond sacre.
+
 Ciel et fonds (`app::backdrop`) : l'heure, la phase et le type de lune, la ligne de
 surface, les limites des 4 zones de foret et leurs styles de fond sont lus dans le
 fichier monde. Ciel, soleil, lune, montagnes et trois plans d'arbres sont places
@@ -185,8 +195,8 @@ serveur officiel ne tourne pas sous Linux sans Windows). Champs inconnus de la 1
 envoyes a zero, shimmer transmis comme de l'eau, objets au sol locaux.
 
 Sprites : joueur, monstres (`NPC_1` a `NPC_4`, `NPC_22`), objets au sol, barre d'objets (icones tirees des sheets de tuiles
-et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_0`,
-`Tree_Branches_0`) et fond souterrain sont des rectangles textures du meme atlas,
+et `Item_*` pour les seaux), cimes et branches d'arbres (`Tree_Tops_N`,
+`Tree_Branches_N`) et fond souterrain sont des rectangles textures du meme atlas,
 eclaires comme les tuiles. Les liquides utilisent `Misc/water_0` a `water_14`.
 
 ## Tests
@@ -233,4 +243,3 @@ Marquees `TODO` dans le code :
 - WLD : versions anterieures a 225 non verifiees.
 - Cadrage des blocs approximatif (voisins identiques seulement), pas de fusion
   terre/pierre, pentes ni peinture.
-- Un seul style d'arbre (foret) pour les cimes ; pas de shimmer texture.

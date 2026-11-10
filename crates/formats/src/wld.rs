@@ -47,6 +47,9 @@ pub struct Env {
     pub eclipse: bool,
     /// Background style of each forest zone, left to right.
     pub tree_bg: [u8; 4],
+    /// Tree top style per area: forests 1 to 4, corruption, jungle, snow,
+    /// hallow, crimson, desert, ocean, mushroom, underworld.
+    pub tree_tops: [i32; 13],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -160,7 +163,7 @@ impl Header {
     }
 }
 
-/// Flags following the world size, read up to the last forest background byte.
+/// Flags following the world size, read up to the tree top styles.
 fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     let mut e = Env::default();
     let skip = |r: &mut Reader, n: usize| r.bytes(n).map(|_| ());
@@ -220,6 +223,21 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     skip(r, 1 + 4 + 4 + 4 + 4 + 1 + 1)?;
     for b in &mut e.tree_bg[1..] {
         *b = r.u8()?;
+    }
+    if version >= 204 {
+        skip(r, 1)?;
+    }
+    if version >= 207 {
+        skip(r, 4 + 3)?;
+    }
+    if version >= 211 {
+        let n = r.i32()?.max(0) as usize;
+        for i in 0..n {
+            let v = r.i32()?;
+            if let Some(t) = e.tree_tops.get_mut(i) {
+                *t = v;
+            }
+        }
     }
     Ok(e)
 }
@@ -411,6 +429,7 @@ mod tests {
         let env = h.env.as_ref().expect("world flags");
         assert!(env.world_surface > 0.0 && env.world_surface < env.rock_layer && env.rock_layer < h.height as f64);
         assert!((0..8).contains(&env.moon_phase) && env.tree_x[0] <= env.tree_x[1]);
+        assert!(env.tree_tops.iter().all(|t| (0..64).contains(t)));
         let mut cells = 0u64;
         read_tiles(&data, &h, |_, _, n, _| cells += n as u64).unwrap();
         assert_eq!(cells, h.width as u64 * h.height as u64);
