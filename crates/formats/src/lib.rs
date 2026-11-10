@@ -1,4 +1,6 @@
+pub mod dotnet;
 pub mod install;
+pub mod lang;
 mod reader;
 #[doc(hidden)]
 pub mod synth;
