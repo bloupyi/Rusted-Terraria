@@ -67,14 +67,21 @@ pub struct Scene {
 impl Scene {
     /// `extra_tiles`: types that edits may create, loaded even if absent from the world.
     /// `named`: other sheets (sprites) to pack into the atlas.
-    pub fn build(world: &World, images: Option<&std::path::Path>, extra_tiles: &[u16], named: &[String]) -> Self {
+    /// `textures`: sheets that are not files under `images` (font pages), by name.
+    pub fn build(
+        world: &World,
+        images: Option<&std::path::Path>,
+        extra_tiles: &[u16],
+        named: &[String],
+        textures: Vec<(String, formats::xnb::Texture)>,
+    ) -> Self {
         let (mut tiles, walls) = world.used_types();
         tiles.extend_from_slice(extra_tiles);
         tiles.sort_unstable();
         tiles.dedup();
         let mut named = named.to_vec();
         named.extend((0..WATER_SHEETS).map(water_sheet));
-        let atlas = Atlas::load(images, &tiles, &walls, &named);
+        let atlas = Atlas::load(images, &tiles, &walls, &named, textures);
         let ((mesher, rows), ((lod_pages_x, lod_pages_y, lod), light)) =
             rayon::join(|| Mesher::new(world, atlas), || rayon::join(|| build_lod(world), || LightMap::compute(world)));
         let mut scene = Self { mesher, rows, chunks_x: world.chunks_x, lod_pages_x, lod_pages_y, lod, light };

@@ -84,6 +84,7 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
+    v.extend(["Inventory_Back", "Inventory_Back14", "Heart"].map(String::from));
     v.extend(items::sheets());
     v
 }
@@ -1177,6 +1178,23 @@ impl Game {
         self.scene.mesher.atlas.named.get(name)
     }
 
+    /// The larger side of `item`'s picture, in its own pixels.
+    pub fn item_size(&self, item: Item) -> f32 {
+        let sheet = |name: &str| self.sheet(name).map_or(16.0, |s| s.w.max(s.h) as f32);
+        match item {
+            Item::Block(_) => 16.0,
+            Item::Tool(t) => sheet(t.sheet()),
+            Item::Material(m) => sheet(m.sheet()),
+            Item::Bucket(_) => sheet("Item_205"),
+            Item::Object(id) => {
+                let cells = &self.templates[id as usize].cells;
+                let w = cells.iter().map(|c| c.0).max().unwrap_or(0) + 1;
+                let h = 1 - cells.iter().map(|c| c.1).min().unwrap_or(0);
+                (w.max(h) * 16) as f32
+            }
+        }
+    }
+
     /// Sprites drawing `item` fitted in a `size` square at `pos` (world pixels).
     pub fn item_icon(&self, item: Item, pos: [f32; 2], size: f32, flags: u32) -> Vec<Sprite> {
         let atlas = &self.scene.mesher.atlas;
@@ -1633,7 +1651,7 @@ mod tests {
             Tile { tile, frame_x: fx, frame_y: 0, ..Tile::default() }
         }))
         .unwrap();
-        let scene = Scene::build(&world, None, &EXTRA_TILES, &[]);
+        let scene = Scene::build(&world, None, &EXTRA_TILES, &[], Vec::new());
         let mut g = Game::new(world, scene);
         g.player = Player::spawn(&g.world, 15);
         g

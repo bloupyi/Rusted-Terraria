@@ -7,6 +7,7 @@ mod items;
 mod net;
 mod proto;
 mod surface;
+mod ui;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -27,8 +28,8 @@ use world::player::{self, Input, Player};
 /// Screen pixels of a hotbar or crafting slot, and the gap after it.
 const SLOT: f32 = 40.0;
 const SLOT_GAP: f32 = 4.0;
-/// Top of the crafting rows, under the health bar.
-const CRAFT_Y: f32 = 72.0;
+/// Top of the crafting rows, under the hotbar.
+const CRAFT_Y: f32 = 80.0;
 
 /// Top-left of slot `i` of a row of ten starting at `y`.
 fn slot_at(i: usize, y: f32) -> Vec2 {
@@ -87,6 +88,8 @@ struct App {
     /// `--profile`: time per phase (update, sync, sprites, render), printed with the title.
     profile: Option<[Duration; 4]>,
     title_at: Instant,
+    fonts: ui::Fonts,
+    hud: ui::Hud,
 }
 
 impl App {
@@ -100,6 +103,7 @@ impl App {
     }
 
     fn update(&mut self, dt: f32, size: Vec2) {
+        self.hud.update(dt, self.game.inventory.selected);
         let k = &self.keys;
         let time_scale = if k.fast_time { FAST_TIME } else { 1.0 };
         if self.free {
@@ -145,49 +149,52 @@ impl App {
         self.camera.time += dt;
     }
 
-    /// Hotbar in the top-left corner, health under it, then the crafting rows if
+    /// The game's hotbar and life hearts, the boss bar, then the crafting rows if
     /// open, as world sprites under the current camera.
-    fn hotbar(&self, size: Vec2) -> Vec<Sprite> {
+    fn hud(&self, size: Vec2) -> Vec<Sprite> {
         let z = self.camera.zoom;
-        let at = |p: Vec2| -> [f32; 2] { self.screen_to_world(p, size).into() };
-        let rect = |p: Vec2, w: f32, h: f32, color: [f32; 4]| Sprite::flat(at(p), [w / z, h / z], color);
-        let slot = |rects: &mut Vec<Sprite>, o: Vec2, frame: [f32; 4], item: Option<(Item, u16)>| {
-            rects.push(rect(o, SLOT, SLOT, frame));
-            rects.push(rect(o + 3.0, SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]));
-            if let Some((item, count)) = item {
-                rects.extend(self.game.item_icon(item, at(o + 8.0), (SLOT - 16.0) / z, 0));
-                if count > 1 {
-                    let w = (SLOT - 8.0) * (count as f32 / 99.0).min(1.0);
-                    rects.push(rect(o + Vec2::new(4.0, SLOT - 7.0), w.max(2.0), 3.0, [0.9, 0.9, 0.9, 0.9]));
-                }
-            }
+        let game = &self.game;
+        let mut p = ui::Painter {
+            sheets: &game.scene.mesher.atlas.named,
+            fonts: &self.fonts,
+            origin: self.screen_to_world(Vec2::ZERO, size).into(),
+            unit: 1.0 / z,
+            out: Vec::new(),
         };
-        let inv = &self.game.inventory;
-        let mut rects = Vec::new();
-        for i in 0..HOTBAR {
-            let frame = if i == inv.selected { [0.9, 0.8, 0.3, 0.9] } else { [0.1, 0.1, 0.15, 0.6] };
-            slot(&mut rects, slot_at(i, 10.0), frame, inv.slots[i].map(|s| (s.item, s.count)));
-        }
-        let width = HOTBAR as f32 * (SLOT + SLOT_GAP) - SLOT_GAP;
-        rects.push(rect(Vec2::new(10.0, 56.0), width, 8.0, [0.1, 0.1, 0.15, 0.6]));
-        let hp = self.game.hp.max(0) as f32 / game::MAX_HP as f32;
-        rects.push(rect(Vec2::new(11.0, 57.0), (width - 2.0) * hp, 6.0, [0.85, 0.15, 0.15, 0.95]));
-        if let Some(life) = self.game.boss_life() {
+        let inv = &game.inventory;
+        let counts: Vec<u16> = (0..HOTBAR).map(|i| inv.slots[i].map_or(0, |s| s.count)).collect();
+        self.hud.draw_hotbar(&mut p, inv.selected, &counts, |p, i, [cx, cy], s| {
+            let Some(stack) = inv.slots[i] else { return };
+            let side = game.item_size(stack.item).min(ui::ICON_LIMIT) * s;
+            let icon = game.item_icon(stack.item, p.world([cx - side / 2.0, cy - side / 2.0]), side / z, 0);
+            p.out.extend(icon);
+        });
+        self.hud.draw_life(&mut p, size.x, game.hp, game::MAX_HP);
+        if let Some(life) = game.boss_life() {
             let (w, x) = (size.x * 0.5, size.x * 0.25);
-            rects.push(rect(Vec2::new(x, size.y - 40.0), w, 14.0, [0.1, 0.1, 0.15, 0.7]));
-            rects.push(rect(Vec2::new(x + 2.0, size.y - 38.0), (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]));
+            p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
+            p.rect([x + 2.0, size.y - 38.0], (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]);
         }
         for (k, &(r, item)) in self.recipes.iter().enumerate() {
             let hover = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) == Some(k);
+            let o = slot_at(k, CRAFT_Y);
             let frame = if hover { [0.4, 0.8, 0.5, 0.9] } else { [0.2, 0.35, 0.25, 0.7] };
-            slot(&mut rects, slot_at(k, CRAFT_Y), frame, Some((item, items::RECIPES[r].count)));
+            p.rect(o.into(), SLOT, SLOT, frame);
+            p.rect((o + 3.0).into(), SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]);
+            let icon = game.item_icon(item, p.world((o + 8.0).into()), (SLOT - 16.0) / z, 0);
+            p.out.extend(icon);
+            let count = items::RECIPES[r].count;
+            if count > 1 {
+                let at = [o.x + 10.0 * 0.75, o.y + 26.0 * 0.75];
+                p.text(ui::FontId::ItemStack, &count.to_string(), at, 0.75, [1.0; 4], 0.75);
+            }
         }
-        rects
+        p.out
     }
 
     /// A left press on the interface: picks a hotbar slot or crafts. True if it hit one.
     fn click_ui(&mut self) -> bool {
-        if let Some(i) = slot_under(self.cursor, 10.0, HOTBAR) {
+        if let Some(i) = self.hud.hotbar_under(self.cursor.into()) {
             self.game.inventory.selected = i;
             return true;
         }
@@ -340,7 +347,7 @@ impl ApplicationHandler for App {
                 self.update(dt.as_secs_f32().min(0.1), size);
                 let view = self.view(size);
                 let cursor = self.cursor_tile(size);
-                let hud = self.hotbar(size);
+                let hud = self.hud(size);
                 let Some(renderer) = &mut self.renderer else { return };
                 let t1 = Instant::now();
                 self.game.sync(renderer, view);
@@ -481,7 +488,9 @@ fn main() {
     let env = world.header.env.clone().unwrap_or_default();
     sheets.extend(backdrop::sheets(&env));
     sheets.extend(cave::sheets(&env, world.header.world_id));
-    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets);
+    let (fonts, pages) =
+        ui::Fonts::load(images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts")).as_deref());
+    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets, pages);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
         world.header.name,
@@ -532,6 +541,8 @@ fn main() {
         frame_time: Duration::ZERO,
         profile: profile.then_some([Duration::ZERO; 4]),
         title_at: Instant::now(),
+        fonts,
+        hud: ui::Hud::default(),
     };
     let event_loop = EventLoop::new().expect("event loop");
     event_loop.set_control_flow(ControlFlow::Poll);

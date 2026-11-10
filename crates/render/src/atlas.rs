@@ -36,7 +36,14 @@ pub struct Atlas {
 impl Atlas {
     /// `images` is `<Terraria>/Content/Images`; `None` uses placeholders only.
     /// `named`: extra sheets by file stem, skipped when missing.
-    pub fn load(images: Option<&Path>, tile_types: &[u16], wall_types: &[u16], named: &[String]) -> Self {
+    /// `textures`: more named sheets, already decoded.
+    pub fn load(
+        images: Option<&Path>,
+        tile_types: &[u16],
+        wall_types: &[u16],
+        named: &[String],
+        textures: Vec<(String, Texture)>,
+    ) -> Self {
         let jobs: Vec<(bool, u16)> =
             tile_types.iter().map(|&t| (false, t)).chain(wall_types.iter().map(|&w| (true, w))).collect();
         let read = |name: &str| {
@@ -55,8 +62,12 @@ impl Atlas {
                 }
             })
             .collect();
-        let (names, extra): (Vec<String>, Vec<Texture>) =
+        let (mut names, mut extra): (Vec<String>, Vec<Texture>) =
             named.par_iter().filter_map(|n| read(n).map(|t| (n.clone(), t))).unzip();
+        for (n, t) in textures.into_iter().filter(|(_, t)| t.width <= LAYER_SIZE && t.height <= LAYER_SIZE) {
+            names.push(n);
+            extra.push(t);
+        }
         let first_named = loaded.len();
         // Named sheets ride along as tiles with ids past the table; only `named` keeps them.
         loaded.extend(extra.into_iter().map(|t| (false, u16::MAX, t, false)));
