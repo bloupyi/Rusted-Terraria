@@ -85,6 +85,8 @@ struct App {
     /// The inventory is open (Escape, as in the game), with the crafting rows under it.
     inventory_open: bool,
     split: ui::StackSplit,
+    /// The right button went down since the last update (`Main.mouseRightRelease`).
+    right_fresh: bool,
     /// Craftable recipes and what each makes, while the crafting rows are open.
     recipes: Vec<(usize, Item)>,
     drag: Option<Vec2>,
@@ -148,9 +150,17 @@ impl App {
                 self.game.use_at(w.x, w.y, self.free);
             }
             if self.buttons[1] && !self.over_ui() {
-                self.game.place(tx, ty, self.free);
+                // A right click in the world throws what the cursor carries.
+                if self.game.inventory.mouse.is_some() {
+                    if self.right_fresh {
+                        self.game.throw_held(false);
+                    }
+                } else {
+                    self.game.place(tx, ty, self.free);
+                }
             }
         }
+        self.right_fresh = false;
         self.sync_net();
         for sfx in self.game.sfx.drain(..) {
             if let Some(a) = &mut self.audio {
@@ -368,11 +378,15 @@ impl ApplicationHandler for App {
                     KeyCode::KeyS | KeyCode::ArrowDown => k.down = down,
                     KeyCode::Space => k.jump = down,
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => k.shift = down,
-                    KeyCode::KeyT => k.fast_time = down,
+                    KeyCode::KeyY => k.fast_time = down,
+                    // The game's Throw key.
+                    KeyCode::KeyT if press => self.game.throw_held(true),
                     KeyCode::Escape if press => {
                         self.inventory_open = !self.inventory_open;
                         if !self.inventory_open {
+                            // `GetOrDropItem`: back into the inventory, the rest thrown.
                             self.game.inventory.return_mouse();
+                            self.game.throw_held(false);
                         }
                     }
                     KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
@@ -414,7 +428,10 @@ impl ApplicationHandler for App {
                         self.buttons[0] = down;
                         self.ui_click = down && self.click_ui();
                     }
-                    MouseButton::Right => self.buttons[1] = down,
+                    MouseButton::Right => {
+                        self.buttons[1] = down;
+                        self.right_fresh = down;
+                    }
                     MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
                     _ => {}
                 }
@@ -631,6 +648,7 @@ fn main() {
         ui_click: false,
         inventory_open: false,
         split: ui::StackSplit::default(),
+        right_fresh: false,
         recipes: Vec::new(),
         drag: None,
         last: Instant::now(),
