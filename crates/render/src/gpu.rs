@@ -26,6 +26,8 @@ pub struct Camera {
     pub water_style: u32,
     /// Top of the underground backdrop, world pixels: liquid behind tiles stops there.
     pub surface: f32,
+    /// Grass wind counter (turns) and wind speed, for swaying plants.
+    pub wind: [f32; 2],
 }
 
 /// A rectangle in world pixels: flat colour, or an atlas region tinted by
@@ -40,6 +42,9 @@ pub struct Sprite {
     pub uv: [f32; 4],
     /// Atlas layer | `SPRITE_LIT` | `SPRITE_FLIP`.
     pub flags: u32,
+    /// Clockwise turn in radians about `pos + pivot`.
+    pub rot: f32,
+    pub pivot: [f32; 2],
 }
 
 /// Multiplied by the tile light under it.
@@ -60,6 +65,7 @@ impl Sprite {
             color: [1.0; 4],
             uv: [(sheet.x + src[0]) as f32, (sheet.y + src[1]) as f32, src[2] as f32, src[3] as f32],
             flags: sheet.layer | flags,
+            ..Self::default()
         }
     }
 }
@@ -86,6 +92,8 @@ struct CameraUniform {
     water: [[u32; 4]; WATER_SHEETS],
     /// Water style, surface in world pixels.
     liquid: [f32; 4],
+    /// Grass wind counter, wind speed.
+    wind: [f32; 4],
 }
 
 struct Row {
@@ -310,7 +318,7 @@ impl Renderer {
         let rect_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<Sprite>() as u64,
             step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4, 4 => Uint32],
+            attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Float32x2, 2 => Float32x4, 3 => Float32x4, 4 => Uint32, 5 => Float32, 6 => Float32x2],
         };
         let rect_pipeline = pipeline("vs_rect", "fs_rect", &[Some(rect_layout)]);
         let rects = device.create_buffer(&wgpu::BufferDescriptor {
@@ -431,6 +439,7 @@ impl Renderer {
             sky: [cam.sky[0], cam.sky[1], cam.sky[2], cam.time],
             water: self.water,
             liquid: [cam.water_style as f32, cam.surface, 0.0, 0.0],
+            wind: [cam.wind[0], cam.wind[1], 0.0, 0.0],
         };
         self.queue.write_buffer(&self.camera, 0, bytemuck::bytes_of(&uniform));
         let under = &under[..under.len().min(MAX_RECTS as usize / 4)];
@@ -486,9 +495,12 @@ impl Renderer {
                 // Each layer over all visible rows before the next, so tiles cover wall overhang.
                 // Liquids go twice, as in the game: opaque behind walls above the
                 // underground backdrop, then translucent in front of tiles.
-                for (layer, pipeline) in
-                    [(1, &self.liquid_back), (0, &self.tile_pipeline), (2, &self.tile_pipeline), (1, &self.liquid_front)]
-                {
+                for (layer, pipeline) in [
+                    (1, &self.liquid_back),
+                    (0, &self.tile_pipeline),
+                    (2, &self.tile_pipeline),
+                    (1, &self.liquid_front),
+                ] {
                     pass.set_pipeline(pipeline);
                     for row in self.rows.get(y0..y1).unwrap_or(&[]) {
                         let off = &row.offsets[layer];

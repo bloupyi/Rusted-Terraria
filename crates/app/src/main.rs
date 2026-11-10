@@ -6,6 +6,7 @@ mod inventory;
 mod items;
 mod net;
 mod proto;
+mod surface;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -21,7 +22,7 @@ use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::keyboard::{KeyCode, PhysicalKey};
 use winit::window::{Window, WindowId};
 use world::light::Rect;
-use world::player::Input;
+use world::player::{self, Input, Player};
 
 /// Screen pixels of a hotbar or crafting slot, and the gap after it.
 const SLOT: f32 = 40.0;
@@ -109,8 +110,9 @@ impl App {
         } else {
             let input = Input { left: k.left, right: k.right, jump: k.jump || k.up, down: k.down };
             self.game.update(Some(input), dt, time_scale);
-            let (cx, cy) = self.game.player.center();
-            self.camera.center = Vec2::new(cx, cy);
+            let [x, y] = self.game.player.drawn(self.game.tick_acc);
+            let y = y + self.game.player.gfx_off_y;
+            self.camera.center = Vec2::new(x + player::WIDTH / 2.0, y + player::HEIGHT / 2.0);
         }
         self.recipes = if self.crafting {
             self.game.craftable().into_iter().map(|i| (i, self.game.recipe_item(i))).collect()
@@ -120,8 +122,8 @@ impl App {
         if self.drag.is_none() && !self.ui_click {
             let (tx, ty) = self.cursor_tile(size);
             let w = self.screen_to_world(self.cursor, size);
-            if self.buttons[0] && !self.game.attack(w.x, w.y, self.free) {
-                self.game.dig(tx, ty, self.free);
+            if self.buttons[0] {
+                self.game.use_at(w.x, w.y, self.free);
             }
             if self.buttons[1] {
                 self.game.place(tx, ty, self.free);
@@ -139,6 +141,7 @@ impl App {
         (self.camera.sky, self.camera.background) = self.game.sky();
         self.camera.water_style = self.game.water_style(self.camera.center.y / 16.0);
         self.camera.surface = self.game.env.world_surface as f32 * 16.0;
+        self.camera.wind = [self.game.wind.grass.fract() as f32, self.game.env.wind];
         self.camera.time += dt;
     }
 
@@ -279,8 +282,7 @@ impl ApplicationHandler for App {
                         if !self.free {
                             // Drop the player where the camera is.
                             let c = self.camera.center;
-                            (self.game.player.x, self.game.player.y) = (c.x, c.y);
-                            (self.game.player.vx, self.game.player.vy) = (0.0, 0.0);
+                            self.game.player = Player::at(c.x, c.y);
                         }
                     }
                     KeyCode::KeyQ if press => self.game.inventory.cycle(-1),
@@ -515,6 +517,7 @@ fn main() {
             time: 0.0,
             water_style: 0,
             surface: 0.0,
+            wind: [0.0; 2],
         },
         free,
         keys: Keys::default(),

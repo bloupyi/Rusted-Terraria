@@ -10,10 +10,12 @@ use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
 pub mod body;
+pub mod collision;
 pub mod draw;
 pub mod frame;
 pub mod light;
 pub mod liquid;
+pub mod mining;
 pub mod mob;
 pub mod player;
 pub mod scene;

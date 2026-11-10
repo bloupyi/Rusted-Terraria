@@ -58,28 +58,62 @@ pub const COPPER_ORE: u16 = 7;
 pub const IRON_ORE: u16 = 6;
 pub const DEMONITE_ORE: u16 = 22;
 
-/// Seconds between two uses of a tool or weapon.
-pub const USE_TIME: f32 = 0.25;
+/// Use stats of a tool or weapon, from the game's item defaults.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct ToolStats {
+    pub pick: i32,
+    pub axe: i32,
+    pub hammer: i32,
+    /// Ticks between two hits.
+    pub use_time: i32,
+    /// Ticks of one swing.
+    pub use_animation: i32,
+    /// Extra reach in tiles.
+    pub tile_boost: i32,
+    pub damage: i32,
+    pub knock_back: f32,
+    pub scale: f32,
+    /// Swings again while the button stays down.
+    pub auto_reuse: bool,
+    /// The player may turn during the swing.
+    pub use_turn: bool,
+}
 
 impl Tool {
-    /// Mining or chopping power per use, out of 100 for a soft block.
-    pub fn power(self) -> f32 {
-        let tier = match self {
-            Tool::Pickaxe(t) | Tool::Axe(t) | Tool::Hammer(t) | Tool::Sword(t) => t,
+    /// Wooden tiers that the game lacks use the copper ones.
+    pub fn stats(self) -> ToolStats {
+        let tool = |pick, axe, hammer, use_time, use_animation, tile_boost, damage, knock_back| ToolStats {
+            pick,
+            axe,
+            hammer,
+            use_time,
+            use_animation,
+            tile_boost,
+            damage,
+            knock_back,
+            scale: 1.0,
+            auto_reuse: true,
+            use_turn: true,
         };
-        match tier {
-            Tier::Wood => 25.0,
-            Tier::Copper => 35.0,
-            Tier::Iron => 40.0,
-        }
-    }
-
-    pub fn damage(self) -> i32 {
+        let sword = |use_animation, damage, knock_back| ToolStats {
+            use_time: 20,
+            use_animation,
+            damage,
+            knock_back,
+            scale: 1.0,
+            ..ToolStats::default()
+        };
         match self {
-            Tool::Sword(Tier::Wood) => 7,
-            Tool::Sword(Tier::Copper) => 10,
-            Tool::Sword(Tier::Iron) => 13,
-            Tool::Pickaxe(_) | Tool::Axe(_) | Tool::Hammer(_) => 5,
+            Tool::Pickaxe(Tier::Iron) => tool(40, 0, 0, 13, 20, 0, 5, 2.0),
+            Tool::Pickaxe(_) => ToolStats { scale: 0.9, ..tool(35, 0, 0, 15, 23, -1, 4, 2.0) },
+            Tool::Axe(Tier::Iron) => tool(0, 9, 0, 19, 27, 0, 5, 4.5),
+            Tool::Axe(_) => tool(0, 7, 0, 21, 30, -1, 3, 4.5),
+            Tool::Hammer(Tier::Wood) => tool(0, 0, 25, 25, 37, -1, 2, 5.5),
+            Tool::Hammer(Tier::Copper) => tool(0, 0, 35, 23, 33, -1, 4, 5.5),
+            Tool::Hammer(Tier::Iron) => tool(0, 0, 40, 20, 30, 0, 7, 5.5),
+            Tool::Sword(Tier::Wood) => sword(20, 7, 5.0),
+            Tool::Sword(Tier::Copper) => sword(21, 9, 5.5),
+            Tool::Sword(Tier::Iron) => sword(20, 12, 5.5),
         }
     }
 
@@ -113,15 +147,6 @@ impl Material {
 
 /// Stone, ores and obsidian ring instead of thudding when hit.
 pub const HARD_SOUND: [u16; 7] = [1, 6, 7, 8, 9, 25, 56];
-
-/// Hits a tool needs: 100 over power, scaled by the block's hardness.
-pub fn hardness(tile: u16) -> f32 {
-    match tile {
-        STONE | COPPER_ORE | IRON_ORE | 8 | 9 | 25 => 2.0,
-        56 => 4.0,
-        _ => 1.0,
-    }
-}
 
 pub struct Recipe {
     pub out: Out,

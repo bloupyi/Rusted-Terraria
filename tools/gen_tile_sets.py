@@ -20,6 +20,12 @@ FLAGS = {
     "tileBlockLight": "BLOCK_LIGHT",
     "tileNoSunLight": "NO_SUN_LIGHT",
     "wallLight": "WALL_LIGHT",
+    "wallHouse": "WALL_HOUSE",
+    "tileNoFail": "NO_FAIL",
+    "tileAxe": "AXE",
+    "tileHammer": "HAMMER",
+    "tileDungeon": "DUNGEON",
+    "tileRope": "ROPE",
 }
 # Integer arrays split into one set per value.
 LEVELS = {"tileLargeFrames": "LARGE_FRAMES", "wallLargeFrames": "WALL_LARGE_FRAMES"}
@@ -31,6 +37,7 @@ SETS = {
     "Ore": "ORE",
     "TruncatesWalls": "TRUNCATES_WALLS",
     "CrackedBricks": "CRACKED_BRICKS",
+    "Clouds": "CLOUDS",
 }
 CONVERSION = {"Grass": "GRASS", "MergesWithDirtInASpecialWay": "DIRT_SPECIAL"}
 

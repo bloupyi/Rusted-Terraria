@@ -181,6 +181,7 @@ impl Out<'_> {
                     color: TINT,
                     uv: [(r.x + 16) as f32, (r.y + src_y) as f32, period as f32, h as f32],
                     flags: r.layer | SPRITE_LIT,
+                    ..Default::default()
                 });
                 x += period;
             }
@@ -339,6 +340,7 @@ pub fn underworld(
                 color: [1.0; 4],
                 uv: [r.x as f32 + src[0], r.y as f32 + src[1], src[2], src[3]],
                 flags: r.layer,
+                ..Default::default()
             });
             if layer == 0 {
                 let top = pos[1] + src[3] * scale;

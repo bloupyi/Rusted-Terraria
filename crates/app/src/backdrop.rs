@@ -10,13 +10,11 @@ use formats::wld::Env;
 use render::atlas::SheetRef;
 use render::{Sprite, SPRITE_FLIP};
 
+use crate::surface::{self, Fade};
+
 pub const DAY_TICKS: f64 = 54000.0;
 pub const NIGHT_TICKS: f64 = 32400.0;
 const SKY: &str = "Background_0";
-/// Forest layers are pushed this far down, mountains `BACK_PUSH`.
-const BACK_PUSH: f32 = 30.0;
-const FRONT_PUSH: f32 = BACK_PUSH - 180.0;
-const GLOBAL_SCALE: f32 = 2.0;
 
 /// Back mountains and the three tree layers of a forest background style; -1: none.
 pub fn forest_set(style: u8) -> ([i32; 2], [i32; 3]) {
@@ -44,7 +42,7 @@ pub fn forest_set(style: u8) -> ([i32; 2], [i32; 3]) {
 }
 
 /// Extra vertical offset of a back mountain texture.
-fn mountain_offset(tex: i32) -> f32 {
+pub fn mountain_offset(tex: i32) -> f32 {
     match tex {
         59 => -550.0,
         93 | 168..=170 => -50.0,
@@ -70,34 +68,10 @@ fn mountain_offset(tex: i32) -> f32 {
     }
 }
 
-/// Textures that animate over a 2x2 grid of frames, and the ticks per frame.
-fn animated(tex: i32) -> Option<u32> {
-    match tex {
-        235 => Some(20),
-        219..=221 | 271..=273 | 302 | 303 | 305 | 307 | 309 | 311 | 313 | 315 | 317 | 326 | 337 | 338 | 341 => Some(15),
-        281 => Some(5),
-        _ => None,
-    }
-}
-
-fn name(tex: i32) -> String {
-    format!("Background_{tex}")
-}
-
 /// Every sheet the world's backgrounds may draw.
 pub fn sheets(env: &Env) -> Vec<String> {
     let mut v = vec![SKY.to_string(), "Sun".to_string(), format!("Moon_{}", env.moon_type.min(8))];
-    for &style in &env.tree_bg {
-        let (mnt, trees) = forest_set(style);
-        for t in mnt.into_iter().chain(trees).filter(|&t| t >= 0) {
-            v.push(name(t));
-            if t == 173 {
-                v.extend((251..=254).map(name));
-            }
-        }
-    }
-    v.sort();
-    v.dedup();
+    v.extend(surface::sheets(env));
     v
 }
 
@@ -168,7 +142,7 @@ pub struct Scene<'a> {
 }
 
 /// `Math.IEEERemainder`: the remainder against the nearest multiple, ties to even.
-fn ieee_rem(a: f64, b: f64) -> f64 {
+pub fn ieee_rem(a: f64, b: f64) -> f64 {
     a - b * (a / b).round_ties_even()
 }
 
@@ -180,7 +154,7 @@ fn atmosphere(s: &Scene, y: f32) -> f32 {
 }
 
 /// Sprites in screen pixels, back to front.
-pub fn sprites(s: &Scene, v: &View) -> Vec<Sprite> {
+pub fn sprites(s: &Scene, v: &View, fade: &Fade, holy_tiles: i32) -> Vec<Sprite> {
     let mut out = Vec::new();
     let surface = s.env.world_surface as f32;
     if v.y >= surface * 16.0 + 16.0 {
@@ -199,6 +173,7 @@ pub fn sprites(s: &Scene, v: &View) -> Vec<Sprite> {
                 color,
                 uv: [(r.x + src[0]) as f32, (r.y + src[1]) as f32, src[2] as f32, src[3] as f32],
                 flags: r.layer | if flip { SPRITE_FLIP } else { 0 },
+                ..Default::default()
             });
         }
     };
@@ -222,149 +197,12 @@ pub fn sprites(s: &Scene, v: &View) -> Vec<Sprite> {
         sun_and_moon(s, v, top as i32 as f32, &mut put);
     }
 
-    if v.y / 16.0 > surface + 10.0 {
-        return out;
-    }
-    let zone = forest_zone(s.env, ((v.x + v.w / 2.0) / 16.0) as i32);
-    let (mnt, trees) = forest_set(s.env.tree_bg[zone]);
-    let (first_mnt, _) = forest_set(s.env.tree_bg[0]);
-    let magic = -(v.y - 300.0) / (surface.max(1.0) * 16.0);
-    let adj = sc_adj(s, v);
-    let size = |tex: i32| s.sheets.get(&name(tex)).map(|r| (r.w, r.h));
-    let ticks = s.ticks;
-    let src = |tex: i32| -> Option<[u32; 4]> {
-        let (w, h) = size(tex)?;
-        Some(match animated(tex) {
-            Some(per) => {
-                let f = (ticks / per) % 4;
-                let (fw, fh) = (w / 2, h / 2);
-                [(f % 2) * fw, (f / 2) * fh + 2, fw, fh - 4]
-            }
-            None => [0, 0, w, h],
-        })
-    };
-    let mut layer = |tex: i32, start: f32, step: f32, loops: i32, top: f32, scale: f32, flip: bool| {
-        let drawn = if tex == 173 { 251 + (ticks / 10 % 4) as i32 } else { tex };
-        let Some(r) = src(tex) else { return };
-        for k in 0..loops {
-            let size = [r[2] as f32 * scale, r[3] as f32 * scale];
-            put(&name(drawn), [start + step * k as f32, top], r, size, tint, flip);
-        }
-    };
-    let start_of = |parallax: f64, width: i32| -> f32 {
-        (-ieee_rem(v.x as f64 * parallax, width as f64) - (width / 2) as f64) as i32 as f32
-    };
-
-    // Far mountains, then nearer mountains sized from the first zone's texture.
-    let scale = GLOBAL_SCALE;
-    let mut width = (1024.0 * scale) as i32;
-    let mut start = start_of(0.15, width);
-    let mut loops = v.w as i32 / width + 2;
-    let mut top = magic * 1300.0 + 1090.0 + adj + BACK_PUSH;
-    let mut scale_now = scale;
-    if mnt[0] >= 0 {
-        layer(mnt[0], start, width as f32, loops, top + mountain_offset(mnt[0]), scale_now, false);
-    }
-    if first_mnt[1] > -1 {
-        scale_now = 1.15 * scale;
-        width = (size(first_mnt[1]).map_or(1, |s| s.0) as f32 * scale_now) as i32;
-        start = start_of(0.2, width);
-        loops = v.w as i32 / width + 2 + (first_mnt[1] == 172) as i32;
-        top = magic * 1400.0 + 1260.0 + adj + BACK_PUSH;
-    }
-    if mnt[1] > -1 {
-        layer(mnt[1], start, width as f32, loops, top + mountain_offset(mnt[1]), scale_now, false);
-    }
-
-    // Three tree layers, each with its own scale, parallax and height.
-    let push = FRONT_PUSH;
-    if trees[0] >= 0 {
-        let (mut sc, mut par) = (1.25, 0.4);
-        match trees[0] {
-            91 => (sc, par) = (1.2, 0.27000001072883606),
-            173 => (sc, par) = (1.3, 0.25),
-            178 => (sc, par) = (1.2, 0.30000001192092896),
-            184 => (sc, par) = (1.2, 0.25),
-            282 => sc = 1.4,
-            _ => {}
-        }
-        let sc = sc * scale;
-        let w = (size(trees[0]).map_or(0, |s| s.0) as f32 * sc) as i32;
-        let mut top = match trees[0] {
-            91 | 173 | 184 => magic * 1600.0 + 1400.0,
-            _ => magic * 1800.0 + 1500.0,
-        } + adj
-            + push;
-        top += match trees[0] {
-            50 => -50.0,
-            53 => -100.0,
-            91 | 173 => 200.0,
-            178 => 75.0,
-            330 | 335 => -150.0,
-            343 => -300.0,
-            _ => 0.0,
-        };
-        if w > 0 {
-            layer(trees[0], start_of(par, w), w as f32, v.w as i32 / w + 2, top, sc, false);
-        }
-    }
-    if trees[1] >= 0 {
-        let sc = 1.31 * scale;
-        let w = ((size(trees[1]).map_or(0, |s| s.0) as f32 * sc) as i32).max(1);
-        let mut top = match trees[1] {
-            329 => magic * 1900.0 + 1600.0,
-            334 => magic * 1900.0 + 1650.0,
-            _ => magic * 1950.0 + 1750.0,
-        } + adj
-            + push;
-        top += match trees[1] {
-            51 => -50.0,
-            54 => -100.0,
-            329 | 334 => -150.0,
-            342 => -300.0,
-            _ => 0.0,
-        };
-        let flip = matches!(trees[1], 51 | 54);
-        layer(trees[1], start_of(0.43, w), w as f32, v.w as i32 / w + 2, top, sc, flip);
-    }
-    if trees[2] >= 0 {
-        let (sc, par) = if trees[0] == 91 { (1.3, 0.42) } else { (1.34, 0.49) };
-        let sc = sc * scale;
-        let w = ((size(trees[2]).map_or(0, |s| s.0) as f32 * sc) as i32).max(1);
-        let mut top = match trees[2] {
-            328 => magic * 2600.0 + 2300.0,
-            333 => magic * 2800.0 + 2550.0,
-            _ => magic * 2100.0 + 2000.0,
-        } + adj
-            + push;
-        top += match trees[2] {
-            52 => -50.0,
-            55 => -100.0,
-            92 => 150.0,
-            328 | 333 => -150.0,
-            341 => -50.0,
-            _ => 0.0,
-        };
-        layer(trees[2], start_of(par, w), w as f32, v.w as i32 / w + 2, top, sc, false);
-    }
+    surface::layers(s, v, fade, holy_tiles, tint, &mut out);
     out
 }
 
-/// Which of the four forest zones holds tile column `x`.
-pub fn forest_zone(env: &Env, x: i32) -> usize {
-    if x < env.tree_x[0] {
-        0
-    } else if x < env.tree_x[1] {
-        1
-    } else if x >= env.tree_x[2] {
-        3
-    } else {
-        2
-    }
-}
-
 /// Lifts the backgrounds as the view goes down, more on small worlds.
-fn sc_adj(s: &Scene, v: &View) -> f32 {
+pub fn sc_adj(s: &Scene, v: &View) -> f32 {
     let mut n = s.env.world_surface as f32 * 16.0 / (v.y + v.h);
     let m = ((s.height as f32 * 0.15 * 16.0 - v.y).max(0.0)) * 0.00025;
     n *= 0.45 - m * m;
@@ -428,11 +266,5 @@ mod tests {
         assert_eq!(colors(true, 27000.0, false).sky, [255.0; 3]);
         assert_eq!(colors(false, 16200.0, false).sky, [5.0; 3]);
         assert_eq!(tile_light([255.0; 3]), [1.0; 3]);
-    }
-
-    #[test]
-    fn zones_split_at_tree_x() {
-        let env = Env { tree_x: [100, 200, 300], ..Env::default() };
-        assert_eq!([50, 150, 250, 350].map(|x| forest_zone(&env, x)), [0, 1, 2, 3]);
     }
 }

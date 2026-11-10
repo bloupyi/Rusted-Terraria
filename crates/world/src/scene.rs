@@ -12,12 +12,18 @@ const BEACH: i64 = 380;
 pub struct Zones {
     pub snow_tiles: i32,
     pub jungle_tiles: i32,
+    /// Hallow, corruption and crimson counts after cancelling each other.
+    pub holy_tiles: i32,
+    pub evil_tiles: i32,
+    pub blood_tiles: i32,
+    pub honey_tiles: i32,
     pub snow: bool,
     pub jungle: bool,
     pub corrupt: bool,
     pub crimson: bool,
     pub hallow: bool,
     pub glowshroom: bool,
+    pub desert: bool,
     pub beach: bool,
 }
 
@@ -27,12 +33,18 @@ pub fn scan(world: &World, env: &Env, x: i64, y: i64) -> Zones {
     // The game clamps both coordinates against the world width.
     let (x, y) = (x.clamp(0, w - 1), y.clamp(0, w - 1));
     let (x0, y0) = (x - SCAN.0 / 2, y - SCAN.1 / 2);
+    let ocean = (env.world_surface + env.rock_layer) / 2.0 + 40.0;
+    let ocean_depths = |i: i64, j: i64| j as f64 <= ocean && (i < BEACH || i > w - BEACH);
     let mut n = [0i32; 1024];
+    let mut ocean_sand = 0;
     for i in x0.clamp(0, w)..(x0 + SCAN.0).clamp(0, w) {
         for j in y0.clamp(0, h)..(y0 + SCAN.1).clamp(0, h) {
             let t = world.tile(i, j);
             if t != NO_TILE && (t as usize) < n.len() {
                 n[t as usize] += 1;
+                if matches!(t, 53 | 397 | 396 | 400 | 403 | 401) && ocean_depths(i, j) {
+                    ocean_sand += 1;
+                }
             }
         }
     }
@@ -44,18 +56,24 @@ pub fn scan(world: &World, env: &Env, x: i64, y: i64) -> Zones {
     let evil = (sum(&[23, 661, 24, 25, 32, 112, 163, 400, 398]) + sunflowers).max(0);
     let blood = (sum(&[199, 662, 201, 203, 200, 401, 399, 234, 352]) + sunflowers).max(0);
     let mushroom = sum(&[70, 71, 72, 528]);
-    let ocean = (env.world_surface + env.rock_layer) / 2.0 + 40.0;
+    let sand = sum(&[53, 112, 116, 234, 397, 398, 402, 399, 396, 400, 403, 401]);
     let underworld = y > h - 200;
+    let (holy, evil, blood) = ((holy - evil - blood).max(0), (evil - holy).max(0), (blood - holy).max(0));
     Zones {
         snow_tiles: snow,
         jungle_tiles: jungle,
+        holy_tiles: holy,
+        evil_tiles: evil,
+        blood_tiles: blood,
+        honey_tiles: n[229],
         snow: snow >= 1500,
         jungle: jungle >= 140 && !underworld,
-        corrupt: evil - holy >= 300,
-        crimson: blood - holy >= 300,
-        hallow: holy - evil - blood >= 125,
+        corrupt: evil >= 300,
+        crimson: blood >= 300,
+        hallow: holy >= 125,
         glowshroom: mushroom >= 100,
-        beach: y as f64 <= ocean && (x < BEACH || x > w - BEACH),
+        desert: (sand - ocean_sand).max(0) >= 1500,
+        beach: ocean_depths(x, y),
     }
 }
 
