@@ -58,19 +58,40 @@ pub const COPPER_ORE: u16 = 7;
 pub const IRON_ORE: u16 = 6;
 pub const DEMONITE_ORE: u16 = 22;
 
-/// Seconds between two uses of a tool or weapon.
-pub const USE_TIME: f32 = 0.25;
+/// Mining stats of a tool, from the game's item defaults.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+pub struct ToolStats {
+    pub pick: i32,
+    pub axe: i32,
+    pub hammer: i32,
+    /// Ticks between two hits.
+    pub use_time: i32,
+    /// Ticks of one swing.
+    pub use_animation: i32,
+    /// Extra reach in tiles.
+    pub tile_boost: i32,
+}
 
 impl Tool {
-    /// Mining or chopping power per use, out of 100 for a soft block.
-    pub fn power(self) -> f32 {
-        let tier = match self {
-            Tool::Pickaxe(t) | Tool::Axe(t) | Tool::Hammer(t) | Tool::Sword(t) => t,
+    /// Wooden tiers that the game lacks use the copper ones.
+    pub fn stats(self) -> ToolStats {
+        let s = |pick, axe, hammer, use_time, use_animation, tile_boost| ToolStats {
+            pick,
+            axe,
+            hammer,
+            use_time,
+            use_animation,
+            tile_boost,
         };
-        match tier {
-            Tier::Wood => 25.0,
-            Tier::Copper => 35.0,
-            Tier::Iron => 40.0,
+        match self {
+            Tool::Pickaxe(Tier::Iron) => s(40, 0, 0, 13, 20, 0),
+            Tool::Pickaxe(_) => s(35, 0, 0, 15, 23, -1),
+            Tool::Axe(Tier::Iron) => s(0, 9, 0, 19, 27, 0),
+            Tool::Axe(_) => s(0, 7, 0, 21, 30, -1),
+            Tool::Hammer(Tier::Wood) => s(0, 0, 25, 25, 37, -1),
+            Tool::Hammer(Tier::Copper) => s(0, 0, 35, 23, 33, -1),
+            Tool::Hammer(Tier::Iron) => s(0, 0, 40, 20, 30, 0),
+            Tool::Sword(_) => ToolStats::default(),
         }
     }
 
@@ -113,15 +134,6 @@ impl Material {
 
 /// Stone, ores and obsidian ring instead of thudding when hit.
 pub const HARD_SOUND: [u16; 7] = [1, 6, 7, 8, 9, 25, 56];
-
-/// Hits a tool needs: 100 over power, scaled by the block's hardness.
-pub fn hardness(tile: u16) -> f32 {
-    match tile {
-        STONE | COPPER_ORE | IRON_ORE | 8 | 9 | 25 => 2.0,
-        56 => 4.0,
-        _ => 1.0,
-    }
-}
 
 pub struct Recipe {
     pub out: Out,

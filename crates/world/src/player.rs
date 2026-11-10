@@ -7,6 +7,9 @@ use crate::World;
 
 pub const WIDTH: f32 = 20.0;
 pub const HEIGHT: f32 = 42.0;
+/// Tiles of reach beyond the player's own, across and up or down.
+pub const TILE_RANGE_X: i32 = 5;
+pub const TILE_RANGE_Y: i32 = 3;
 const SIZE: [i32; 2] = [WIDTH as i32, HEIGHT as i32];
 const RUN_ACCEL: f32 = 0.08;
 const MAX_RUN: f32 = 3.0;

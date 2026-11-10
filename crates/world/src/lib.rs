@@ -15,6 +15,7 @@ pub mod draw;
 pub mod frame;
 pub mod light;
 pub mod liquid;
+pub mod mining;
 pub mod mob;
 pub mod player;
 pub mod scene;

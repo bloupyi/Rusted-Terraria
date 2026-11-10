@@ -6,12 +6,13 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::inventory::{Inventory, Item};
-use crate::items::{self, Furniture, Material, Out, Tool, RECIPES, USE_TIME};
+use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::net::{MobState, Msg};
 use crate::{backdrop, cave};
 use formats::wld::Env;
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
+use world::mining::{self, HitTiles, Place, Target};
 use world::mob::{Kind, Mob};
 use world::player::{self, Input, Player};
 use world::{Liquid, World, CHUNK, NO_TILE};
@@ -81,7 +82,7 @@ pub fn sprite_sheets() -> Vec<String> {
     // Leaf styles the trees of `world::draw::tree_foliage` use.
     v.extend((0..=20).flat_map(|s| [format!("Tree_Tops_{s}"), format!("Tree_Branches_{s}")]));
     v.extend(
-        ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22"]
+        ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
     v.extend(items::sheets());
@@ -132,10 +133,13 @@ pub struct Game {
     pub hp: i32,
     invulnerable: f32,
     attack_cd: f32,
-    /// Seconds before the held tool can be used again.
-    use_cd: f32,
-    /// Tile being mined and how far, out of 100.
-    mining: Option<(i64, i64, f32)>,
+    /// Tile the held tool is aimed at this frame.
+    use_target: Option<(i64, i64)>,
+    /// Ticks left in the swing and before the next hit.
+    item_animation: i32,
+    item_time: i32,
+    /// Damage on recently hit tiles and walls.
+    pub hits: HitTiles,
     spawn_acc: f32,
     spawn_x: u32,
     rng: u64,
@@ -201,8 +205,10 @@ impl Game {
             hp: MAX_HP,
             invulnerable: 0.0,
             attack_cd: 0.0,
-            use_cd: 0.0,
-            mining: None,
+            use_target: None,
+            item_animation: 0,
+            item_time: 0,
+            hits: HitTiles::default(),
             spawn_acc: 0.0,
             spawn_x,
             rng: 0x9E37_79B9_7F4A_7C15,
@@ -230,9 +236,11 @@ impl Game {
         self.time = (self.time + dt * time_scale / DAY_LENGTH).fract();
         // The game's 60 Hz tick; a long frame catches up at most a few ticks.
         self.tick_acc = (self.tick_acc + dt * 60.0).min(4.0);
+        let target = self.use_target.take();
         while self.tick_acc >= 1.0 {
             self.tick_acc -= 1.0;
             self.wind.tick(self.env.wind);
+            self.use_item(target);
             if let Some(input) = input {
                 self.player.tick(&self.world, input);
             }
@@ -277,7 +285,6 @@ impl Game {
     fn update_mobs(&mut self, dt: f32, fight: bool) {
         self.invulnerable -= dt;
         self.attack_cd -= dt;
-        self.use_cd -= dt;
         self.spawn_acc += dt;
         if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
             self.spawn_acc = 0.0;
@@ -641,62 +648,150 @@ impl Game {
         self.world.header.frame_important.get(t as usize).copied().unwrap_or(false)
     }
 
-    /// Breaks the block or object at the tile; with the free camera nothing drops.
-    /// With the free camera anything breaks at once and drops nothing. Otherwise
-    /// blocks need a pickaxe, trees an axe and walls a hammer, over several uses;
-    /// objects and plants come off by hand.
+    /// Aims the held tool at the tile for this frame; with the free camera the
+    /// tile breaks at once and drops nothing.
     pub fn dig(&mut self, tx: i64, ty: i64, free: bool) {
-        if !self.in_reach(tx, ty, free) {
-            return;
-        }
         if free {
-            self.break_tile(tx, ty, false);
+            if self.world.in_bounds(tx, ty) {
+                self.break_tile(tx, ty, false);
+            }
             return;
         }
-        if self.use_cd > 0.0 {
-            return;
+        self.use_target = Some((tx, ty));
+    }
+
+    fn held_tool(&self) -> ToolStats {
+        match self.inventory.selected().map(|s| s.item) {
+            Some(Item::Tool(t)) => t.stats(),
+            _ => ToolStats::default(),
         }
-        let tool = match self.inventory.selected().map(|s| s.item) {
-            Some(Item::Tool(t)) => Some(t),
-            _ => None,
-        };
-        let t = self.world.tile(tx, ty);
-        let power = match (t, tool) {
-            (NO_TILE, Some(Tool::Hammer(h))) if self.world.wall(tx, ty) != 0 => Tool::Hammer(h).power() / 2.0,
-            (NO_TILE, _) => return,
-            (TREE, Some(Tool::Axe(a))) => Tool::Axe(a).power(),
-            (TREE, _) => return,
-            (t, _) if self.important(t) => 100.0,
-            (t, Some(Tool::Pickaxe(p))) => Tool::Pickaxe(p).power() / items::hardness(t),
-            _ => return,
-        };
-        self.use_cd = USE_TIME;
-        let done = match self.mining {
-            Some((x, y, p)) if (x, y) == (tx, ty) => p + power,
-            _ => power,
-        };
-        if done < 100.0 {
-            self.mining = Some((tx, ty, done));
-            self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
-            return;
+    }
+
+    /// One tick of the held tool, as the game's `ItemCheck` counts it: a swing
+    /// starts while the button is held, and a hit lands whenever the item time
+    /// has run out during a swing.
+    fn use_item(&mut self, target: Option<(i64, i64)>) {
+        let s = self.held_tool();
+        let held = target.is_some() && s.use_animation > 0;
+        if held && self.item_animation == 0 {
+            self.item_animation = s.use_animation;
         }
-        self.mining = None;
-        if t == NO_TILE {
-            self.world.set_wall(tx as u32, ty as u32, 0);
-            self.send_tile(tx as u32, ty as u32);
+        if self.item_animation > 0 {
+            self.item_animation -= 1;
+        }
+        if self.item_time > 0 {
+            self.item_time -= 1;
+        }
+        let Some((x, y)) = target else { return };
+        if held && self.item_time == 0 && self.item_animation > 0 && self.in_tool_range(x, y, s.tile_boost) {
+            self.hit_with(s, x, y);
+        }
+    }
+
+    /// `IsInTileInteractionRange`: a box of tiles around the player's.
+    fn in_tool_range(&self, x: i64, y: i64, boost: i32) -> bool {
+        let (rx, ry) = ((player::TILE_RANGE_X + boost) as i64, (player::TILE_RANGE_Y + boost) as i64);
+        let p = &self.player;
+        let lx = (p.x / 16.0) as i64 - rx;
+        let hx = ((p.x + player::WIDTH) / 16.0).ceil() as i64 - 1 + rx;
+        let ly = (p.y / 16.0) as i64 - ry;
+        let hy = ((p.y + player::HEIGHT) / 16.0).ceil() as i64 - 1 + ry;
+        self.world.in_bounds(x, y) && (lx..=hx).contains(&x) && (ly..=hy).contains(&y)
+    }
+
+    /// `ItemCheck_UseMiningTools`: pickaxes on blocks and objects, axes on
+    /// trees, hammers on walls with nothing in front.
+    fn hit_with(&mut self, s: ToolStats, x: i64, y: i64) {
+        use world::tile_sets::{AXE, HAMMER, NO_FAIL};
+        let t = self.world.tile(x, y);
+        let mut walls = true;
+        if t != NO_TILE {
+            let (axe_tile, hammer_tile) = (AXE.has(t), HAMMER.has(t));
+            if (s.pick > 0 && !axe_tile && !hammer_tile) || (s.axe > 0 && axe_tile) || (s.hammer > 0 && hammer_tile) {
+                walls = false;
+            }
+            let base = if NO_FAIL.has(t) { 100 } else { 0 };
+            if hammer_tile {
+                walls = false;
+                if s.hammer > 0 {
+                    // Altars need a hammer of 80 in hardmode.
+                    self.damage_tile(x, y, if t == 26 { 0 } else { base + s.hammer });
+                    self.item_time = s.use_time;
+                }
+            } else if axe_tile {
+                if s.axe > 0 {
+                    let axe = if t == 80 { s.axe * 3 } else { s.axe };
+                    self.damage_tile(x, y, base + (axe as f32 * 1.2) as i32);
+                    self.item_time = s.use_time;
+                }
+            } else if s.pick > 0 {
+                let at = Place {
+                    x,
+                    y,
+                    world_width: self.world.width,
+                    world_surface: self.env.world_surface,
+                    underworld: self.world.height as i64 - 200,
+                };
+                let mut damage = mining::pick_damage(t, self.world.frame(x, y).1, s.pick, &at);
+                if mining::transforms(t) && self.hits.would_have(x, y, Target::Tile, damage) >= 100 {
+                    damage = 0;
+                }
+                self.damage_tile(x, y, damage);
+            }
+            if s.pick > 0 {
+                self.item_time = s.use_time;
+            }
+        }
+        if walls && t == NO_TILE && s.hammer > 0 && self.world.wall(x, y) != 0 && self.can_smash_wall(x, y) {
+            let total = self.hits.add(x, y, Target::Wall, (s.hammer as f32 * 1.5) as i32);
+            if total >= 100 {
+                self.hits.clear(x, y, Target::Wall);
+                self.world.set_wall(x as u32, y as u32, 0);
+                self.send_tile(x as u32, y as u32);
+            }
             self.sfx.push(Sfx::Dig);
-        } else {
-            self.break_tile(tx, ty, true);
+            self.prune_hits();
+            self.item_time = s.use_time / 2;
         }
+    }
+
+    /// `CanPlayerSmashWall`: a house wall, or a natural one at an edge.
+    fn can_smash_wall(&self, x: i64, y: i64) -> bool {
+        use world::tile_sets::WALL_HOUSE;
+        let w = &self.world;
+        WALL_HOUSE.has(w.wall(x, y))
+            || (x - 1..x + 2).any(|i| (y - 1..y + 2).any(|j| w.wall(i, j) == 0 || WALL_HOUSE.has(w.wall(i, j))))
+    }
+
+    /// Adds damage to a tile: 100 breaks it, less leaves grass and moss bare.
+    fn damage_tile(&mut self, x: i64, y: i64, damage: i32) {
+        let t = self.world.tile(x, y);
+        if self.hits.add(x, y, Target::Tile, damage) >= 100 {
+            self.hits.clear(x, y, Target::Tile);
+            self.break_tile(x, y, true);
+        } else {
+            let bare = mining::after_failed_hit(t);
+            if bare != t {
+                self.world.set_tile(x as u32, y as u32, bare, -1, -1);
+                self.send_tile(x as u32, y as u32);
+            }
+            self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
+        }
+        if damage != 0 {
+            self.prune_hits();
+        }
+    }
+
+    fn prune_hits(&mut self) {
+        let w = &self.world;
+        self.hits.prune(|h| match h.target {
+            Target::Tile => w.tile(h.x, h.y) == NO_TILE,
+            Target::Wall => w.wall(h.x, h.y) == 0,
+        });
     }
 
     fn send_tile(&mut self, x: u32, y: u32) {
         self.outbox.push(Msg::Tile { x, y, cell: self.world.cell_data(x, y) });
-    }
-
-    /// Mining progress on a tile, 0 to 1, for the crack overlay.
-    pub fn mining(&self) -> Option<(i64, i64, f32)> {
-        self.mining.map(|(x, y, p)| (x, y, p / 100.0))
     }
 
     /// Removes a block, a whole object or a whole tree, then whatever rested on it.
@@ -1070,13 +1165,64 @@ impl Game {
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
         }
-        if let Some((tx, ty, p)) = self.mining() {
-            over.push(Sprite::flat([tx as f32 * 16.0, ty as f32 * 16.0], [16.0, 16.0], [0.0, 0.0, 0.0, p * 0.6]));
-        }
-        if let Some((tx, ty)) = cursor.filter(|&(x, y)| self.in_reach(x, y, free)) {
+        self.crack_sprites(&mut over);
+        let tool = self.held_tool();
+        let reach = |x, y| {
+            if free || tool.use_animation == 0 {
+                self.in_reach(x, y, free)
+            } else {
+                self.in_tool_range(x, y, tool.tile_boost)
+            }
+        };
+        if let Some((tx, ty)) = cursor.filter(|&(x, y)| reach(x, y)) {
             over.push(Sprite::flat([tx as f32 * 16.0, ty as f32 * 16.0], [16.0, 16.0], [0.25, 0.25, 0.25, 0.25]));
         }
         (under, over)
+    }
+
+    /// `DrawTileCracks`: four stages of cracks from 20 damage, on full blocks and tree trunks.
+    fn crack_sprites(&self, out: &mut Vec<Sprite>) {
+        use world::tile_sets::{SOLID, SOLID_TOP};
+        let Some(sheet) = self.sheet("TileCracks") else { return };
+        for h in self.hits.iter().filter(|h| h.damage >= 20) {
+            let t = self.world.tile(h.x, h.y);
+            let t = match h.target {
+                Target::Tile if t == NO_TILE => continue,
+                Target::Wall if self.world.wall(h.x, h.y) == 0 => continue,
+                // Behind an empty cell the game reads type 0, a full block.
+                Target::Wall if t == NO_TILE => 0,
+                _ => t,
+            };
+            let (fx, fy) = self.world.frame(h.x, h.y);
+            let trunk = t == TREE || t == 72;
+            let shown = if t == 10 {
+                false
+            } else if SOLID.has(t) && !SOLID_TOP.has(t) {
+                true
+            } else if t == TREE {
+                let (a, b) = (fx / 22, fy / 22);
+                b < 9
+                    && (!(a == 1 || a == 2) || !(6..=8).contains(&b))
+                    && (a != 3 || b > 2)
+                    && (a != 4 || !(3..=5).contains(&b))
+                    && (a != 5 || !(6..=8).contains(&b))
+            } else {
+                t == 72 && fx <= 34
+            };
+            let shape = (self.world.flags(h.x, h.y) & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT;
+            if !shown || (h.target == Target::Tile && shape != 0) {
+                continue;
+            }
+            let row = match h.damage {
+                80.. => 3,
+                60.. => 2,
+                40.. => 1,
+                _ => 0,
+            };
+            let col = if trunk { 4 + h.crack as u32 / 2 } else { h.crack as u32 };
+            let pos = [h.x as f32 * 16.0, h.y as f32 * 16.0];
+            out.push(Sprite::sheet(pos, sheet, [col * 18, row * 18, 16, 16], SPRITE_LIT));
+        }
     }
 
     /// Leafy tops and branches, drawn from the tree's top and branch cells.
@@ -1381,33 +1527,42 @@ mod tests {
         g.update_drops(0.0);
     }
 
-    /// Hits a tile until it breaks; returns the number of hits.
+    /// One tick with the tool held on a tile.
+    fn swing(g: &mut Game, x: i64, y: i64) {
+        g.dig(x, y, false);
+        let target = g.use_target.take();
+        g.use_item(target);
+    }
+
+    /// Holds the tool on a tile until it breaks; returns the ticks it took.
     fn mine(g: &mut Game, x: i64, y: i64) -> u32 {
-        let mut hits = 0;
+        let mut ticks = 0;
         while g.world.tile(x, y) != NO_TILE {
-            g.use_cd = 0.0;
-            g.dig(x, y, false);
-            hits += 1;
-            assert!(hits < 50, "never breaks");
+            swing(g, x, y);
+            ticks += 1;
+            assert!(ticks < 600, "never breaks");
         }
-        hits
+        ticks
     }
 
     #[test]
-    fn tools_mine_by_power_and_hardness() {
+    fn tools_mine_at_the_game_rate() {
         let mut g = game();
         g.inventory.selected = 0; // sword: no mining
-        g.dig(16, 20, false);
-        assert!(g.mining().is_none());
-        g.inventory.selected = 1; // copper pickaxe: 35 / 2 per hit on stone
-        g.dig(16, 20, false);
-        let (_, _, p) = g.mining().unwrap();
-        assert!((p - 0.175).abs() < 1e-4);
-        g.dig(16, 20, false);
-        assert_eq!(g.mining().unwrap().2, p, "waits for the use time");
-        assert_eq!(mine(&mut g, 16, 20), 5);
+        swing(&mut g, 16, 20);
+        assert_eq!(g.hits.damage(16, 20, Target::Tile), 0);
+        g.inventory.selected = 1; // copper pickaxe: 35 on stone every 15 ticks
+        swing(&mut g, 16, 20);
+        assert_eq!(g.hits.damage(16, 20, Target::Tile), 35);
+        swing(&mut g, 16, 20);
+        assert_eq!(g.hits.damage(16, 20, Target::Tile), 35, "waits for the use time");
+        assert_eq!(mine(&mut g, 16, 20), 29, "hits on ticks 0, 15 and 30");
         g.inventory.slots[1] = Some(Stack { item: Item::Tool(Tool::Pickaxe(Tier::Iron)), count: 1 });
-        assert_eq!(mine(&mut g, 17, 20), 5, "40 / 2: still five hits");
+        g.item_animation = 0;
+        g.item_time = 0;
+        assert_eq!(mine(&mut g, 17, 20), 27, "40 a hit, the third on tick 26 after the swing restarts");
+        swing(&mut g, 22, 20);
+        assert_eq!(g.hits.damage(22, 20, Target::Tile), 0, "out of reach");
     }
 
     #[test]
@@ -1434,11 +1589,12 @@ mod tests {
     #[test]
     fn objects_drop_and_place_again() {
         let mut g = game();
-        g.dig(11, 19, false);
+        g.inventory.selected = 1;
+        mine(&mut g, 11, 19);
         assert_eq!((g.world.tile(10, 19), g.world.tile(11, 19)), (NO_TILE, NO_TILE));
         assert_eq!(g.world.tile(12, 19), BENCH, "the bench beside stays");
-        g.use_cd = 0.0;
-        g.dig(20, 19, false);
+        (g.item_animation, g.item_time) = (0, 0);
+        assert_eq!(mine(&mut g, 20, 19), 1, "torches go in one hit");
         pick_up(&mut g);
         let objects: Vec<_> =
             g.inventory.slots.iter().flatten().filter(|s| matches!(s.item, Item::Object(_))).collect();
