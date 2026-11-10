@@ -20,12 +20,16 @@ const LIFE_PER_HEART: i32 = 20;
 pub struct Fonts {
     pub item_stack: Option<Font>,
     pub mouse_text: Option<Font>,
+    pub combat_text: Option<Font>,
+    pub combat_crit: Option<Font>,
 }
 
 #[derive(Clone, Copy)]
 pub enum FontId {
     ItemStack,
     MouseText,
+    CombatText,
+    CombatCrit,
 }
 
 impl FontId {
@@ -33,6 +37,8 @@ impl FontId {
         match self {
             FontId::ItemStack => "Item_Stack",
             FontId::MouseText => "Mouse_Text",
+            FontId::CombatText => "Combat_Text",
+            FontId::CombatCrit => "Combat_Crit",
         }
     }
 }
@@ -55,7 +61,12 @@ impl Fonts {
             }
             Some(font)
         };
-        let fonts = Fonts { item_stack: read(FontId::ItemStack), mouse_text: read(FontId::MouseText) };
+        let fonts = Fonts {
+            item_stack: read(FontId::ItemStack),
+            mouse_text: read(FontId::MouseText),
+            combat_text: read(FontId::CombatText),
+            combat_crit: read(FontId::CombatCrit),
+        };
         (fonts, pages)
     }
 
@@ -63,6 +74,8 @@ impl Fonts {
         match id {
             FontId::ItemStack => self.item_stack.as_ref(),
             FontId::MouseText => self.mouse_text.as_ref(),
+            FontId::CombatText => self.combat_text.as_ref(),
+            FontId::CombatCrit => self.combat_crit.as_ref(),
         }
     }
 }
@@ -278,14 +291,32 @@ impl Painter<'_> {
     }
 
     fn glyphs(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4]) {
+        self.string(id, text, p, [0.0; 2], scale, 0.0, color);
+    }
+
+    /// `DrawString` with an origin (in text pixels) placed at `p`, scaled and turned about it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn string(
+        &mut self,
+        id: FontId,
+        text: &str,
+        p: [f32; 2],
+        origin: [f32; 2],
+        scale: f32,
+        rot: f32,
+        color: [f32; 4],
+    ) {
         let Some(font) = self.fonts.get(id) else { return };
         for ([x, y], g) in font.layout(text) {
             let Some(sheet) = self.sheets.get(&page_sheet(id, g.page)) else { continue };
             let [gx, gy, gw, gh] = g.rect.map(|v| v.max(0) as u32);
             let mut s = Sprite::sheet([0.0; 2], sheet, [gx, gy, gw, gh], 0);
-            s.pos = self.world([p[0] + x * scale, p[1] + y * scale]);
+            let at = [p[0] + (x - origin[0]) * scale, p[1] + (y - origin[1]) * scale];
+            s.pos = self.world(at);
             s.size = [gw as f32 * scale * self.unit, gh as f32 * scale * self.unit];
             s.color = color;
+            s.rot = rot;
+            s.pivot = [(p[0] - at[0]) * self.unit, (p[1] - at[1]) * self.unit];
             self.out.push(s);
         }
     }

@@ -1,6 +1,7 @@
 mod audio;
 mod backdrop;
 mod cave;
+mod combat_text;
 mod game;
 mod inventory;
 mod item_ids;
@@ -179,6 +180,25 @@ impl App {
             unit: 1.0 / z,
             out: Vec::new(),
         };
+        // `DrawCombatText`, in the world: four dim copies a pixel away, then the number.
+        let mut world = ui::Painter { sheets: p.sheets, fonts: p.fonts, origin: [0.0; 2], unit: 1.0, out: Vec::new() };
+        for t in &game.combat_text {
+            let font = if t.crit { ui::FontId::CombatCrit } else { ui::FontId::CombatText };
+            let [w, h] = world.measure(font, &t.text);
+            let k = t.scale * t.alpha;
+            let [r, g, b, a] = t.color.map(|v| v as f32 / 255.0 * k);
+            for (dx, dy, c) in [
+                (-1.0, 0.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (1.0, 0.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, -1.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, 1.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, 0.0, [r, g, b, a]),
+            ] {
+                let at = [t.center[0] + dx, t.center[1] + dy];
+                world.string(font, &t.text, at, [w / 2.0, h / 2.0], t.scale, t.rotation, c);
+            }
+        }
+        p.out = world.out;
         let inv = &game.inventory;
         let icon = |p: &mut ui::Painter, item: Item, [cx, cy]: [f32; 2], s: f32| {
             let side = game.item_size(item).min(ui::ICON_LIMIT) * s;
