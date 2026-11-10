@@ -290,6 +290,28 @@ impl Painter<'_> {
         self.out.push(s);
     }
 
+    /// `src` of a sheet stretched over `size` at `p`.
+    pub fn region(&mut self, name: &str, src: [u32; 4], p: [f32; 2], size: [f32; 2], color: [f32; 4]) {
+        let Some(sheet) = self.sheets.get(name) else { return };
+        let mut s = Sprite::sheet(self.world(p), sheet, src, 0);
+        s.size = [size[0] * self.unit, size[1] * self.unit];
+        s.color = color;
+        self.out.push(s);
+    }
+
+    /// `Utils.DrawInvBG`: `Inventory_Back13` cut in nine, its 10 px corners kept.
+    pub fn inv_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        let Some(&SheetRef { w: tw, h: th, .. }) = self.sheets.get("Inventory_Back13") else { return };
+        let (w, h) = (w.max(20.0), h.max(20.0));
+        let cols = [(0, x, 10.0), (10, x + 10.0, w - 20.0), (tw - 10, x + w - 10.0, 10.0)];
+        let rows = [(0, y, 10.0), (10, y + 10.0, h - 20.0), (th - 10, y + h - 10.0, 10.0)];
+        for (sy, py, ph) in rows {
+            for (sx, px, pw) in cols {
+                self.region("Inventory_Back13", [sx, sy, 10, 10], [px, py], [pw, ph], color);
+            }
+        }
+    }
+
     fn glyphs(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4]) {
         self.string(id, text, p, [0.0; 2], scale, 0.0, color);
     }
@@ -416,19 +438,42 @@ impl Hud {
         self.slot_item(p, cursor, self.cursor_scale(), count, icon);
     }
 
-    /// `MouseTextInner` for a plain line: beside the cursor, kept on screen.
-    pub fn draw_mouse_text(&self, p: &mut Painter, cursor: [f32; 2], screen: [f32; 2], text: &str, carrying: bool) {
-        let [w, h] = p.measure(FontId::MouseText, text);
-        let mut x = cursor[0] as i32 + 14 + if carrying { 34 } else { 0 };
-        let mut y = cursor[1] as i32 + 14;
-        if x as f32 + w + 40.0 > screen[0] {
-            x = (screen[0] - w - 40.0) as i32;
+    /// `MouseText_DrawItemTooltip` with the opaque box the game draws by default.
+    pub fn draw_item_tooltip(
+        &self,
+        p: &mut Painter,
+        cursor: [f32; 2],
+        screen: [f32; 2],
+        lines: &[(String, [u8; 3])],
+        carrying: bool,
+    ) {
+        let sizes: Vec<[f32; 2]> = lines.iter().map(|l| p.measure(FontId::MouseText, &l.0)).collect();
+        let w = sizes.iter().map(|s| s[0]).fold(0.0, f32::max);
+        let h: f32 = sizes.iter().map(|s| s[1]).sum();
+        let mut x = cursor[0] as i32 + 14 + if carrying { 34 } else { 0 } + 6 + 8;
+        let mut y = cursor[1] as i32 + 14 + 6 + 2;
+        if x as f32 + w + 18.0 > screen[0] {
+            x = (screen[0] - w - 18.0) as i32;
         }
-        if y as f32 + h + 40.0 > screen[1] {
-            y = (screen[1] - h - 40.0) as i32;
+        if y as f32 + h + 18.0 > screen[1] {
+            y = (screen[1] - h - 18.0) as i32;
         }
+        let (x, y) = (x as f32, y as f32);
+        let k = 0.925 / 255.0;
+        p.inv_bg(
+            x - 14.0,
+            y - 9.0,
+            (w as i32 + 28) as f32,
+            (h as i32 + 13) as f32,
+            [23.0 * k, 25.0 * k, 81.0 * k, 0.925],
+        );
         let c = self.text_color as f32 / 255.0;
-        p.text(FontId::MouseText, text, [x as f32, y as f32], 1.0, gray(c, c), 2.0);
+        let mut dy = 0.0;
+        for ((text, rgb), size) in lines.iter().zip(&sizes) {
+            let color = [rgb[0] as f32 * c / 255.0, rgb[1] as f32 * c / 255.0, rgb[2] as f32 * c / 255.0, c];
+            p.text(FontId::MouseText, text, [x, y + dy], 1.0, color, 2.0);
+            dy += size[1].floor();
+        }
     }
 
     /// `ClassicPlayerResourcesDisplaySet.DrawLife` for up to 400 life (no golden hearts).

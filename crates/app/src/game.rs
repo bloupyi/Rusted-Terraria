@@ -85,7 +85,7 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
-    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back14", "Heart"].map(String::from));
+    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back13", "Inventory_Back14", "Heart"].map(String::from));
     v.extend(items::sheets());
     v
 }
@@ -1273,11 +1273,16 @@ impl Game {
         }
     }
 
+    /// `item`'s `ItemID` name and the defaults its tooltip shows.
+    pub fn item_data(&self, item: Item) -> Option<(&'static str, item_ids::Stats)> {
+        let id = self.item_id(item)?;
+        let i = item_ids::ITEMS.binary_search_by_key(&id, |e| e.0).ok()?;
+        Some((item_ids::ITEMS[i].1, item_ids::ITEMS[i].2))
+    }
+
     /// `item`'s name in the game's language (`Lang.GetItemName`).
     pub fn item_name(&self, item: Item) -> Option<&str> {
-        let id = self.item_id(item)?;
-        let i = item_ids::ITEM_NAME.binary_search_by_key(&id, |e| e.0).ok()?;
-        self.texts.get(&format!("ItemName.{}", item_ids::ITEM_NAME[i].1))
+        self.texts.get(&format!("ItemName.{}", self.item_data(item)?.0))
     }
 
     /// The larger side of `item`'s picture, in its own pixels.
@@ -1966,7 +1971,7 @@ mod tests {
         assert_eq!(g.item_id(Item::Bucket(Some(Liquid::Water))), Some(206));
         assert_eq!(g.item_name(Item::Block(items::STONE)), None, "no texts without an install");
         assert!(item_ids::TILE_ITEM.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(item_ids::ITEM_NAME.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(item_ids::ITEMS.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

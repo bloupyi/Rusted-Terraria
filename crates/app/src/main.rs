@@ -9,6 +9,7 @@ mod items;
 mod net;
 mod proto;
 mod surface;
+mod tooltip;
 mod ui;
 
 use std::path::PathBuf;
@@ -254,12 +255,12 @@ impl App {
                 p.text(ui::FontId::ItemStack, &count.to_string(), at, 0.75, [1.0; 4], 0.75);
             }
         }
-        // `ItemSlot.MouseHover`: the name, with the stack, of what is under the cursor.
+        // `ItemSlot.MouseHover`: the tooltip of what is under the cursor.
         let cursor = self.cursor.into();
         if let Some(stack) = self.slot_under_cursor().and_then(|i| inv.slots[i]) {
-            if let Some(name) = game.item_name(stack.item) {
-                let text = if stack.count > 1 { format!("{name} ({})", stack.count) } else { name.to_string() };
-                self.hud.draw_mouse_text(&mut p, cursor, size.into(), &text, inv.mouse.is_some());
+            if let (Some(name), Some((key, stats))) = (game.item_name(stack.item), game.item_data(stack.item)) {
+                let lines = tooltip::lines(&game.texts, name, key, &stats, stack.count);
+                self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &lines, inv.mouse.is_some());
             }
         }
         if let Some(m) = inv.mouse {
