@@ -20,12 +20,16 @@ const LIFE_PER_HEART: i32 = 20;
 pub struct Fonts {
     pub item_stack: Option<Font>,
     pub mouse_text: Option<Font>,
+    pub combat_text: Option<Font>,
+    pub combat_crit: Option<Font>,
 }
 
 #[derive(Clone, Copy)]
 pub enum FontId {
     ItemStack,
     MouseText,
+    CombatText,
+    CombatCrit,
 }
 
 impl FontId {
@@ -33,6 +37,8 @@ impl FontId {
         match self {
             FontId::ItemStack => "Item_Stack",
             FontId::MouseText => "Mouse_Text",
+            FontId::CombatText => "Combat_Text",
+            FontId::CombatCrit => "Combat_Crit",
         }
     }
 }
@@ -55,7 +61,12 @@ impl Fonts {
             }
             Some(font)
         };
-        let fonts = Fonts { item_stack: read(FontId::ItemStack), mouse_text: read(FontId::MouseText) };
+        let fonts = Fonts {
+            item_stack: read(FontId::ItemStack),
+            mouse_text: read(FontId::MouseText),
+            combat_text: read(FontId::CombatText),
+            combat_crit: read(FontId::CombatCrit),
+        };
         (fonts, pages)
     }
 
@@ -63,6 +74,8 @@ impl Fonts {
         match id {
             FontId::ItemStack => self.item_stack.as_ref(),
             FontId::MouseText => self.mouse_text.as_ref(),
+            FontId::CombatText => self.combat_text.as_ref(),
+            FontId::CombatCrit => self.combat_crit.as_ref(),
         }
     }
 }
@@ -76,6 +89,9 @@ pub struct Hud {
     /// `Main.cursorAlpha`, which sets `cursorScale`.
     cursor_alpha: f32,
     cursor_up: bool,
+    /// `Main.invAlpha`: the inventory backs pulse between 180 and 240.
+    inv_alpha: f32,
+    inv_up: bool,
     tick_acc: f32,
 }
 
@@ -87,21 +103,34 @@ impl Default for Hud {
             text_up: false,
             cursor_alpha: 1.0,
             cursor_up: false,
+            inv_alpha: 180.0,
+            inv_up: true,
             tick_acc: 0.0,
         }
     }
 }
 
 impl Hud {
-    pub fn update(&mut self, dt: f32, selected: usize) {
+    /// Runs the ticks `dt` holds and returns how many. The hotbar only animates while shown.
+    pub fn update(&mut self, dt: f32, selected: usize, hotbar: bool) -> u32 {
         self.tick_acc = (self.tick_acc + dt * 60.0).min(4.0);
+        let mut n = 0;
         while self.tick_acc >= 1.0 {
             self.tick_acc -= 1.0;
-            self.tick(selected);
+            self.tick(if hotbar { Some(selected) } else { None });
+            n += 1;
         }
+        n
     }
 
-    fn tick(&mut self, selected: usize) {
+    fn tick(&mut self, hotbar: Option<usize>) {
+        self.inv_alpha += if self.inv_up { 0.2 } else { -0.2 };
+        if self.inv_alpha > 240.0 {
+            (self.inv_alpha, self.inv_up) = (240.0, false);
+        }
+        if self.inv_alpha < 180.0 {
+            (self.inv_alpha, self.inv_up) = (180.0, true);
+        }
         self.text_color = if self.text_up { self.text_color + 1 } else { self.text_color - 1 };
         if self.text_color == 255 {
             self.text_up = false;
@@ -116,6 +145,7 @@ impl Hud {
         if self.cursor_alpha <= 0.6 {
             (self.cursor_alpha, self.cursor_up) = (0.6, true);
         }
+        let Some(selected) = hotbar else { return };
         for (i, s) in self.hotbar_scale.iter_mut().enumerate() {
             if i == selected {
                 if *s < 1.0 {
@@ -149,6 +179,88 @@ impl Hud {
     }
 }
 
+/// `Main.stackSplit` and its speed-up: how fast a held right button takes items.
+#[derive(Default)]
+pub struct StackSplit {
+    split: i32,
+    delay: i32,
+    counter: i32,
+    tries: i32,
+    super_fast: i32,
+}
+
+impl StackSplit {
+    /// One tick; `held`: either mouse button is down.
+    pub fn tick(&mut self, held: bool) {
+        if !held {
+            self.split = 0;
+        }
+        if self.split > 0 {
+            self.split -= 1;
+        }
+        if self.split == 0 {
+            (self.tries, self.counter, self.delay, self.super_fast) = (0, 0, 7, 0);
+            return;
+        }
+        self.counter += 1;
+        let every = match self.delay {
+            7 => 30,
+            6 => 25,
+            5 => 20,
+            4 => 15,
+            3 => 10,
+            _ => 5,
+        };
+        if self.counter >= every {
+            self.delay -= 1;
+            if self.delay < 2 {
+                self.delay = 2;
+                self.super_fast += 1;
+            }
+            if self.tries < 10 {
+                self.super_fast = 0;
+            }
+            self.tries += 1;
+            self.counter = 0;
+        }
+    }
+
+    /// How many items a right press may take this tick.
+    pub fn takes(&self) -> i32 {
+        if self.split > 1 {
+            0
+        } else {
+            self.super_fast + 1
+        }
+    }
+
+    /// `RefreshStackSplitCooldown` after an item was taken.
+    pub fn took(&mut self) {
+        self.split = if self.split == 0 { 30 } else { self.delay };
+    }
+}
+
+/// `Main.inventoryScale` while the inventory is open.
+const INV_SCALE: f32 = 0.85;
+
+/// Top-left of inventory slot `i` (ten per row), in screen pixels.
+pub fn inventory_slot(i: usize) -> [f32; 2] {
+    let at = |n: usize| (20.0 + (n * 56) as f32 * INV_SCALE) as i32 as f32;
+    [at(i % HOTBAR), at(i / HOTBAR)]
+}
+
+pub fn inventory_under(p: [f32; 2], slots: usize) -> Option<usize> {
+    (0..slots).find(|&i| {
+        let [x, y] = inventory_slot(i);
+        p[0] >= x && p[0] <= x + BACK * INV_SCALE && p[1] >= y && p[1] <= y + BACK * INV_SCALE
+    })
+}
+
+/// Bottom of the inventory grid of `slots`, in screen pixels.
+pub fn inventory_bottom(slots: usize) -> f32 {
+    inventory_slot(slots - 1)[1] + BACK * INV_SCALE
+}
+
 /// Draws in screen pixels onto world sprites under the camera.
 pub struct Painter<'a> {
     pub sheets: &'a HashMap<String, SheetRef>,
@@ -179,14 +291,32 @@ impl Painter<'_> {
     }
 
     fn glyphs(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4]) {
+        self.string(id, text, p, [0.0; 2], scale, 0.0, color);
+    }
+
+    /// `DrawString` with an origin (in text pixels) placed at `p`, scaled and turned about it.
+    #[allow(clippy::too_many_arguments)]
+    pub fn string(
+        &mut self,
+        id: FontId,
+        text: &str,
+        p: [f32; 2],
+        origin: [f32; 2],
+        scale: f32,
+        rot: f32,
+        color: [f32; 4],
+    ) {
         let Some(font) = self.fonts.get(id) else { return };
         for ([x, y], g) in font.layout(text) {
             let Some(sheet) = self.sheets.get(&page_sheet(id, g.page)) else { continue };
             let [gx, gy, gw, gh] = g.rect.map(|v| v.max(0) as u32);
             let mut s = Sprite::sheet([0.0; 2], sheet, [gx, gy, gw, gh], 0);
-            s.pos = self.world([p[0] + x * scale, p[1] + y * scale]);
+            let at = [p[0] + (x - origin[0]) * scale, p[1] + (y - origin[1]) * scale];
+            s.pos = self.world(at);
             s.size = [gw as f32 * scale * self.unit, gh as f32 * scale * self.unit];
             s.color = color;
+            s.rot = rot;
+            s.pivot = [(p[0] - at[0]) * self.unit, (p[1] - at[1]) * self.unit];
             self.out.push(s);
         }
     }
@@ -238,11 +368,67 @@ impl Hud {
                 icon(p, i, [at[0] + BACK * s / 2.0, at[1] + BACK * s / 2.0], s);
             }
             if count > 1 {
-                p.text(FontId::ItemStack, &count.to_string(), [at[0] + 10.0 * s, at[1] + 26.0 * s], s, light, s);
+                let at = [at[0] + 10.0 * s, at[1] + 26.0 * s];
+                p.text(FontId::ItemStack, &count.to_string(), at, s, light, s);
             }
             let n = ((i + 1) % 10).to_string();
             p.text(FontId::ItemStack, &n, [at[0] + 8.0 * s, at[1] + 4.0 * s], s, light, s);
         }
+    }
+
+    /// `DrawInventory`'s grid with `ItemSlot.Draw` for context 0; `label` is the game's "Inventory".
+    pub fn draw_inventory(
+        &self,
+        p: &mut Painter,
+        label: &str,
+        counts: &[u16],
+        icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
+    ) {
+        let c = self.text_color as f32 / 255.0;
+        p.plain_text(FontId::MouseText, label, [40.0, 0.0], gray(c, c));
+        let back = (self.inv_alpha as u8) as f32 / 255.0;
+        for (i, &count) in counts.iter().enumerate() {
+            let at = inventory_slot(i);
+            let name = if i < HOTBAR { "Inventory_Back9" } else { "Inventory_Back" };
+            p.image(name, at, [0.0; 2], INV_SCALE, gray(back, back));
+            self.slot_item(p, at, INV_SCALE, count, |p, c, s| icon(p, i, c, s));
+        }
+    }
+
+    /// The item and its stack number in a slot whose top-left is `at`.
+    fn slot_item(&self, p: &mut Painter, at: [f32; 2], s: f32, count: u16, icon: impl Fn(&mut Painter, [f32; 2], f32)) {
+        if count > 0 {
+            icon(p, [at[0] + BACK * s / 2.0, at[1] + BACK * s / 2.0], s);
+        }
+        if count > 1 {
+            p.text(FontId::ItemStack, &count.to_string(), [at[0] + 10.0 * s, at[1] + 26.0 * s], s, [1.0; 4], s);
+        }
+    }
+
+    /// `DrawInterface_38_MouseCarriedObject`: the carried item at the cursor, without a back.
+    pub fn draw_mouse_item(
+        &self,
+        p: &mut Painter,
+        cursor: [f32; 2],
+        count: u16,
+        icon: impl Fn(&mut Painter, [f32; 2], f32),
+    ) {
+        self.slot_item(p, cursor, self.cursor_scale(), count, icon);
+    }
+
+    /// `MouseTextInner` for a plain line: beside the cursor, kept on screen.
+    pub fn draw_mouse_text(&self, p: &mut Painter, cursor: [f32; 2], screen: [f32; 2], text: &str, carrying: bool) {
+        let [w, h] = p.measure(FontId::MouseText, text);
+        let mut x = cursor[0] as i32 + 14 + if carrying { 34 } else { 0 };
+        let mut y = cursor[1] as i32 + 14;
+        if x as f32 + w + 40.0 > screen[0] {
+            x = (screen[0] - w - 40.0) as i32;
+        }
+        if y as f32 + h + 40.0 > screen[1] {
+            y = (screen[1] - h - 40.0) as i32;
+        }
+        let c = self.text_color as f32 / 255.0;
+        p.text(FontId::MouseText, text, [x as f32, y as f32], 1.0, gray(c, c), 2.0);
     }
 
     /// `ClassicPlayerResourcesDisplaySet.DrawLife` for up to 400 life (no golden hearts).
@@ -293,7 +479,7 @@ mod tests {
         let mut h = Hud::default();
         let before = h.hotbar_slots();
         for _ in 0..10 {
-            h.tick(2);
+            h.tick(Some(2));
         }
         let after = h.hotbar_slots();
         assert!((after[2].1 - 1.0).abs() < 1e-3, "{}", after[2].1);
@@ -305,13 +491,39 @@ mod tests {
     }
 
     #[test]
+    fn held_right_button_speeds_up() {
+        let mut s = StackSplit::default();
+        let mut taken = Vec::new();
+        for t in 0..400 {
+            s.tick(true);
+            for _ in 0..s.takes() {
+                s.took();
+                taken.push(t);
+            }
+        }
+        assert_eq!(&taken[..2], &[0, 29], "one, then a 30 tick wait");
+        let gaps: Vec<i32> = taken.windows(2).map(|w| w[1] - w[0]).collect();
+        assert!(gaps.last() < gaps.get(1), "faster as it is held: {gaps:?}");
+        s.tick(false);
+        assert_eq!(s.takes(), 1);
+    }
+
+    #[test]
+    fn inventory_grid_is_the_games() {
+        assert_eq!(inventory_slot(0), [20.0, 20.0]);
+        assert_eq!(inventory_slot(11), [67.0, 67.0], "56 * 0.85 apart");
+        assert_eq!(inventory_under([70.0, 70.0], 50), Some(11));
+        assert_eq!(inventory_under([500.0, 500.0], 50), None);
+    }
+
+    #[test]
     fn text_colour_pulses() {
         let mut h = Hud::default();
         for _ in 0..65 {
-            h.tick(0);
+            h.tick(Some(0));
         }
         assert_eq!(h.text_color, 190);
-        h.tick(0);
+        h.tick(Some(0));
         assert_eq!(h.text_color, 191);
     }
 }

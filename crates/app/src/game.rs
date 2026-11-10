@@ -5,6 +5,7 @@ use render::atlas::SheetRef;
 use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
+use crate::combat_text::{self, CombatText};
 use crate::inventory::{Inventory, Item};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::net::{MobState, Msg};
@@ -84,7 +85,7 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
-    v.extend(["Inventory_Back", "Inventory_Back14", "Heart"].map(String::from));
+    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back14", "Heart"].map(String::from));
     v.extend(items::sheets());
     v
 }
@@ -121,6 +122,8 @@ pub struct Game {
     pub inventory: Inventory,
     pub drops: Vec<Drop>,
     pub templates: Vec<Template>,
+    /// Damage numbers in flight.
+    pub combat_text: Vec<CombatText>,
     /// The game's texts in the player's language; empty without an install.
     pub texts: formats::lang::Texts,
     pub mobs: Vec<Mob>,
@@ -204,6 +207,7 @@ impl Game {
             drops: Vec::new(),
             templates: Vec::new(),
             texts: Default::default(),
+            combat_text: Vec::new(),
             mobs: Vec::new(),
             sfx: Vec::new(),
             others: Vec::new(),
@@ -260,6 +264,7 @@ impl Game {
             for (_, p) in &mut self.others {
                 p.animate();
             }
+            combat_text::update(&mut self.combat_text);
         }
         self.update_mobs(dt, input.is_some());
         self.update_drops(dt);
@@ -363,6 +368,8 @@ impl Game {
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
         let damage = self.damage_var(m.kind.damage()).max(1);
         self.hp -= damage;
+        let b = self.player.body;
+        self.text_at([b.x, b.y, b.w, b.h], combat_text::DAMAGED_FRIENDLY, damage, false);
         self.immune = if damage == 1 { 20 } else { 40 };
         (self.player.vx, self.player.vy) = (4.5 * dir, -3.5);
         self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
@@ -378,9 +385,34 @@ impl Game {
         (damage as f32 * (1.0 + k as f32 * 0.01)) as i32
     }
 
-    /// Hurts a monster; a dead slime leaves gel.
-    fn hit_mob(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32, crit: bool) {
-        if !self.mobs[i].strike(damage, knock_back, dir, crit).1 {
+    /// `CombatText.NewText` over `rect`.
+    fn text_at(&mut self, rect: [f32; 4], color: [u8; 4], amount: i32, crit: bool) {
+        let mut texts = std::mem::take(&mut self.combat_text);
+        combat_text::spawn(&mut texts, rect, color, amount, crit, |lo, hi| {
+            lo + (self.random() % (hi - lo + 1) as u64) as i32
+        });
+        self.combat_text = texts;
+    }
+
+    /// The number `StrikeNPC` shows over monster `i` for `taken` damage.
+    fn mob_text(&mut self, i: usize, taken: i32, crit: bool, from_net: bool) {
+        let m = &self.mobs[i];
+        let b = m.body;
+        let color = match (m.kind.friendly(), crit) {
+            (true, false) => combat_text::DAMAGED_FRIENDLY,
+            (true, true) => combat_text::DAMAGED_FRIENDLY_CRIT,
+            (false, false) => combat_text::DAMAGED_HOSTILE,
+            (false, true) => combat_text::DAMAGED_HOSTILE_CRIT,
+        };
+        let color = if from_net && !m.kind.friendly() { combat_text::others(color) } else { color };
+        self.text_at([b.x, b.y, b.w, b.h], color, taken, crit);
+    }
+
+    /// Hurts a monster; a dead slime leaves gel. `from_net`: another player's hit.
+    fn hit_mob(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32, crit: bool, from_net: bool) {
+        let (taken, killed) = self.mobs[i].strike(damage, knock_back, dir, crit);
+        self.mob_text(i, taken, crit, from_net);
+        if !killed {
             self.sfx.push(Sfx::MobHit);
             return;
         }
@@ -473,7 +505,7 @@ impl Game {
             Msg::Hit { index, damage } if !self.client && (index as usize) < self.mobs.len() => {
                 let from_x = self.others.iter().find(|o| o.0 == from).map_or(0.0, |o| o.1.center().0);
                 let dir = if self.mobs[index as usize].body.center().0 < from_x { -1.0 } else { 1.0 };
-                self.hit_mob(index as usize, damage as i32, CLIENT_KNOCK_BACK, dir, false);
+                self.hit_mob(index as usize, damage as i32, CLIENT_KNOCK_BACK, dir, false, true);
             }
             Msg::Leave { id } => self.others.retain(|o| o.0 != id),
             Msg::Time(t) if self.client => self.time = t,
@@ -779,11 +811,15 @@ impl Game {
             self.mobs[i].melee_cooldown = self.item_animation;
             self.attack_cd = ((s.use_animation as f64 * 0.33) as i32).max(1);
             if self.client {
+                // The host applies it; the number shows here as `StrikeNPC` would work it out.
+                let def = self.mobs[i].kind.defense() as f64 * 0.5;
+                let taken = ((damage as f64 - def).max(1.0) * if crit { 2.0 } else { 1.0 }) as i32;
+                self.mob_text(i, taken.max(1), crit, false);
                 let damage = if crit { damage * 2 } else { damage };
                 self.sfx.push(Sfx::MobHit);
                 self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
             } else {
-                self.hit_mob(i, damage, s.knock_back, dir, crit);
+                self.hit_mob(i, damage, s.knock_back, dir, crit, false);
             }
             // A kill shifts the list; the cooldown stops more hits this tick anyway.
             break;
@@ -1179,6 +1215,11 @@ impl Game {
 
     fn sheet(&self, name: &str) -> Option<&SheetRef> {
         self.scene.mesher.atlas.named.get(name)
+    }
+
+    /// A swing or use is under way (the inventory ignores clicks then).
+    pub fn using_item(&self) -> bool {
+        self.item_animation != 0 || self.item_time != 0
     }
 
     /// The game's item id of `item`, for its name.
@@ -1803,7 +1844,7 @@ mod tests {
         assert!(g.inventory.slots[9].is_none(), "used up");
         assert_eq!(g.boss_life(), Some(1.0));
         let i = g.mobs.iter().position(|m| m.kind == Kind::EyeBoss).unwrap();
-        g.hit_mob(i, Kind::EyeBoss.max_hp() * 2, 0.0, 1.0, false);
+        g.hit_mob(i, Kind::EyeBoss.max_hp() * 2, 0.0, 1.0, false, false);
         assert_eq!(g.boss_life(), None);
         assert!(g.drops.iter().any(|d| d.item == Item::Block(items::DEMONITE_ORE) && d.count >= 30));
         g.time = 0.8;

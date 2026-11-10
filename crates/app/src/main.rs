@@ -1,6 +1,7 @@
 mod audio;
 mod backdrop;
 mod cave;
+mod combat_text;
 mod game;
 mod inventory;
 mod item_ids;
@@ -16,7 +17,7 @@ use std::time::{Duration, Instant};
 
 use game::Game;
 use glam::Vec2;
-use inventory::{Item, HOTBAR};
+use inventory::{Item, HOTBAR, SLOTS};
 use render::{Camera, Renderer, Scene, Sprite};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
@@ -29,8 +30,10 @@ use world::player::{self, Input, Player};
 /// Screen pixels of a hotbar or crafting slot, and the gap after it.
 const SLOT: f32 = 40.0;
 const SLOT_GAP: f32 = 4.0;
-/// Top of the crafting rows, under the hotbar.
-const CRAFT_Y: f32 = 80.0;
+/// Top of the crafting rows, under the inventory.
+fn craft_y() -> f32 {
+    ui::inventory_bottom(SLOTS) + 10.0
+}
 
 /// Top-left of slot `i` of a row of ten starting at `y`.
 fn slot_at(i: usize, y: f32) -> Vec2 {
@@ -79,7 +82,9 @@ struct App {
     buttons: [bool; 2],
     /// The left button went down on the interface: no digging until it is released.
     ui_click: bool,
-    crafting: bool,
+    /// The inventory is open (Escape, as in the game), with the crafting rows under it.
+    inventory_open: bool,
+    split: ui::StackSplit,
     /// Craftable recipes and what each makes, while the crafting rows are open.
     recipes: Vec<(usize, Item)>,
     drag: Option<Vec2>,
@@ -104,7 +109,19 @@ impl App {
     }
 
     fn update(&mut self, dt: f32, size: Vec2) {
-        self.hud.update(dt, self.game.inventory.selected);
+        let open = self.inventory_open;
+        for _ in 0..self.hud.update(dt, self.game.inventory.selected, !open) {
+            self.split.tick(self.buttons[0] || self.buttons[1]);
+            let slot = ui::inventory_under(self.cursor.into(), SLOTS).filter(|_| open && self.buttons[1]);
+            if let Some(i) = slot.filter(|_| !self.game.using_item()) {
+                for _ in 0..self.split.takes() {
+                    if self.game.inventory.right_click(i) {
+                        self.game.sfx.push(audio::Sfx::MenuTick);
+                        self.split.took();
+                    }
+                }
+            }
+        }
         let k = &self.keys;
         let time_scale = if k.fast_time { FAST_TIME } else { 1.0 };
         if self.free {
@@ -119,7 +136,7 @@ impl App {
             let y = y + self.game.player.gfx_off_y;
             self.camera.center = Vec2::new(x + player::WIDTH / 2.0, y + player::HEIGHT / 2.0);
         }
-        self.recipes = if self.crafting {
+        self.recipes = if self.inventory_open {
             self.game.craftable().into_iter().map(|i| (i, self.game.recipe_item(i))).collect()
         } else {
             Vec::new()
@@ -130,7 +147,7 @@ impl App {
             if self.buttons[0] {
                 self.game.use_at(w.x, w.y, self.free);
             }
-            if self.buttons[1] {
+            if self.buttons[1] && !self.over_ui() {
                 self.game.place(tx, ty, self.free);
             }
         }
@@ -150,8 +167,9 @@ impl App {
         self.camera.time += dt;
     }
 
-    /// The game's hotbar and life hearts, the boss bar, then the crafting rows if
-    /// open, as world sprites under the current camera.
+    /// The game's hotbar (or the open inventory with the crafting rows) and life
+    /// hearts, the boss bar, the name under the cursor and the carried item, as
+    /// world sprites under the current camera.
     fn hud(&self, size: Vec2) -> Vec<Sprite> {
         let z = self.camera.zoom;
         let game = &self.game;
@@ -162,18 +180,48 @@ impl App {
             unit: 1.0 / z,
             out: Vec::new(),
         };
+        // `DrawCombatText`, in the world: four dim copies a pixel away, then the number.
+        let mut world = ui::Painter { sheets: p.sheets, fonts: p.fonts, origin: [0.0; 2], unit: 1.0, out: Vec::new() };
+        for t in &game.combat_text {
+            let font = if t.crit { ui::FontId::CombatCrit } else { ui::FontId::CombatText };
+            let [w, h] = world.measure(font, &t.text);
+            let k = t.scale * t.alpha;
+            let [r, g, b, a] = t.color.map(|v| v as f32 / 255.0 * k);
+            for (dx, dy, c) in [
+                (-1.0, 0.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (1.0, 0.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, -1.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, 1.0, [r * 0.3, g * 0.3, b * 0.3, a]),
+                (0.0, 0.0, [r, g, b, a]),
+            ] {
+                let at = [t.center[0] + dx, t.center[1] + dy];
+                world.string(font, &t.text, at, [w / 2.0, h / 2.0], t.scale, t.rotation, c);
+            }
+        }
+        p.out = world.out;
         let inv = &game.inventory;
-        let counts: Vec<u16> = (0..HOTBAR).map(|i| inv.slots[i].map_or(0, |s| s.count)).collect();
-        let selected = inv.slots[inv.selected].map(|s| s.item);
-        // `Lang.inter[37]` ("Items") over an empty hand.
-        let title =
-            selected.and_then(|i| game.item_name(i)).or_else(|| game.texts.get("LegacyInterface.37")).unwrap_or("");
-        self.hud.draw_hotbar(&mut p, inv.selected, &counts, title, |p, i, [cx, cy], s| {
-            let Some(stack) = inv.slots[i] else { return };
-            let side = game.item_size(stack.item).min(ui::ICON_LIMIT) * s;
-            let icon = game.item_icon(stack.item, p.world([cx - side / 2.0, cy - side / 2.0]), side / z, 0);
+        let icon = |p: &mut ui::Painter, item: Item, [cx, cy]: [f32; 2], s: f32| {
+            let side = game.item_size(item).min(ui::ICON_LIMIT) * s;
+            let icon = game.item_icon(item, p.world([cx - side / 2.0, cy - side / 2.0]), side / z, 0);
             p.out.extend(icon);
-        });
+        };
+        let slot_icon = |p: &mut ui::Painter, i: usize, c: [f32; 2], s: f32| {
+            if let Some(stack) = inv.slots[i] {
+                icon(p, stack.item, c, s);
+            }
+        };
+        if self.inventory_open {
+            let counts: Vec<u16> = inv.slots.iter().map(|s| s.map_or(0, |s| s.count)).collect();
+            let label = game.texts.get("LegacyInterface.4").unwrap_or("");
+            self.hud.draw_inventory(&mut p, label, &counts, slot_icon);
+        } else {
+            let counts: Vec<u16> = (0..HOTBAR).map(|i| inv.slots[i].map_or(0, |s| s.count)).collect();
+            let selected = inv.slots[inv.selected].map(|s| s.item);
+            // `Lang.inter[37]` ("Items") over an empty hand.
+            let title =
+                selected.and_then(|i| game.item_name(i)).or_else(|| game.texts.get("LegacyInterface.37")).unwrap_or("");
+            self.hud.draw_hotbar(&mut p, inv.selected, &counts, title, slot_icon);
+        }
         let life = game.texts.get("LegacyInterface.0").unwrap_or("");
         self.hud.draw_life(&mut p, size.x, game.hp.max(0), game::MAX_HP, life);
         if let Some(life) = game.boss_life() {
@@ -181,9 +229,10 @@ impl App {
             p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
             p.rect([x + 2.0, size.y - 38.0], (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]);
         }
+        let craft_y = craft_y();
         for (k, &(r, item)) in self.recipes.iter().enumerate() {
-            let hover = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) == Some(k);
-            let o = slot_at(k, CRAFT_Y);
+            let hover = slot_under(self.cursor, craft_y, self.recipes.len()) == Some(k);
+            let o = slot_at(k, craft_y);
             let frame = if hover { [0.4, 0.8, 0.5, 0.9] } else { [0.2, 0.35, 0.25, 0.7] };
             p.rect(o.into(), SLOT, SLOT, frame);
             p.rect((o + 3.0).into(), SLOT - 6.0, SLOT - 6.0, [0.05, 0.05, 0.08, 0.7]);
@@ -195,16 +244,49 @@ impl App {
                 p.text(ui::FontId::ItemStack, &count.to_string(), at, 0.75, [1.0; 4], 0.75);
             }
         }
+        // `ItemSlot.MouseHover`: the name, with the stack, of what is under the cursor.
+        let cursor = self.cursor.into();
+        if let Some(stack) = self.slot_under_cursor().and_then(|i| inv.slots[i]) {
+            if let Some(name) = game.item_name(stack.item) {
+                let text = if stack.count > 1 { format!("{name} ({})", stack.count) } else { name.to_string() };
+                self.hud.draw_mouse_text(&mut p, cursor, size.into(), &text, inv.mouse.is_some());
+            }
+        }
+        if let Some(m) = inv.mouse {
+            self.hud.draw_mouse_item(&mut p, cursor, m.count, |p, c, s| icon(p, m.item, c, s));
+        }
         p.out
     }
 
-    /// A left press on the interface: picks a hotbar slot or crafts. True if it hit one.
+    /// The inventory slot (the hotbar's when closed) under the cursor.
+    fn slot_under_cursor(&self) -> Option<usize> {
+        if self.inventory_open {
+            ui::inventory_under(self.cursor.into(), SLOTS)
+        } else {
+            self.hud.hotbar_under(self.cursor.into())
+        }
+    }
+
+    fn over_ui(&self) -> bool {
+        self.slot_under_cursor().is_some()
+            || (self.inventory_open && slot_under(self.cursor, craft_y(), self.recipes.len()).is_some())
+    }
+
+    /// A left press on the interface: moves items in the open inventory, picks a
+    /// hotbar slot or crafts. True if it hit one.
     fn click_ui(&mut self) -> bool {
-        if let Some(i) = self.hud.hotbar_under(self.cursor.into()) {
+        if self.inventory_open {
+            if let Some(i) = ui::inventory_under(self.cursor.into(), SLOTS) {
+                if !self.game.using_item() && self.game.inventory.left_click(i) {
+                    self.game.sfx.push(audio::Sfx::Grab);
+                }
+                return true;
+            }
+        } else if let Some(i) = self.hud.hotbar_under(self.cursor.into()) {
             self.game.inventory.selected = i;
             return true;
         }
-        if let Some(k) = slot_under(self.cursor, CRAFT_Y, self.recipes.len()) {
+        if let Some(k) = slot_under(self.cursor, craft_y(), self.recipes.len()) {
             self.game.craft(self.recipes[k].0);
             return true;
         }
@@ -287,9 +369,13 @@ impl ApplicationHandler for App {
                     KeyCode::Space => k.jump = down,
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => k.shift = down,
                     KeyCode::KeyT => k.fast_time = down,
-                    KeyCode::Escape => el.exit(),
+                    KeyCode::Escape if press => {
+                        self.inventory_open = !self.inventory_open;
+                        if !self.inventory_open {
+                            self.game.inventory.return_mouse();
+                        }
+                    }
                     KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
-                    KeyCode::KeyC if press => self.crafting = !self.crafting,
                     KeyCode::KeyF if press => {
                         self.free = !self.free;
                         if !self.free {
@@ -543,7 +629,8 @@ fn main() {
         cursor: Vec2::ZERO,
         buttons: [false; 2],
         ui_click: false,
-        crafting: false,
+        inventory_open: false,
+        split: ui::StackSplit::default(),
         recipes: Vec::new(),
         drag: None,
         last: Instant::now(),

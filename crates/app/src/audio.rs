@@ -26,6 +26,7 @@ pub enum Sfx {
     MobKilled,
     Zombie,
     Roar,
+    MenuTick,
 }
 
 impl Sfx {
@@ -43,6 +44,7 @@ impl Sfx {
             Sfx::MobKilled => ("NPC_Killed_1", 1),
             Sfx::Zombie => ("Zombie", 3),
             Sfx::Roar => ("Roar_0", 1),
+            Sfx::MenuTick => ("Menu_Tick", 1),
         }
     }
 }
