@@ -10,9 +10,11 @@ use formats::wld::{self, Tile};
 use rayon::prelude::*;
 
 pub mod body;
+pub mod draw;
 pub mod frame;
 pub mod light;
 pub mod liquid;
+pub mod tile_draw;
 pub mod tile_light;
 pub mod mob;
 pub mod player;

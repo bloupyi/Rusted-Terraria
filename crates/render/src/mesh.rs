@@ -4,6 +4,7 @@
 use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
 use world::light::LightMap;
+use world::draw::Draw;
 use world::{Chunk, World, CHUNK, NO_TILE};
 
 use crate::atlas::{Atlas, SheetRef};
@@ -13,12 +14,15 @@ const WALL_BIT: u32 = 1 << 30;
 
 /// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30.
 /// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29.
+/// `c`: 0 for a plain 16 px cell, else the game's draw of the cell: width (7) |
+/// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22.
 /// Liquids have their own layout, see [`crate::liquid::chunk`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 pub struct Instance {
     pub a: u32,
     pub b: u32,
+    pub c: u32,
 }
 
 /// One chunk row. `statics` holds the walls of every chunk then the tiles of
@@ -192,19 +196,24 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
             let wall = c.wall[i];
             if let Some(Some(s)) = atlas.walls.get(wall as usize).filter(|_| wall != 0) {
                 let (fx, fy) = world::frame::wall(world, xi, yi, variant(x, y) as usize);
-                if let Some(inst) = instance(s, x, y, fx, fy, 32, true, 0) {
+                if let Some(inst) = instance(s, x, y, fx, fy, Draw { w: 32, h: 32, ..Draw::CELL }, true, 0) {
                     walls.push(inst);
                 }
             }
             let t = c.tile[i];
             if let Some(Some(s)) = atlas.tiles.get(t as usize).filter(|_| t != NO_TILE) {
-                let (fx, fy) = if is_block(t) {
-                    world::frame::block(world, xi, yi, variant(x, y) as usize)
+                let (mut fx, fy, draw) = if is_block(t) {
+                    let (fx, fy) = world::frame::block(world, xi, yi, variant(x, y) as usize);
+                    (fx, fy, Draw::CELL)
                 } else {
-                    (c.frame_x[i].max(0) as u32, c.frame_y[i].max(0) as u32)
+                    let (fx, fy) = (c.frame_x[i].max(0) as i32, c.frame_y[i].max(0) as i32);
+                    (fx as u32, fy as u32, world::draw::cell(t, x, fx, fy))
                 };
+                if t == 5 {
+                    fx += 176 * (world::draw::tree_biome(world, xi, yi, fx as i32, fy as i32) + 1) as u32;
+                }
                 let shape = if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
-                if let Some(inst) = instance(s, x, y, fx, fy, 16, false, shape as u32) {
+                if let Some(inst) = instance(s, x, y, fx, fy, draw, false, shape as u32) {
                     tiles.push(inst);
                 }
             }
@@ -215,14 +224,20 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
-fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, size: u32, wall: bool, shape: u32) -> Option<Instance> {
-    let (fx, fy) = if s.fallback { (0, 0) } else { (fx, fy) };
-    if fx + size > s.w || fy + size > s.h {
+fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, draw: Draw, wall: bool, shape: u32) -> Option<Instance> {
+    let (fx, fy, draw) = if s.fallback { (0, 0, if wall { draw } else { Draw::CELL }) } else { (fx, fy, draw) };
+    if fx + draw.w > s.w || fy + draw.h > s.h {
         return None;
     }
+    let c = if wall || draw == Draw::CELL {
+        0
+    } else {
+        draw.w | draw.h << 7 | ((draw.top + 64) as u32) << 14 | (draw.flip as u32) << 21 | 1 << 22
+    };
     Some(Instance {
         a: x | (y << 15) | if wall { WALL_BIT } else { 0 },
         b: (s.x + fx) | ((s.y + fy) << 12) | (s.layer << 24) | (shape << 29),
+        c,
     })
 }
 

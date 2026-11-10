@@ -81,10 +81,10 @@ const SKIN: [f32; 4] = [1.0, 0.80, 0.65, 1.0];
 /// Sheets packed beside the tiles for sprites.
 pub fn sprite_sheets() -> Vec<String> {
     let mut v: Vec<String> = PLAYER_LAYERS.iter().map(|l| l.0.to_string()).collect();
+    // Leaf styles the trees of `world::draw::tree_foliage` use.
+    v.extend((0..=20).flat_map(|s| [format!("Tree_Tops_{s}"), format!("Tree_Branches_{s}")]));
     v.extend(
         [
-            "Tree_Tops_0",
-            "Tree_Branches_0",
             "Item_205",
             "Item_206",
             "Item_207",
@@ -1055,8 +1055,7 @@ impl Game {
 
     /// Leafy tops and branches, drawn from the tree's top and branch cells.
     fn tree_tops(&self, view: Rect, out: &mut Vec<Sprite>) {
-        let (Some(tops), Some(branches)) = (self.sheet("Tree_Tops_0"), self.sheet("Tree_Branches_0")) else { return };
-        // Tops reach 5 tiles over their cell, branches 2 to the side: one chunk around covers them.
+        // Tops reach 9 tiles over their cell, branches 2 to the side: one chunk around covers them.
         let (cx0, cy0) = ((view.x0 / CHUNK).saturating_sub(1), (view.y0 / CHUNK).saturating_sub(1));
         let cx1 = (view.x1.div_ceil(CHUNK) + 1).min(self.world.chunks_x);
         let cy1 = (view.y1.div_ceil(CHUNK) + 1).min(self.world.chunks_y);
@@ -1065,16 +1064,31 @@ impl Game {
             .filter_map(|ci| self.tree_cells[ci].as_ref())
             .flatten();
         for &(x, y) in cells {
-            let (fx, fy) = self.world.frame(x as i64, y as i64);
-            let style = ((fy - 198) / 22).clamp(0, 2) as u32;
-            let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
-            let s = match fx {
-                22 => Sprite::sheet([px - 32.0, py + 16.0 - 80.0], tops, [style * 82, 0, 80, 80], SPRITE_LIT),
-                44 => Sprite::sheet([px - 24.0, py - 12.0], branches, [0, style * 42, 40, 40], SPRITE_LIT),
-                66 => Sprite::sheet([px, py - 12.0], branches, [42, style * 42, 40, 40], SPRITE_LIT),
+            let (xi, yi) = (x as i64, y as i64);
+            let (fx, fy) = self.world.frame(xi, yi);
+            let frame = match fy {
+                220 => 1,
+                242 => 2,
+                _ => 0,
+            };
+            let dx = match fx {
+                22 => 0,
+                44 => 1,
+                66 => -1,
                 _ => continue,
             };
-            out.push(s);
+            let Some((style, w, h, frame)) = world::draw::tree_foliage(&self.world, xi, yi, dx, frame) else { continue };
+            let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
+            let frame = frame as u32;
+            let (sheet, pos, src) = match fx {
+                22 => ("Tree_Tops", [px + 8.0 - (w / 2) as f32, py + 16.0 - h as f32], [frame * (w + 2), 0, w, h]),
+                44 => ("Tree_Branches", [px - 24.0, py - 12.0], [0, frame * 42, 40, 40]),
+                _ => ("Tree_Branches", [px, py - 12.0], [42, frame * 42, 40, 40]),
+            };
+            let Some(sheet) = self.sheet(&format!("{sheet}_{style}")) else { continue };
+            if src[0] + src[2] <= sheet.w && src[1] + src[3] <= sheet.h {
+                out.push(Sprite::sheet(pos, sheet, src, SPRITE_LIT));
+            }
         }
     }
 
