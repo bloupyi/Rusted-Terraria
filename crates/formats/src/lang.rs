@@ -47,6 +47,11 @@ impl Texts {
         self.0.get(key).map(String::as_str)
     }
 
+    /// Every character the texts use: the font glyphs worth decoding.
+    pub fn chars(&self) -> std::collections::HashSet<char> {
+        self.0.values().flat_map(|v| v.chars()).collect()
+    }
+
     /// `ProcessCopyCommandsInTexts`: up to 100 rounds of `{$A.B}` replacement.
     fn resolve_copies(&mut self) {
         let keys: Vec<String> = self.0.keys().filter(|k| self.0[*k].contains("{$")).cloned().collect();
@@ -240,6 +245,7 @@ mod tests {
         t.resolve_copies();
         assert_eq!(t.get("A.y"), Some("Hi \"you\"\né!"));
         assert_eq!(t.get("A.z"), Some("A.missing {$nope}"));
+        assert!(t.chars().contains(&'é'));
     }
 
     #[test]

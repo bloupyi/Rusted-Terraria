@@ -2,7 +2,7 @@
 //! `ItemSlot.Draw`, the classic life hearts of `ClassicPlayerResourcesDisplaySet`,
 //! and text in the game's own fonts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use formats::xnb::{self, Font, Texture};
@@ -50,11 +50,12 @@ fn page_sheet(id: FontId, page: usize) -> String {
 impl Fonts {
     /// Reads the Latin glyphs of the fonts under `dir` (`Content/Fonts`); their
     /// pages are returned to be packed into the atlas.
-    pub fn load(dir: Option<&Path>) -> (Self, Vec<(String, Texture)>) {
+    /// Latin, and every other character `chars` (the loaded texts) holds.
+    pub fn load(dir: Option<&Path>, chars: &HashSet<char>) -> (Self, Vec<(String, Texture)>) {
         let mut pages = Vec::new();
         let mut read = |id: FontId| {
             let data = std::fs::read(dir?.join(format!("{}.xnb", id.file()))).ok()?;
-            let mut font = xnb::read_font(&data, |c| c < '\u{250}').ok()?;
+            let mut font = xnb::read_font(&data, |c| c < '\u{250}' || chars.contains(&c)).ok()?;
             for (i, p) in font.pages.iter_mut().enumerate().filter(|(_, p)| !p.rgba.is_empty()) {
                 pages
                     .push((page_sheet(id, i), std::mem::replace(p, Texture { width: 0, height: 0, rgba: Vec::new() })));

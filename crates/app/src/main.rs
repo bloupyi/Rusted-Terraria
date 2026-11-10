@@ -598,8 +598,12 @@ fn main() {
     let env = world.header.env.clone().unwrap_or_default();
     sheets.extend(backdrop::sheets(&env));
     sheets.extend(cave::sheets(&env, world.header.world_id));
-    let (fonts, pages) =
-        ui::Fonts::load(images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts")).as_deref());
+    let culture = formats::lang::culture();
+    let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
+    let texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
+    println!("texts: {culture}, {} entries", texts.len());
+    let fonts_dir = images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts"));
+    let (fonts, pages) = ui::Fonts::load(fonts_dir.as_deref(), &texts.chars());
     let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets, pages);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
@@ -616,10 +620,7 @@ fn main() {
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
     let mut game = Game::new(world, scene);
-    let culture = formats::lang::culture();
-    let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
-    game.texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
-    println!("texts: {culture}, {} entries", game.texts.len());
+    game.texts = texts;
     game.client = net.as_ref().is_some_and(|n| !n.host);
     let (cx, cy) = at.map_or(game.player.center(), |(x, y)| (x * 16.0, y * 16.0));
     let mut app = App {
