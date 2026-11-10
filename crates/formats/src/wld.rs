@@ -47,6 +47,8 @@ pub struct Env {
     pub eclipse: bool,
     /// Background style of each forest zone, left to right.
     pub tree_bg: [u8; 4],
+    /// Wind speed at save time; above 0 blows to the right.
+    pub wind: f32,
     /// Background styles of corruption, jungle, snow, hallow, crimson,
     /// desert, ocean and mushroom areas.
     pub biome_bg: [u8; 8],
@@ -222,8 +224,9 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     for b in &mut e.biome_bg[..7] {
         *b = r.u8()?;
     }
-    // Cloud bg, cloud count, wind.
-    skip(r, 4 + 2 + 4)?;
+    // Cloud bg, cloud count.
+    skip(r, 4 + 2)?;
+    e.wind = f32::from_bits(r.i32()? as u32);
     let anglers = r.i32()?;
     for _ in 0..anglers {
         r.string()?;
@@ -454,9 +457,13 @@ mod tests {
         let env = h.env.as_ref().expect("world flags");
         assert!(env.world_surface > 0.0 && env.world_surface < env.rock_layer && env.rock_layer < h.height as f64);
         assert!((0..8).contains(&env.moon_phase) && env.tree_x[0] <= env.tree_x[1]);
-        assert!(env.cave_x[0] <= env.cave_x[1] && env.cave_style.iter().all(|s| (0..8).contains(s)) && env.underworld_bg < 3);
+        assert!(
+            env.cave_x[0] <= env.cave_x[1]
+                && env.cave_style.iter().all(|s| (0..8).contains(s))
+                && env.underworld_bg < 3
+        );
         assert!(env.tree_tops.iter().all(|t| (0..64).contains(t)));
-        assert!(env.biome_bg.iter().all(|&b| b < 60));
+        assert!(env.biome_bg.iter().all(|&b| b < 60) && env.wind.abs() <= 2.0);
         let mut cells = 0u64;
         read_tiles(&data, &h, |_, _, n, _| cells += n as u64).unwrap();
         assert_eq!(cells, h.width as u64 * h.height as u64);

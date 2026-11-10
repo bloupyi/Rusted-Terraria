@@ -173,6 +173,7 @@ pub fn sprites(s: &Scene, v: &View, fade: &Fade, holy_tiles: i32) -> Vec<Sprite>
                 color,
                 uv: [(r.x + src[0]) as f32, (r.y + src[1]) as f32, src[2] as f32, src[3] as f32],
                 flags: r.layer | if flip { SPRITE_FLIP } else { 0 },
+                ..Default::default()
             });
         }
     };

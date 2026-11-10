@@ -458,6 +458,7 @@ impl Layers<'_, '_> {
                 color,
                 uv: [(d.x + src[0]) as f32, (d.y + src[1]) as f32, src[2] as f32, src[3] as f32],
                 flags: d.layer | if flip { SPRITE_FLIP } else { 0 },
+                ..Default::default()
             });
         }
     }
@@ -788,6 +789,7 @@ impl Layers<'_, '_> {
                 color,
                 uv: [(r.x + src[0]) as f32, (r.y + src[1]) as f32, src[2] as f32, src[3] as f32],
                 flags: r.layer,
+                ..Default::default()
             });
         }
     }
@@ -800,6 +802,7 @@ impl Layers<'_, '_> {
             color,
             uv: [r.x as f32, r.y as f32, r.w as f32, r.h as f32],
             flags: r.layer,
+            ..Default::default()
         });
     }
 }

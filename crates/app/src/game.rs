@@ -158,6 +158,9 @@ pub struct Game {
     /// Surface background areas fading in and out, and the tick they were last stepped.
     bg_fade: crate::surface::Fade,
     bg_tick: Option<u32>,
+    /// Wind phases for plants and trees, and the time not yet turned into ticks.
+    pub wind: world::draw::Wind,
+    wind_acc: f32,
 }
 
 impl Game {
@@ -216,6 +219,8 @@ impl Game {
             liquid_acc: 0.0,
             bg_fade: Default::default(),
             bg_tick: None,
+            wind: Default::default(),
+            wind_acc: 0.0,
         };
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
@@ -225,6 +230,11 @@ impl Game {
 
     pub fn update(&mut self, input: Option<Input>, dt: f32, time_scale: f32) {
         self.time = (self.time + dt * time_scale / DAY_LENGTH).fract();
+        self.wind_acc += dt * 60.0;
+        while self.wind_acc >= 1.0 {
+            self.wind_acc -= 1.0;
+            self.wind.tick(self.env.wind);
+        }
         if let Some(input) = input {
             self.player.update(&self.world, input, dt);
         }
@@ -1097,14 +1107,39 @@ impl Game {
             };
             let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
             let frame = frame as u32;
-            let (sheet, pos, src) = match fx {
-                22 => ("Tree_Tops", [px + 8.0 - (w / 2) as f32, py + 16.0 - h as f32], [frame * (w + 2), 0, w, h]),
-                44 => ("Tree_Branches", [px - 24.0, py - 12.0], [0, frame * 42, 40, 40]),
-                _ => ("Tree_Branches", [px, py - 12.0], [42, frame * 42, 40, 40]),
+            // Tops and branches lean about their foot, except in front of a wall.
+            let k = if self.world.wall(xi, yi) == 0 && (yi as f64) < self.env.world_surface {
+                world::draw::wind_cycle(xi, yi, self.wind.tree, self.env.wind)
+            } else {
+                0.0
+            };
+            let (sheet, pivot, origin, src, rot) = match fx {
+                22 => (
+                    "Tree_Tops",
+                    [px + 8.0 + 2.0 * k, py + 16.0 + 2.0 * k.abs()],
+                    [(w / 2) as f32, h as f32],
+                    [frame * (w + 2), 0, w, h],
+                    0.08,
+                ),
+                44 => (
+                    "Tree_Branches",
+                    [px + 16.0 + k.max(0.0) + 2.0 * k.abs(), py + 12.0],
+                    [40.0, 24.0],
+                    [0, frame * 42, 40, 40],
+                    0.06,
+                ),
+                _ => (
+                    "Tree_Branches",
+                    [px + k.min(0.0) - 2.0 * k.abs(), py + 18.0],
+                    [0.0, 30.0],
+                    [42, frame * 42, 40, 40],
+                    0.06,
+                ),
             };
             let Some(sheet) = self.sheet(&format!("{sheet}_{style}")) else { continue };
             if src[0] + src[2] <= sheet.w && src[1] + src[3] <= sheet.h {
-                out.push(Sprite::sheet(pos, sheet, src, SPRITE_LIT));
+                let pos = [pivot[0] - origin[0], pivot[1] - origin[1]];
+                out.push(Sprite { rot: k * rot, pivot: origin, ..Sprite::sheet(pos, sheet, src, SPRITE_LIT) });
             }
         }
     }

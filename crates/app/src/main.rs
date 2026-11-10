@@ -1,12 +1,12 @@
 mod audio;
 mod backdrop;
 mod cave;
-mod surface;
 mod game;
 mod inventory;
 mod items;
 mod net;
 mod proto;
+mod surface;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -140,6 +140,7 @@ impl App {
         (self.camera.sky, self.camera.background) = self.game.sky();
         self.camera.water_style = self.game.water_style(self.camera.center.y / 16.0);
         self.camera.surface = self.game.env.world_surface as f32 * 16.0;
+        self.camera.wind = [self.game.wind.grass.fract() as f32, self.game.env.wind];
         self.camera.time += dt;
     }
 
@@ -516,6 +517,7 @@ fn main() {
             time: 0.0,
             water_style: 0,
             surface: 0.0,
+            wind: [0.0; 2],
         },
         free,
         keys: Keys::default(),

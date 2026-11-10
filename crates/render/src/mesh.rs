@@ -3,8 +3,8 @@
 
 use bytemuck::{Pod, Zeroable};
 use rayon::prelude::*;
-use world::light::LightMap;
 use world::draw::Draw;
+use world::light::LightMap;
 use world::{Chunk, World, CHUNK, NO_TILE};
 
 use crate::atlas::{Atlas, SheetRef};
@@ -15,7 +15,7 @@ const WALL_BIT: u32 = 1 << 30;
 /// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30.
 /// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29.
 /// `c`: 0 for a plain 16 px cell, else the game's draw of the cell: width (7) |
-/// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22.
+/// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22 | sways << 23.
 /// Liquids have their own layout, see [`crate::liquid::chunk`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -212,8 +212,10 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
                 if t == 5 {
                     fx += 176 * (world::draw::tree_biome(world, xi, yi, fx as i32, fy as i32) + 1) as u32;
                 }
-                let shape = if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
-                if let Some(inst) = instance(s, x, y, fx, fy, draw, false, shape as u32) {
+                let shape =
+                    if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
+                let sway = !is_block(t) && world::draw::sways(world, xi, yi, t, fx as i32);
+                if let Some(inst) = instance(s, x, y, fx, fy, draw, false, shape as u32 | (sway as u32) << 3) {
                     tiles.push(inst);
                 }
             }
@@ -224,15 +226,18 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
 
 #[inline]
 #[allow(clippy::too_many_arguments)]
+/// `shape`: block shape, | 8 when the cell sways in the wind.
 fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, draw: Draw, wall: bool, shape: u32) -> Option<Instance> {
     let (fx, fy, draw) = if s.fallback { (0, 0, if wall { draw } else { Draw::CELL }) } else { (fx, fy, draw) };
     if fx + draw.w > s.w || fy + draw.h > s.h {
         return None;
     }
-    let c = if wall || draw == Draw::CELL {
+    let sway = shape >> 3;
+    let shape = shape & 7;
+    let c = if wall || (draw == Draw::CELL && sway == 0) {
         0
     } else {
-        draw.w | draw.h << 7 | ((draw.top + 64) as u32) << 14 | (draw.flip as u32) << 21 | 1 << 22
+        draw.w | draw.h << 7 | ((draw.top + 64) as u32) << 14 | (draw.flip as u32) << 21 | 1 << 22 | sway << 23
     };
     Some(Instance {
         a: x | (y << 15) | if wall { WALL_BIT } else { 0 },

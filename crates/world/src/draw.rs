@@ -84,6 +84,69 @@ pub fn cell(tile: u16, x: u32, fx: i32, fy: i32) -> Draw {
     d
 }
 
+/// Walls that let the wind through.
+pub fn wall_allows_wind(wall: u16) -> bool {
+    matches!(wall, 0 | 150 | 138 | 145 | 107 | 152 | 140 | 139 | 141 | 106 | 245 | 315 | 317)
+}
+
+/// Whether a plant cell sways in the wind: a swaying type, above the surface,
+/// out of liquid and not behind a closed wall.
+pub fn sways(world: &World, x: i64, y: i64, tile: u16, fx: i32) -> bool {
+    let swaying = matches!(
+        tile,
+        3 | 20
+            | 24
+            | 61
+            | 703
+            | 71
+            | 73
+            | 74
+            | 83
+            | 84
+            | 110
+            | 113
+            | 201
+            | 227
+            | 529
+            | 590
+            | 595
+            | 615
+            | 624
+            | 700
+            | 656
+            | 701
+            | 637
+    );
+    swaying
+        && !(tile == 227 && matches!(fx, 204 | 238 | 408 | 442 | 476))
+        && (y as f64) < surface(world)
+        && world.liquid(x, y) == 0
+        && wall_allows_wind(world.wall(x, y))
+}
+
+/// Wind phase counters, in turns; the game advances them once per tick.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Wind {
+    pub tree: f64,
+    pub grass: f64,
+}
+
+impl Wind {
+    pub fn tick(&mut self, wind: f32) {
+        let n = ((wind.abs() as f64 - 0.08) / (1.2 - 0.08)).clamp(0.0, 1.0);
+        self.tree += 1.0 / 240.0 + 1.0 / 240.0 * n * 2.0;
+        self.grass += 1.0 / 180.0 + 1.0 / 180.0 * n * 4.0;
+    }
+}
+
+/// Sideways sway of a cell at tile `(x, y)` for a counter and wind speed,
+/// 0 when the wind is too weak; the caller checks the cell is in the open.
+pub fn wind_cycle(x: i64, y: i64, counter: f64, wind: f32) -> f32 {
+    let phase = x as f32 * 0.5 + (y / 100) as f32 * 0.5;
+    let v = (counter * std::f64::consts::TAU + phase as f64).cos() as f32 * 0.5 + wind;
+    v * ((wind.abs() - 0.08) / (0.18 - 0.08)).clamp(0.0, 1.0)
+}
+
 /// Trunk variant of a tree cell from the ground under its trunk: -1 for
 /// forest, then corruption, jungle, hallow, snow, crimson, underground jungle,
 /// mushroom. Trunk sheets sit 176 px apart in `Tiles_5`.
@@ -206,6 +269,17 @@ mod tests {
         assert_eq!(cell(14, 0, 0, 0), Draw::CELL);
         assert_eq!(cell(14, 0, 0, 18).h, 18);
         assert_eq!(cell(1, 0, 0, 0), Draw::CELL);
+    }
+
+    #[test]
+    fn wind_needs_a_breeze() {
+        assert_eq!(wind_cycle(3, 10, 0.25, 0.05), 0.0);
+        // At full strength the cycle swings 0.5 around the wind speed.
+        assert!((wind_cycle(0, 0, 0.0, 0.3) - 0.8).abs() < 1e-5);
+        assert!((wind_cycle(0, 0, 0.5, 0.3) + 0.2).abs() < 1e-5);
+        let mut w = Wind::default();
+        w.tick(1.2);
+        assert!((w.grass - 5.0 / 180.0).abs() < 1e-12 && (w.tree - 3.0 / 240.0).abs() < 1e-12);
     }
 
     #[test]

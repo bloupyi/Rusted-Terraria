@@ -11,6 +11,8 @@ struct Camera {
     water: array<vec4<u32>, 15>,
     // Water style, top of the underground backdrop in world pixels.
     liquid: vec4<f32>,
+    // Grass wind counter in turns (fractional part), wind speed.
+    wind: vec4<f32>,
 }
 
 @group(0) @binding(0) var<uniform> cam: Camera;
@@ -34,6 +36,14 @@ fn corner(vi: u32) -> vec2<f32> {
     return vec2<f32>(f32(vi & 1u), f32(vi >> 1u));
 }
 
+// `p` turned clockwise (y down) by `rot` radians about `about`.
+fn turn(p: vec2<f32>, about: vec2<f32>, rot: f32) -> vec2<f32> {
+    let d = p - about;
+    let s = sin(rot);
+    let k = cos(rot);
+    return about + vec2<f32>(d.x * k - d.y * s, d.x * s + d.y * k);
+}
+
 @vertex
 fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: u32, @location(2) d: u32) -> VOut {
     let c = corner(vi);
@@ -49,7 +59,16 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
         pad = vec2<f32>((16.0 - size.x) / 2.0, f32((d >> 14u) & 127u) - 64.0);
         u = select(c.x, 1.0 - c.x, ((d >> 21u) & 1u) != 0u);
     }
-    out.pos = vec4<f32>((tile * 16.0 + pad + c * size) * cam.scale + cam.offset, 0.0, 1.0);
+    var p = tile * 16.0 + pad + c * size;
+    if ((d >> 23u) & 1u) != 0u {
+        // Plants lean with the wind about the bottom middle of their cell.
+        let wind = cam.wind.y;
+        let phase = tile.x * 0.5 + floor(tile.y / 100.0) * 0.5;
+        let k = (cos(cam.wind.x * 6.2831855 + phase) * 0.5 + wind) * clamp((abs(wind) - 0.08) / 0.1, 0.0, 1.0);
+        let shift = vec2<f32>(k, abs(k));
+        p = turn(p + shift, tile * 16.0 + vec2<f32>(8.0, 16.0) + shift, k * 0.1);
+    }
+    out.pos = vec4<f32>(p * cam.scale + cam.offset, 0.0, 1.0);
     out.base = vec2<u32>(b & 0xfffu, (b >> 12u) & 0xfffu);
     out.texel = vec2<f32>(out.base) + vec2<f32>(u, c.y) * size;
     out.layer = (b >> 24u) & 31u;
@@ -166,10 +185,12 @@ fn vs_rect(
     @location(2) color: vec4<f32>,
     @location(3) uv: vec4<f32>,
     @location(4) flags: u32,
+    @location(5) rot: f32,
+    @location(6) pivot: vec2<f32>,
 ) -> RectOut {
     let c = corner(vi);
     var out: RectOut;
-    let world = pos + c * size;
+    let world = turn(pos + c * size, pos + pivot, rot);
     out.pos = vec4<f32>(world * cam.scale + cam.offset, 0.0, 1.0);
     out.color = color;
     let u = select(c.x, 1.0 - c.x, (flags & 512u) != 0u);
