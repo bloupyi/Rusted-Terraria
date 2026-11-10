@@ -5,10 +5,10 @@ use render::atlas::SheetRef;
 use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
-use crate::{backdrop, cave};
 use crate::inventory::{Inventory, Item};
 use crate::items::{self, Furniture, Material, Out, Tool, RECIPES, USE_TIME};
 use crate::net::{MobState, Msg};
+use crate::{backdrop, cave};
 use formats::wld::Env;
 use world::light::Rect;
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -84,18 +84,8 @@ pub fn sprite_sheets() -> Vec<String> {
     // Leaf styles the trees of `world::draw::tree_foliage` use.
     v.extend((0..=20).flat_map(|s| [format!("Tree_Tops_{s}"), format!("Tree_Branches_{s}")]));
     v.extend(
-        [
-            "Item_205",
-            "Item_206",
-            "Item_207",
-            "Item_1128",
-            "NPC_1",
-            "NPC_2",
-            "NPC_3",
-            "NPC_4",
-            "NPC_22",
-        ]
-        .map(String::from),
+        ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22"]
+            .map(String::from),
     );
     v.extend(items::sheets());
     v
@@ -596,12 +586,24 @@ impl Game {
         let (hw, hh) = (w / (2.0 * zoom), h / (2.0 * zoom));
         let cave_view = cave::View {
             screen_x: (center[0] - w / 2.0) as f64,
+            screen_y: (center[1] - h / 2.0) as f64,
+            screen_w: w as f64,
+            screen_h: h as f64,
             x0: (center[0] - hw) as f64,
             y0: (center[1] - hh) as f64,
             x1: (center[0] + hw) as f64,
             y1: (center[1] + hh) as f64,
         };
-        v.extend(cave::layers(&self.env, self.world.header.world_id, self.world.height, &cave_view, ticks, sheets));
+        let zones = world::scene::scan(&self.world, &self.env, (center[0] / 16.0) as i64, (center[1] / 16.0) as i64);
+        v.extend(cave::layers(
+            &self.env,
+            self.world.header.world_id,
+            self.world.height,
+            &zones,
+            &cave_view,
+            ticks,
+            sheets,
+        ));
         v
     }
 
@@ -1077,7 +1079,9 @@ impl Game {
                 66 => -1,
                 _ => continue,
             };
-            let Some((style, w, h, frame)) = world::draw::tree_foliage(&self.world, xi, yi, dx, frame) else { continue };
+            let Some((style, w, h, frame)) = world::draw::tree_foliage(&self.world, xi, yi, dx, frame) else {
+                continue;
+            };
             let (px, py) = (x as f32 * 16.0, y as f32 * 16.0);
             let frame = frame as u32;
             let (sheet, pos, src) = match fx {
