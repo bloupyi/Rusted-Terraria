@@ -97,6 +97,7 @@ Controles :
   demarrer ainsi.
 - T : jeter l'objet tenu (ou celui porte au curseur), comme la touche Jeter du jeu ;
   clic droit dans le monde avec un objet au curseur : le jeter aussi.
+- H : soin rapide, boit la potion de soin qui convient le mieux (QuickHeal) ;
 - Molette : zoom autour du curseur. L : couper l'eclairage. Y (maintenu) : accelerer
   le temps. Fermer la fenetre pour quitter.
 
