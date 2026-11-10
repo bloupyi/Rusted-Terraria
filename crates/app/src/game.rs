@@ -59,9 +59,6 @@ const FIST_DAMAGE: i32 = 2;
 /// Crafting stations count within this many tiles of the player.
 const STATION_REACH: i64 = 4;
 const ATTACK_EVERY: f32 = 0.35;
-/// Dirt-brown backdrop under the surface, lit like the tiles.
-/// Walked pixels per leg frame.
-const WALK_FRAME: f32 = 6.0;
 /// Body sheets back to front: sheet, column, row (`u32::MAX`: leg frame) and tint.
 const PLAYER_LAYERS: [(&str, u32, u32, [f32; 4]); 12] = [
     ("Player_0_10", 0, u32::MAX, SKIN),
@@ -160,7 +157,8 @@ pub struct Game {
     bg_tick: Option<u32>,
     /// Wind phases for plants and trees, and the time not yet turned into ticks.
     pub wind: world::draw::Wind,
-    wind_acc: f32,
+    /// Part of a 60 Hz tick not yet run.
+    pub tick_acc: f32,
 }
 
 impl Game {
@@ -220,7 +218,7 @@ impl Game {
             bg_fade: Default::default(),
             bg_tick: None,
             wind: Default::default(),
-            wind_acc: 0.0,
+            tick_acc: 0.0,
         };
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
@@ -230,13 +228,17 @@ impl Game {
 
     pub fn update(&mut self, input: Option<Input>, dt: f32, time_scale: f32) {
         self.time = (self.time + dt * time_scale / DAY_LENGTH).fract();
-        self.wind_acc += dt * 60.0;
-        while self.wind_acc >= 1.0 {
-            self.wind_acc -= 1.0;
+        // The game's 60 Hz tick; a long frame catches up at most a few ticks.
+        self.tick_acc = (self.tick_acc + dt * 60.0).min(4.0);
+        while self.tick_acc >= 1.0 {
+            self.tick_acc -= 1.0;
             self.wind.tick(self.env.wind);
-        }
-        if let Some(input) = input {
-            self.player.update(&self.world, input, dt);
+            if let Some(input) = input {
+                self.player.tick(&self.world, input);
+            }
+            for (_, p) in &mut self.others {
+                p.animate();
+            }
         }
         self.update_mobs(dt, input.is_some());
         self.update_drops(dt);
@@ -312,7 +314,7 @@ impl Game {
             self.invulnerable = INVULNERABLE;
             self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
             let away = if self.player.center().0 < m.body.center().0 { -1.0 } else { 1.0 };
-            (self.player.vx, self.player.vy) = (away * 250.0, -250.0);
+            (self.player.vx, self.player.vy) = (away * 4.5, -3.5);
             if self.hp <= 0 {
                 self.hp = MAX_HP;
                 self.player = Player::spawn(&self.world, self.spawn_x);
@@ -444,10 +446,9 @@ impl Game {
                     self.others.len() - 1
                 });
                 let p = &mut self.others[i].1;
-                let walked = (x - p.x).abs();
                 (p.x, p.y, p.vx, p.vy, p.facing_left) = (x, y, vx, vy, facing_left);
+                p.prev = [x, y];
                 p.on_ground = vy == 0.0;
-                p.walked = if p.on_ground { p.walked + walked } else { 0.0 };
             }
             Msg::Tile { x, y, ref cell } if self.world.in_bounds(x as i64, y as i64) => {
                 self.world.set_cell(x, y, cell);
@@ -1192,14 +1193,10 @@ impl Game {
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
     fn player_sprites(&self, p: &Player, dim: bool, out: &mut Vec<Sprite>) {
-        let pos = [p.x + player::WIDTH / 2.0 - 20.0, p.y + player::HEIGHT - 54.0];
-        let legs = if !p.on_ground {
-            5
-        } else if p.vx.abs() > 10.0 {
-            6 + (p.walked / WALK_FRAME) as u32 % 14
-        } else {
-            0
-        };
+        let [x, y] = p.drawn(self.tick_acc);
+        let (x, y) = (x, y + p.gfx_off_y);
+        let pos = [x + player::WIDTH / 2.0 - 20.0, y + player::HEIGHT - 54.0];
+        let legs = p.leg_frame;
         let flip = if p.facing_left { SPRITE_FLIP } else { 0 } | SPRITE_LIT;
         let mut any = false;
         for &(name, col, row, color) in &PLAYER_LAYERS {
@@ -1214,7 +1211,7 @@ impl Game {
             any = true;
         }
         if !any {
-            out.push(Sprite::flat([p.x, p.y], [player::WIDTH, player::HEIGHT], [0.85, 0.65, 0.45, 1.0]));
+            out.push(Sprite::flat([x, y], [player::WIDTH, player::HEIGHT], [0.85, 0.65, 0.45, 1.0]));
         }
     }
 
