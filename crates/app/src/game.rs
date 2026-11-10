@@ -49,6 +49,8 @@ const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
 pub const MAX_HP: i32 = 100;
+/// `statManaMax`: one star; nothing spends mana yet.
+pub const MAX_MANA: i32 = 20;
 const MAX_MOBS: usize = 5;
 const SPAWN_EVERY: f32 = 2.0;
 /// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
@@ -85,7 +87,10 @@ pub fn sprite_sheets() -> Vec<String> {
         ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
             .map(String::from),
     );
-    v.extend(["Inventory_Back", "Inventory_Back9", "Inventory_Back14", "Heart"].map(String::from));
+    v.extend(
+        ["Inventory_Back", "Inventory_Back9", "Inventory_Back13", "Inventory_Back14", "Heart", "Mana"]
+            .map(String::from),
+    );
     v.extend(items::sheets());
     v
 }
@@ -98,6 +103,8 @@ pub struct Template {
     pub cells: Vec<(i32, i32, i16, i16)>,
 }
 const DROP_SIZE: f32 = 10.0;
+/// `WorldItem.DefaultGrabDelay`: 100 ticks.
+const GRAB_DELAY: f32 = 100.0 / 60.0;
 /// Dropped items fly to the player from this far, and are picked up from `PICKUP`.
 const MAGNET: f32 = 5.0 * 16.0;
 const PICKUP: f32 = 1.5 * 16.0;
@@ -110,6 +117,8 @@ pub struct Drop {
     pub vy: f32,
     pub item: Item,
     pub count: u16,
+    /// Seconds before the player who threw it can take it back (`grabDelayTime`).
+    pub grab_delay: f32,
 }
 
 pub struct Game {
@@ -138,6 +147,9 @@ pub struct Game {
     pub hp: i32,
     /// Ticks without damage after a hit.
     immune: i32,
+    /// `lifeRegenTime` and `lifeRegenCount`.
+    regen_time: f32,
+    regen_count: i32,
     /// Ticks before the swing can hit another monster.
     attack_cd: i32,
     /// World point the held item is used at this frame.
@@ -215,6 +227,8 @@ impl Game {
             outbox: Vec::new(),
             hp: MAX_HP,
             immune: 0,
+            regen_time: 0.0,
+            regen_count: 0,
             attack_cd: 0,
             use_target: None,
             release_use: true,
@@ -260,6 +274,7 @@ impl Game {
                     self.player.facing_left = facing;
                 }
                 self.contact_damage();
+                self.life_regen();
             }
             for (_, p) in &mut self.others {
                 p.animate();
@@ -368,6 +383,7 @@ impl Game {
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
         let damage = self.damage_var(m.kind.damage()).max(1);
         self.hp -= damage;
+        self.regen_time = 0.0;
         let b = self.player.body;
         self.text_at([b.x, b.y, b.w, b.h], combat_text::DAMAGED_FRIENDLY, damage, false);
         self.immune = if damage == 1 { 20 } else { 40 };
@@ -376,6 +392,26 @@ impl Game {
         if self.hp <= 0 {
             self.hp = MAX_HP;
             self.player = Player::spawn(&self.world, self.spawn_x);
+        }
+    }
+
+    /// `UpdateLifeRegen` without buffs, debuffs or accessories: after five
+    /// seconds unhurt life comes back faster and faster, more when standing still.
+    fn life_regen(&mut self) {
+        self.regen_time = (self.regen_time + 1.0).min(3600.0);
+        let t = self.regen_time;
+        let steps = [300.0, 600.0, 900.0, 1200.0, 1500.0, 1800.0, 2400.0, 3000.0, 3600.0];
+        let mut regen = steps.iter().filter(|&&s| t >= s).count() as f32;
+        regen *= if self.player.vx != 0.0 { 0.5 } else { 1.25 };
+        if self.env.expert {
+            regen /= 2.0;
+        }
+        regen *= MAX_HP as f32 / 400.0 * 0.85 + 0.15;
+        // `Math.Round` rounds halves to even.
+        self.regen_count += regen.round_ties_even() as i32;
+        while self.regen_count >= 120 {
+            self.regen_count -= 120;
+            self.hp = (self.hp + 1).min(MAX_HP);
         }
     }
 
@@ -427,7 +463,7 @@ impl Game {
             _ => None,
         };
         if let Some((item, count)) = drop {
-            self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count });
+            self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count, grab_delay: 0.0 });
         }
     }
 
@@ -521,7 +557,9 @@ impl Game {
         let sfx = &mut self.sfx;
         self.drops.retain_mut(|d| {
             let (dx, dy) = (px - (d.x + DROP_SIZE / 2.0), py - (d.y + DROP_SIZE / 2.0));
-            let dist = (dx * dx + dy * dy).sqrt();
+            d.grab_delay = (d.grab_delay - dt).max(0.0);
+            // Out of reach while the thrower's delay runs.
+            let dist = if d.grab_delay > 0.0 { f32::INFINITY } else { (dx * dx + dy * dy).sqrt() };
             if dist < PICKUP {
                 let before = d.count;
                 d.count = inventory.add(d.item, d.count);
@@ -963,6 +1001,7 @@ impl Game {
                 vy: -120.0,
                 item,
                 count,
+                grab_delay: 0.0,
             });
         }
         for &(x, y) in &cells {
@@ -1112,7 +1151,7 @@ impl Game {
         let rest = self.inventory.add(item, r.count);
         if rest > 0 {
             let (x, y) = self.player.center();
-            self.drops.push(Drop { x, y, vx: 0.0, vy: 0.0, item, count: rest });
+            self.drops.push(Drop { x, y, vx: 0.0, vy: 0.0, item, count: rest, grab_delay: 0.0 });
         }
         self.sfx.push(Sfx::Grab);
         true
@@ -1217,6 +1256,30 @@ impl Game {
         self.scene.mesher.atlas.named.get(name)
     }
 
+    /// `DropSelectedItem`: throws the held stack (the carried one first) ahead of
+    /// the player. `animate`: the throw key, which holds the hand for 10 ticks.
+    pub fn throw_held(&mut self, animate: bool) {
+        if self.item_animation > 0 && animate {
+            return;
+        }
+        let Some(stack) = self.inventory.take_held() else { return };
+        let (cx, cy) = self.player.center();
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        self.drops.push(Drop {
+            x: cx - DROP_SIZE / 2.0,
+            y: cy - DROP_SIZE / 2.0,
+            // The game's (4 * direction + velocity.X, -2) in pixels per tick.
+            vx: (4.0 * dir + self.player.vx) * 60.0,
+            vy: -2.0 * 60.0,
+            item: stack.item,
+            count: stack.count,
+            grab_delay: GRAB_DELAY,
+        });
+        if animate {
+            self.item_animation = 10;
+        }
+    }
+
     /// A swing or use is under way (the inventory ignores clicks then).
     pub fn using_item(&self) -> bool {
         self.item_animation != 0 || self.item_time != 0
@@ -1242,11 +1305,16 @@ impl Game {
         }
     }
 
+    /// `item`'s `ItemID` name and the defaults its tooltip shows.
+    pub fn item_data(&self, item: Item) -> Option<(&'static str, item_ids::Stats)> {
+        let id = self.item_id(item)?;
+        let i = item_ids::ITEMS.binary_search_by_key(&id, |e| e.0).ok()?;
+        Some((item_ids::ITEMS[i].1, item_ids::ITEMS[i].2))
+    }
+
     /// `item`'s name in the game's language (`Lang.GetItemName`).
     pub fn item_name(&self, item: Item) -> Option<&str> {
-        let id = self.item_id(item)?;
-        let i = item_ids::ITEM_NAME.binary_search_by_key(&id, |e| e.0).ok()?;
-        self.texts.get(&format!("ItemName.{}", item_ids::ITEM_NAME[i].1))
+        self.texts.get(&format!("ItemName.{}", self.item_data(item)?.0))
     }
 
     /// The larger side of `item`'s picture, in its own pixels.
@@ -1905,6 +1973,43 @@ mod tests {
     }
 
     #[test]
+    fn thrown_items_fly_ahead_and_wait_before_coming_back() {
+        let mut g = game();
+        g.inventory.selected = 0;
+        let before = g.inventory.count(Item::Tool(Tool::Sword(items::Tier::Copper)));
+        g.player.facing_left = false;
+        g.throw_held(true);
+        assert_eq!(g.item_animation, 10);
+        assert_eq!(g.drops.len(), 1);
+        assert!(g.drops[0].vx > 0.0, "thrown the way the player faces");
+        assert_eq!(g.inventory.count(Item::Tool(Tool::Sword(items::Tier::Copper))), before - 1);
+        g.update_drops(1.0);
+        assert_eq!(g.drops.len(), 1, "not taken back at once");
+        // Bring it back beside the player once the delay is over.
+        let (cx, cy) = g.player.center();
+        (g.drops[0].x, g.drops[0].y) = (cx - 5.0, cy - 5.0);
+        g.update_drops(1.0);
+        assert!(g.drops.is_empty(), "picked up again");
+        g.throw_held(true);
+        assert_eq!(g.drops.len(), 0, "not during the 10 ticks");
+    }
+
+    #[test]
+    fn life_comes_back_after_a_while_unhurt() {
+        let mut g = game();
+        let mut healed = |vx: f32| {
+            (g.hp, g.regen_time, g.regen_count, g.player.vx) = (50, 0.0, 0, vx);
+            for _ in 0..1200 {
+                g.life_regen();
+            }
+            g.hp - 50
+        };
+        // Nothing before ten seconds at 100 life, then one count a tick.
+        assert_eq!(healed(0.0), 5);
+        assert_eq!(healed(1.0), 2, "slower on the move");
+    }
+
+    #[test]
     fn items_know_their_game_id() {
         let g = game();
         assert_eq!(g.item_id(Item::Tool(Tool::Pickaxe(items::Tier::Copper))), Some(3509));
@@ -1913,7 +2018,7 @@ mod tests {
         assert_eq!(g.item_id(Item::Bucket(Some(Liquid::Water))), Some(206));
         assert_eq!(g.item_name(Item::Block(items::STONE)), None, "no texts without an install");
         assert!(item_ids::TILE_ITEM.windows(2).all(|w| w[0].0 < w[1].0));
-        assert!(item_ids::ITEM_NAME.windows(2).all(|w| w[0].0 < w[1].0));
+        assert!(item_ids::ITEMS.windows(2).all(|w| w[0].0 < w[1].0));
     }
 
     #[test]

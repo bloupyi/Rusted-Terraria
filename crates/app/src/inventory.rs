@@ -88,13 +88,23 @@ impl Inventory {
         }
     }
 
+    /// The held stack: the carried one when there is one (`PickItemSelectionOverride`
+    /// selects slot 58), else the selected hotbar slot.
     pub fn selected(&self) -> Option<Stack> {
-        self.slots[self.selected]
+        self.mouse.or(self.slots[self.selected])
     }
 
-    /// Uses one of the selected stack.
+    fn held_mut(&mut self) -> &mut Option<Stack> {
+        if self.mouse.is_some() {
+            &mut self.mouse
+        } else {
+            &mut self.slots[self.selected]
+        }
+    }
+
+    /// Uses one of the held stack.
     pub fn consume(&mut self) {
-        let slot = &mut self.slots[self.selected];
+        let slot = self.held_mut();
         if let Some(s) = slot {
             s.count -= 1;
             if s.count == 0 {
@@ -104,7 +114,12 @@ impl Inventory {
     }
 
     pub fn set_selected(&mut self, item: Item) {
-        self.slots[self.selected] = Some(Stack { item, count: 1 });
+        *self.held_mut() = Some(Stack { item, count: 1 });
+    }
+
+    /// Takes the whole held stack out, to be thrown.
+    pub fn take_held(&mut self) -> Option<Stack> {
+        self.held_mut().take()
     }
 
     /// `ItemSlot.LeftClick` on slot `i`: swaps it with the mouse, then stacks the
@@ -193,6 +208,20 @@ mod tests {
         inv.return_mouse();
         assert_eq!((inv.slots[0].unwrap().count, inv.mouse), (11, None));
         assert!(!inv.left_click(5), "nothing either side");
+    }
+
+    #[test]
+    fn the_carried_item_is_held_first() {
+        let mut inv = Inventory::new(&[Item::Block(1)]);
+        inv.add(Item::Block(1), 4);
+        inv.mouse = Some(Stack { item: Item::Block(2), count: 2 });
+        assert_eq!(inv.selected().map(|s| s.item), Some(Item::Block(2)));
+        inv.consume();
+        inv.consume();
+        assert_eq!(inv.mouse, None, "used up from the mouse");
+        assert_eq!(inv.selected().map(|s| s.count), Some(5), "back to the hotbar");
+        assert_eq!(inv.take_held().map(|s| s.count), Some(5));
+        assert_eq!(inv.slots[0], None);
     }
 
     #[test]

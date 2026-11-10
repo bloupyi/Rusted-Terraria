@@ -9,6 +9,7 @@ mod items;
 mod net;
 mod proto;
 mod surface;
+mod tooltip;
 mod ui;
 
 use std::path::PathBuf;
@@ -85,6 +86,8 @@ struct App {
     /// The inventory is open (Escape, as in the game), with the crafting rows under it.
     inventory_open: bool,
     split: ui::StackSplit,
+    /// The right button went down since the last update (`Main.mouseRightRelease`).
+    right_fresh: bool,
     /// Craftable recipes and what each makes, while the crafting rows are open.
     recipes: Vec<(usize, Item)>,
     drag: Option<Vec2>,
@@ -148,9 +151,17 @@ impl App {
                 self.game.use_at(w.x, w.y, self.free);
             }
             if self.buttons[1] && !self.over_ui() {
-                self.game.place(tx, ty, self.free);
+                // A right click in the world throws what the cursor carries.
+                if self.game.inventory.mouse.is_some() {
+                    if self.right_fresh {
+                        self.game.throw_held(false);
+                    }
+                } else {
+                    self.game.place(tx, ty, self.free);
+                }
             }
         }
+        self.right_fresh = false;
         self.sync_net();
         for sfx in self.game.sfx.drain(..) {
             if let Some(a) = &mut self.audio {
@@ -224,6 +235,8 @@ impl App {
         }
         let life = game.texts.get("LegacyInterface.0").unwrap_or("");
         self.hud.draw_life(&mut p, size.x, game.hp.max(0), game::MAX_HP, life);
+        let mana = game.texts.get("LegacyInterface.2").unwrap_or("");
+        self.hud.draw_mana(&mut p, size.x, game::MAX_MANA, game::MAX_MANA, mana);
         if let Some(life) = game.boss_life() {
             let (w, x) = (size.x * 0.5, size.x * 0.25);
             p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
@@ -244,12 +257,12 @@ impl App {
                 p.text(ui::FontId::ItemStack, &count.to_string(), at, 0.75, [1.0; 4], 0.75);
             }
         }
-        // `ItemSlot.MouseHover`: the name, with the stack, of what is under the cursor.
+        // `ItemSlot.MouseHover`: the tooltip of what is under the cursor.
         let cursor = self.cursor.into();
         if let Some(stack) = self.slot_under_cursor().and_then(|i| inv.slots[i]) {
-            if let Some(name) = game.item_name(stack.item) {
-                let text = if stack.count > 1 { format!("{name} ({})", stack.count) } else { name.to_string() };
-                self.hud.draw_mouse_text(&mut p, cursor, size.into(), &text, inv.mouse.is_some());
+            if let (Some(name), Some((key, stats))) = (game.item_name(stack.item), game.item_data(stack.item)) {
+                let lines = tooltip::lines(&game.texts, name, key, &stats, stack.count);
+                self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &lines, inv.mouse.is_some());
             }
         }
         if let Some(m) = inv.mouse {
@@ -368,11 +381,15 @@ impl ApplicationHandler for App {
                     KeyCode::KeyS | KeyCode::ArrowDown => k.down = down,
                     KeyCode::Space => k.jump = down,
                     KeyCode::ShiftLeft | KeyCode::ShiftRight => k.shift = down,
-                    KeyCode::KeyT => k.fast_time = down,
+                    KeyCode::KeyY => k.fast_time = down,
+                    // The game's Throw key.
+                    KeyCode::KeyT if press => self.game.throw_held(true),
                     KeyCode::Escape if press => {
                         self.inventory_open = !self.inventory_open;
                         if !self.inventory_open {
+                            // `GetOrDropItem`: back into the inventory, the rest thrown.
                             self.game.inventory.return_mouse();
+                            self.game.throw_held(false);
                         }
                     }
                     KeyCode::KeyL if press => self.camera.lighting = !self.camera.lighting,
@@ -414,7 +431,10 @@ impl ApplicationHandler for App {
                         self.buttons[0] = down;
                         self.ui_click = down && self.click_ui();
                     }
-                    MouseButton::Right => self.buttons[1] = down,
+                    MouseButton::Right => {
+                        self.buttons[1] = down;
+                        self.right_fresh = down;
+                    }
                     MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
                     _ => {}
                 }
@@ -580,8 +600,12 @@ fn main() {
     let env = world.header.env.clone().unwrap_or_default();
     sheets.extend(backdrop::sheets(&env));
     sheets.extend(cave::sheets(&env, world.header.world_id));
-    let (fonts, pages) =
-        ui::Fonts::load(images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts")).as_deref());
+    let culture = formats::lang::culture();
+    let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
+    let texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
+    println!("texts: {culture}, {} entries", texts.len());
+    let fonts_dir = images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts"));
+    let (fonts, pages) = ui::Fonts::load(fonts_dir.as_deref(), &texts.chars());
     let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets, pages);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
@@ -598,10 +622,7 @@ fn main() {
 
     let world_px = Vec2::new(world.width as f32, world.height as f32) * 16.0;
     let mut game = Game::new(world, scene);
-    let culture = formats::lang::culture();
-    let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
-    game.texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
-    println!("texts: {culture}, {} entries", game.texts.len());
+    game.texts = texts;
     game.client = net.as_ref().is_some_and(|n| !n.host);
     let (cx, cy) = at.map_or(game.player.center(), |(x, y)| (x * 16.0, y * 16.0));
     let mut app = App {
@@ -631,6 +652,7 @@ fn main() {
         ui_click: false,
         inventory_open: false,
         split: ui::StackSplit::default(),
+        right_fresh: false,
         recipes: Vec::new(),
         drag: None,
         last: Instant::now(),

@@ -2,7 +2,7 @@
 //! `ItemSlot.Draw`, the classic life hearts of `ClassicPlayerResourcesDisplaySet`,
 //! and text in the game's own fonts.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use formats::xnb::{self, Font, Texture};
@@ -15,6 +15,7 @@ use crate::inventory::HOTBAR;
 const BACK: f32 = 52.0;
 /// Items bigger than this are shrunk to fit a slot (`DrawItemIcon`'s size limit).
 pub const ICON_LIMIT: f32 = 32.0;
+const MANA_PER_STAR: i32 = 20;
 const LIFE_PER_HEART: i32 = 20;
 
 pub struct Fonts {
@@ -50,11 +51,12 @@ fn page_sheet(id: FontId, page: usize) -> String {
 impl Fonts {
     /// Reads the Latin glyphs of the fonts under `dir` (`Content/Fonts`); their
     /// pages are returned to be packed into the atlas.
-    pub fn load(dir: Option<&Path>) -> (Self, Vec<(String, Texture)>) {
+    /// Latin, and every other character `chars` (the loaded texts) holds.
+    pub fn load(dir: Option<&Path>, chars: &HashSet<char>) -> (Self, Vec<(String, Texture)>) {
         let mut pages = Vec::new();
         let mut read = |id: FontId| {
             let data = std::fs::read(dir?.join(format!("{}.xnb", id.file()))).ok()?;
-            let mut font = xnb::read_font(&data, |c| c < '\u{250}').ok()?;
+            let mut font = xnb::read_font(&data, |c| c < '\u{250}' || chars.contains(&c)).ok()?;
             for (i, p) in font.pages.iter_mut().enumerate().filter(|(_, p)| !p.rgba.is_empty()) {
                 pages
                     .push((page_sheet(id, i), std::mem::replace(p, Texture { width: 0, height: 0, rgba: Vec::new() })));
@@ -290,6 +292,28 @@ impl Painter<'_> {
         self.out.push(s);
     }
 
+    /// `src` of a sheet stretched over `size` at `p`.
+    pub fn region(&mut self, name: &str, src: [u32; 4], p: [f32; 2], size: [f32; 2], color: [f32; 4]) {
+        let Some(sheet) = self.sheets.get(name) else { return };
+        let mut s = Sprite::sheet(self.world(p), sheet, src, 0);
+        s.size = [size[0] * self.unit, size[1] * self.unit];
+        s.color = color;
+        self.out.push(s);
+    }
+
+    /// `Utils.DrawInvBG`: `Inventory_Back13` cut in nine, its 10 px corners kept.
+    pub fn inv_bg(&mut self, x: f32, y: f32, w: f32, h: f32, color: [f32; 4]) {
+        let Some(&SheetRef { w: tw, h: th, .. }) = self.sheets.get("Inventory_Back13") else { return };
+        let (w, h) = (w.max(20.0), h.max(20.0));
+        let cols = [(0, x, 10.0), (10, x + 10.0, w - 20.0), (tw - 10, x + w - 10.0, 10.0)];
+        let rows = [(0, y, 10.0), (10, y + 10.0, h - 20.0), (th - 10, y + h - 10.0, 10.0)];
+        for (sy, py, ph) in rows {
+            for (sx, px, pw) in cols {
+                self.region("Inventory_Back13", [sx, sy, 10, 10], [px, py], [pw, ph], color);
+            }
+        }
+    }
+
     fn glyphs(&mut self, id: FontId, text: &str, p: [f32; 2], scale: f32, color: [f32; 4]) {
         self.string(id, text, p, [0.0; 2], scale, 0.0, color);
     }
@@ -416,19 +440,42 @@ impl Hud {
         self.slot_item(p, cursor, self.cursor_scale(), count, icon);
     }
 
-    /// `MouseTextInner` for a plain line: beside the cursor, kept on screen.
-    pub fn draw_mouse_text(&self, p: &mut Painter, cursor: [f32; 2], screen: [f32; 2], text: &str, carrying: bool) {
-        let [w, h] = p.measure(FontId::MouseText, text);
-        let mut x = cursor[0] as i32 + 14 + if carrying { 34 } else { 0 };
-        let mut y = cursor[1] as i32 + 14;
-        if x as f32 + w + 40.0 > screen[0] {
-            x = (screen[0] - w - 40.0) as i32;
+    /// `MouseText_DrawItemTooltip` with the opaque box the game draws by default.
+    pub fn draw_item_tooltip(
+        &self,
+        p: &mut Painter,
+        cursor: [f32; 2],
+        screen: [f32; 2],
+        lines: &[(String, [u8; 3])],
+        carrying: bool,
+    ) {
+        let sizes: Vec<[f32; 2]> = lines.iter().map(|l| p.measure(FontId::MouseText, &l.0)).collect();
+        let w = sizes.iter().map(|s| s[0]).fold(0.0, f32::max);
+        let h: f32 = sizes.iter().map(|s| s[1]).sum();
+        let mut x = cursor[0] as i32 + 14 + if carrying { 34 } else { 0 } + 6 + 8;
+        let mut y = cursor[1] as i32 + 14 + 6 + 2;
+        if x as f32 + w + 18.0 > screen[0] {
+            x = (screen[0] - w - 18.0) as i32;
         }
-        if y as f32 + h + 40.0 > screen[1] {
-            y = (screen[1] - h - 40.0) as i32;
+        if y as f32 + h + 18.0 > screen[1] {
+            y = (screen[1] - h - 18.0) as i32;
         }
+        let (x, y) = (x as f32, y as f32);
+        let k = 0.925 / 255.0;
+        p.inv_bg(
+            x - 14.0,
+            y - 9.0,
+            (w as i32 + 28) as f32,
+            (h as i32 + 13) as f32,
+            [23.0 * k, 25.0 * k, 81.0 * k, 0.925],
+        );
         let c = self.text_color as f32 / 255.0;
-        p.text(FontId::MouseText, text, [x as f32, y as f32], 1.0, gray(c, c), 2.0);
+        let mut dy = 0.0;
+        for ((text, rgb), size) in lines.iter().zip(&sizes) {
+            let color = [rgb[0] as f32 * c / 255.0, rgb[1] as f32 * c / 255.0, rgb[2] as f32 * c / 255.0, c];
+            p.text(FontId::MouseText, text, [x, y + dy], 1.0, color, 2.0);
+            dy += size[1].floor();
+        }
     }
 
     /// `ClassicPlayerResourcesDisplaySet.DrawLife` for up to 400 life (no golden hearts).
@@ -466,6 +513,32 @@ impl Hud {
                 scale,
                 gray(v, (alpha as f32 * 0.9) as i32 as f32 / 255.0),
             );
+        }
+    }
+
+    /// `ClassicPlayerResourcesDisplaySet.DrawMana`: a star per 20 mana under `label` ("Mana").
+    pub fn draw_mana(&self, p: &mut Painter, screen_w: f32, mana: i32, mana_max: i32, label: &str) {
+        let anchor = screen_w - 800.0;
+        let c = self.text_color as f32 / 255.0;
+        let w = p.measure(FontId::MouseText, label)[0];
+        let left = if w >= 45.0 { w as i32 + 5 } else { 50 };
+        p.plain_text(FontId::MouseText, label, [800.0 - left as f32 + anchor, 6.0], gray(c, c));
+        let Some(&SheetRef { w: sw, h: sh, .. }) = p.sheets.get("Mana") else { return };
+        let (sw, sh) = (sw as f32, sh as f32);
+        for i in 1..=mana_max / MANA_PER_STAR {
+            let (alpha, mut scale, pulse) = if mana >= i * MANA_PER_STAR {
+                (255, 1.0, mana == i * MANA_PER_STAR)
+            } else {
+                let part = (mana - (i - 1) * MANA_PER_STAR) as f32 / MANA_PER_STAR as f32;
+                (((30.0 + 225.0 * part) as i32).max(30), (part / 4.0 + 0.75).max(0.75), part > 0.0)
+            };
+            if pulse {
+                scale += self.cursor_scale() - 1.0;
+            }
+            let y = 30.0 + (sh / 2.0).floor() + (sh - sh * scale) / 2.0 + 28.0 * (i - 1) as f32;
+            let v = alpha as f32 / 255.0;
+            let origin = [(sw / 2.0).floor(), (sh / 2.0).floor()];
+            p.image("Mana", [775.0 + anchor, y], origin, scale, gray(v, (alpha as f32 * 0.9) as i32 as f32 / 255.0));
         }
     }
 }

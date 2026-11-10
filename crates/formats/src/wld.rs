@@ -36,6 +36,8 @@ pub struct Header {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Env {
     pub moon_type: u8,
+    /// `Main.expertMode`: expert or master, or classic in a "for the worthy" world.
+    pub expert: bool,
     /// Forest zone borders in tiles.
     pub tree_x: [i32; 3],
     pub world_surface: f64,
@@ -182,9 +184,12 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     let f64 = |r: &mut Reader| Ok::<f64, Error>(f64::from_le_bytes(r.array()?));
     let bool = |r: &mut Reader| Ok::<bool, Error>(r.u8()? != 0);
     // Game mode, then one byte per special seed flag present at this version.
-    skip(r, 4)?;
+    let mode = r.i32()?;
     let seeds = [222, 227, 238, 239, 241, 249, 266, 267, 302];
-    skip(r, seeds.iter().filter(|&&v| version >= v).count())?;
+    let flags = r.bytes(seeds.iter().filter(|&&v| version >= v).count())?;
+    // `Difficulty`: the "for the worthy" seed (the second flag) adds a level.
+    let worthy = version >= 227 && flags.get(1) == Some(&1);
+    e.expert = matches!(mode, 1 | 2) || (mode == 0 && worthy);
     skip(r, 8)?;
     if version >= 284 {
         skip(r, 8)?;

@@ -95,7 +95,9 @@ Controles :
 - F : camera libre (deplacement au clavier, Maj pour accelerer, clic milieu pour
   glisser, edition sans limite de portee ni consommation d'objets) ; `--free` pour
   demarrer ainsi.
-- Molette : zoom autour du curseur. L : couper l'eclairage. T (maintenu) : accelerer
+- T : jeter l'objet tenu (ou celui porte au curseur), comme la touche Jeter du jeu ;
+  clic droit dans le monde avec un objet au curseur : le jeter aussi.
+- Molette : zoom autour du curseur. L : couper l'eclairage. Y (maintenu) : accelerer
   le temps. Fermer la fenetre pour quitter.
 
 Le titre affiche FPS, temps de frame, draws, instances, heure, outil et nombre de
