@@ -11,7 +11,7 @@
 //! and left, twice; light leaving a cell is multiplied by that cell's decay
 //! (air, block, water, honey) and stops below the game's cut-off.
 //!
-//! Edits relight a window: the edited rect plus `REACH` tiles on each side,
+//! Edits relight a window: the edited rect plus `reach()` tiles on each side,
 //! beyond which any source has faded out.
 
 use rayon::prelude::*;
@@ -26,7 +26,18 @@ pub const ONE: f32 = 128.0;
 const CUTOFF: u16 = 3;
 const ROUNDS: usize = 2;
 /// 255 * 0.91^REACH < CUTOFF.
-pub const REACH: u32 = 50;
+const REACH: u32 = 50;
+/// The same for air's 0.9375 with night vision.
+const REACH_NIGHT_VISION: u32 = 70;
+
+/// Tiles beyond which no light reaches.
+pub fn reach() -> u32 {
+    if NIGHT_VISION.load(std::sync::atomic::Ordering::Relaxed) {
+        REACH_NIGHT_VISION
+    } else {
+        REACH
+    }
+}
 /// Rows above the bottom where the underworld glow starts.
 const UNDERWORLD: u32 = 200;
 
@@ -45,6 +56,29 @@ const DECAY: [[u16; 4]; 5] = [
     // 0.91 * (0.75, 0.7, 0.6).
     [175, 163, 140, 159],
 ];
+
+/// `DECAY` with night vision: each decay 3% higher (`LightingEngine`'s `nightVision`).
+const DECAY_NIGHT_VISION: [[u16; 4]; 5] = {
+    let mut d = DECAY;
+    let mut i = 0;
+    while i < 5 {
+        let mut c = 0;
+        while c < 4 {
+            d[i][c] = (d[i][c] * 103 + 50) / 100;
+            c += 1;
+        }
+        i += 1;
+    }
+    d
+};
+
+static NIGHT_VISION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Turns the night owl potion's longer light on or off; true when it changed,
+/// and all light must be worked out again.
+pub fn set_night_vision(on: bool) -> bool {
+    NIGHT_VISION.swap(on, std::sync::atomic::Ordering::Relaxed) != on
+}
 
 /// What a frame comparison in a light rule looks at.
 #[derive(Clone, Copy)]
@@ -209,10 +243,10 @@ impl LightMap {
     /// Recomputes `r` after an edit inside it, with this frame's `glows`.
     pub fn update(&mut self, world: &World, r: Rect, glows: &[Glow]) {
         let win = Rect {
-            x0: r.x0.saturating_sub(REACH),
-            y0: r.y0.saturating_sub(REACH),
-            x1: (r.x1 + REACH).min(world.width),
-            y1: (r.y1 + REACH).min(world.height),
+            x0: r.x0.saturating_sub(reach()),
+            y0: r.y0.saturating_sub(reach()),
+            x1: (r.x1 + reach()).min(world.width),
+            y1: (r.y1 + reach()).min(world.height),
         };
         let light = window(world, win, glows);
         let ww = win.width() as usize;
@@ -287,25 +321,26 @@ fn window(world: &World, win: Rect, glows: &[Glow]) -> Vec<[u8; 4]> {
         }
     }
 
+    let decay = if NIGHT_VISION.load(std::sync::atomic::Ordering::Relaxed) { &DECAY_NIGHT_VISION } else { &DECAY };
     for _ in 0..ROUNDS {
-        vertical(&mut light, &kind, w);
+        vertical(&mut light, &kind, w, decay);
         light.par_chunks_mut(w).zip(kind.par_chunks(w)).for_each(|(l, k)| {
-            sweep(l.iter_mut().zip(k));
-            sweep(l.iter_mut().zip(k).rev());
+            sweep(l.iter_mut().zip(k), decay);
+            sweep(l.iter_mut().zip(k).rev(), decay);
         });
     }
     light
 }
 
-fn sweep<'a>(cells: impl Iterator<Item = (&'a mut [u8; 4], &'a u8)>) {
+fn sweep<'a>(cells: impl Iterator<Item = (&'a mut [u8; 4], &'a u8)>, decay: &[[u16; 4]; 5]) {
     let mut carry = [0; 4];
     for (l, &k) in cells {
-        carry = step(l, carry, k);
+        carry = step(l, carry, &decay[k as usize]);
     }
 }
 
 /// Down then up, in parallel over bands of columns.
-fn vertical(light: &mut [[u8; 4]], kind: &[u8], w: usize) {
+fn vertical(light: &mut [[u8; 4]], kind: &[u8], w: usize, decay: &[[u16; 4]; 5]) {
     const BAND: usize = 64;
     let mut bands: Vec<Vec<_>> = (0..w.div_ceil(BAND)).map(|_| Vec::new()).collect();
     for (l, k) in light.chunks_mut(w).zip(kind.chunks(w)) {
@@ -319,7 +354,7 @@ fn vertical(light: &mut [[u8; 4]], kind: &[u8], w: usize) {
             acc.fill([0; 4]);
             for (l, k) in rows.iter_mut() {
                 for ((c, a), &k) in l.iter_mut().zip(&mut acc).zip(k.iter()) {
-                    *a = step(c, *a, k);
+                    *a = step(c, *a, &decay[k as usize]);
                 }
             }
             rows.reverse();
@@ -329,8 +364,7 @@ fn vertical(light: &mut [[u8; 4]], kind: &[u8], w: usize) {
 
 /// Takes the light arriving in `cell`, returns what leaves it.
 #[inline]
-fn step(cell: &mut [u8; 4], arriving: [u8; 4], kind: u8) -> [u8; 4] {
-    let decay = &DECAY[kind as usize];
+fn step(cell: &mut [u8; 4], arriving: [u8; 4], decay: &[u16; 4]) -> [u8; 4] {
     let mut out = [0; 4];
     for c in 0..4 {
         cell[c] = cell[c].max(arriving[c]);

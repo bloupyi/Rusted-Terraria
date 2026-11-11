@@ -12,7 +12,7 @@ pub const MAX_BUFFS: usize = 44;
 /// Accessory slots after head, body and legs (`armor[3..8]`).
 pub const ACCESSORIES: usize = 5;
 /// The buffs the potions above give, with their `BuffID` names.
-const BUFFS: [(u16, &str); 19] = [
+const BUFFS: [(u16, &str); 20] = [
     (1, "ObsidianSkin"),
     (2, "Regeneration"),
     (3, "Swiftness"),
@@ -32,7 +32,15 @@ const BUFFS: [(u16, &str); 19] = [
     (17, "Hunter"),
     (18, "Gravitation"),
     (104, "Mining"),
+    (24, "OnFire"),
 ];
+/// `BuffID.OnFire`, from lava.
+pub const ON_FIRE: u16 = 24;
+
+/// `Main.debuff`: buffs a right click cannot take off.
+pub fn is_debuff(kind: u16) -> bool {
+    kind == ON_FIRE
+}
 
 /// Sheets of the accessories, mirror, crystal, potions and buff icons.
 pub const SHEETS: &[&str] = &[
@@ -93,14 +101,66 @@ pub struct Effects {
     pub pick_speed: f32,
     /// Buff 11: light around the player.
     pub shine: bool,
+    /// Buff 1: `lavaImmune`, and no catching fire.
+    pub lava_immune: bool,
+    /// Buff 4: breathes under water.
+    pub gills: bool,
+    /// Buff 6: `manaRegenBuff`.
+    pub mana_regen: bool,
+    /// `magicDamage` and `arrowDamage`.
+    pub magic_damage: f32,
+    pub arrow_damage: f32,
+    /// Buff 16: faster arrows.
+    pub archery: bool,
+    /// `thorns`: share of a monster's contact damage hit back at it.
+    pub thorns: f32,
+    /// Buff 13: `enemySpawns`, more monsters.
+    pub battle: bool,
+    /// Buff 10: `invis`, fewer monsters.
+    pub invis: bool,
+    /// Buff 24: burning (`onFire`).
+    pub on_fire: bool,
+    /// Buff 12: `nightVision`, light carries further.
+    pub night_vision: bool,
 }
 
 /// `ResetEffects`, then `UpdateBuffs` and `ApplyEquipFunctional` for `worn`
 /// accessories, with `moveSpeed` applied as `UpdateEquips` ends.
 pub fn effects(worn: impl IntoIterator<Item = u16>, buffs: &[Buff]) -> Effects {
-    let mut e = Effects { moves: Moves::default(), life_regen: 0, defense: 0, pick_speed: 1.0, shine: false };
+    let mut e = Effects {
+        moves: Moves::default(),
+        life_regen: 0,
+        defense: 0,
+        pick_speed: 1.0,
+        shine: false,
+        lava_immune: false,
+        gills: false,
+        mana_regen: false,
+        magic_damage: 1.0,
+        arrow_damage: 1.0,
+        archery: false,
+        thorns: 0.0,
+        battle: false,
+        invis: false,
+        on_fire: false,
+        night_vision: false,
+    };
     for b in buffs.iter().filter(|b| b.time > 0) {
         match b.kind {
+            1 => e.lava_immune = true,
+            4 => e.gills = true,
+            6 => e.mana_regen = true,
+            7 => e.magic_damage += 0.2,
+            10 => e.invis = true,
+            12 => e.night_vision = true,
+            13 => e.battle = true,
+            14 => e.thorns = e.thorns.max(1.0),
+            15 => e.moves.water_walk = true,
+            16 => {
+                e.archery = true;
+                e.arrow_damage *= 1.1;
+            }
+            ON_FIRE => e.on_fire = true,
             2 => e.life_regen += 4,
             3 => e.moves.move_speed += 0.25,
             5 => e.defense += 8,
