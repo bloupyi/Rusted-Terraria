@@ -3,6 +3,7 @@ mod backdrop;
 mod cave;
 mod combat_text;
 mod game;
+mod glow;
 mod inventory;
 mod item_ids;
 mod items;
