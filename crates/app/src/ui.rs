@@ -99,6 +99,8 @@ pub struct Hud {
     inv_alpha: f32,
     inv_up: bool,
     tick_acc: f32,
+    /// `Main.buffAlpha` of each buff shown.
+    buff_alpha: Vec<f32>,
 }
 
 impl Default for Hud {
@@ -112,6 +114,7 @@ impl Default for Hud {
             inv_alpha: 180.0,
             inv_up: true,
             tick_acc: 0.0,
+            buff_alpha: Vec::new(),
         }
     }
 }
@@ -306,13 +309,13 @@ pub fn chest_button_under(fonts: &Fonts, p: [f32; 2], labels: &[&str]) -> Option
     })
 }
 
-/// Top-left of armour slot `k` (head, body, legs) on a screen `w` wide.
+/// Top-left of equipment slot `k` (head, body, legs, then accessories) on a screen `w` wide.
 pub fn equip_slot(w: f32, k: usize) -> [f32; 2] {
     [(w as i32 - 64 - 28) as f32, (174.0 + (k * 56) as f32 * INV_SCALE) as i32 as f32]
 }
 
 pub fn equip_under(p: [f32; 2], w: f32) -> Option<usize> {
-    (0..3).find(|&k| {
+    (0..crate::inventory::EQUIP_SLOTS).find(|&k| {
         let [x, y] = equip_slot(w, k);
         p[0] >= x && p[0] <= x + BACK * INV_SCALE && p[1] >= y && p[1] <= y + BACK * INV_SCALE
     })
@@ -516,13 +519,36 @@ impl Hud {
         }
     }
 
-    /// The armour slots of `DrawInventory` (`ItemSlot.Draw` for context 8): the
+    /// `DrawBuffIcon`'s fade: up while the cursor is over the icon, back to 0.4 after.
+    pub fn tick_buffs(&mut self, count: usize, hovered: Option<usize>) {
+        self.buff_alpha.resize(count, 0.4);
+        for (i, a) in self.buff_alpha.iter_mut().enumerate() {
+            *a = (*a + if hovered == Some(i) { 0.1 } else { -0.05 }).clamp(0.4, 1.0);
+        }
+    }
+
+    /// `DrawInterface_Resources_Buffs`: each buff's icon, faded, with the time
+    /// left under it in the stack font.
+    pub fn draw_buffs(&self, p: &mut Painter, buffs: &[(u16, Option<String>)]) {
+        for (i, (kind, time)) in buffs.iter().enumerate() {
+            let a = self.buff_alpha.get(i).copied().unwrap_or(0.4);
+            let name = format!("Buff_{kind}");
+            let Some(&SheetRef { h, .. }) = p.sheets.get(&name) else { continue };
+            let [x, y] = crate::equip::icon_at(i);
+            p.image(&name, [x, y], [0.0; 2], 1.0, [a; 4]);
+            if let Some(t) = time {
+                p.string(FontId::ItemStack, t, [x, y + h as f32], [0.0; 2], 0.8, 0.0, [a; 4]);
+            }
+        }
+    }
+
+    /// The equipment slots of `DrawInventory` (`ItemSlot.Draw` for contexts 8 and 10): the
     /// loadout's green back, the piece or its faded outline, and the defense.
     pub fn draw_equipment(
         &self,
         p: &mut Painter,
         w: f32,
-        worn: [bool; 3],
+        worn: [bool; crate::inventory::EQUIP_SLOTS],
         defense: i32,
         icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
     ) {
@@ -535,7 +561,9 @@ impl Hud {
                 self.slot_item(p, at, INV_SCALE, 1, |p, c, s| icon(p, k, c, s));
             } else if let Some(&SheetRef { w: tw, h: th, .. }) = p.sheets.get("Extra_54") {
                 let (fw, fh) = (tw / 3, th / 7);
-                let src = [0, (k as u32 * 6 / 3) * fh, fw - 2, fh - 2];
+                // `ItemSlot.Draw`'s outline: 0, 6 and 12 for armour, 11 for accessories.
+                let n = if k < 3 { k as u32 * 6 } else { 11 };
+                let src = [n % 3 * fw, n / 3 * fh, fw - 2, fh - 2];
                 let size = [(fw - 2) as f32 * INV_SCALE, (fh - 2) as f32 * INV_SCALE];
                 let c = [at[0] + BACK * INV_SCALE / 2.0, at[1] + BACK * INV_SCALE / 2.0];
                 p.region("Extra_54", src, [c[0] - size[0] / 2.0, c[1] - size[1] / 2.0], size, gray(0.35, 0.35));
