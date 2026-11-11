@@ -72,6 +72,10 @@ impl Fonts {
         (fonts, pages)
     }
 
+    pub fn measure(&self, id: FontId, text: &str) -> [f32; 2] {
+        self.get(id).map_or([0.0; 2], |f| f.measure(text).into())
+    }
+
     fn get(&self, id: FontId) -> Option<&Font> {
         match id {
             FontId::ItemStack => self.item_stack.as_ref(),
@@ -263,6 +267,45 @@ pub fn inventory_bottom(slots: usize) -> f32 {
     inventory_slot(slots - 1)[1] + BACK * INV_SCALE
 }
 
+/// `Main.inventoryScale` for a chest's slots.
+const CHEST_SCALE: f32 = 0.755;
+/// `Main.instance.invBottom` while the inventory is open.
+const INV_BOTTOM: f32 = 258.0;
+/// `ChestUI.ButtonScale` at rest.
+const BUTTON_SCALE: f32 = 0.75;
+
+/// Top-left of chest slot `k` (`ChestUI.DrawSlots`), in screen pixels.
+pub fn chest_slot(k: usize) -> [f32; 2] {
+    let at = |o: f32, n: usize| (o + (n * 56) as f32 * CHEST_SCALE) as i32 as f32;
+    [at(73.0, k % HOTBAR), at(INV_BOTTOM, k / HOTBAR)]
+}
+
+pub fn chest_under(p: [f32; 2], slots: usize) -> Option<usize> {
+    (0..slots).find(|&k| {
+        let [x, y] = chest_slot(k);
+        p[0] >= x && p[0] <= x + BACK * CHEST_SCALE && p[1] >= y && p[1] <= y + BACK * CHEST_SCALE
+    })
+}
+
+/// Bottom of a chest's four rows, in screen pixels.
+pub fn chest_bottom() -> f32 {
+    INV_BOTTOM + 4.0 * 56.0 * CHEST_SCALE
+}
+
+/// `ChestUI.DrawButton`'s box for button `i` with `label`: left, top, width, height.
+fn chest_button(fonts: &Fonts, i: usize, label: &str) -> [f32; 4] {
+    let [w, _] = fonts.measure(FontId::MouseText, label);
+    [506.0, INV_BOTTOM + 40.0 + i as f32 * 26.0 - 12.0, w * BUTTON_SCALE, 24.0]
+}
+
+/// Which of the chest's `labels` buttons is under `p`.
+pub fn chest_button_under(fonts: &Fonts, p: [f32; 2], labels: &[&str]) -> Option<usize> {
+    labels.iter().enumerate().position(|(i, l)| {
+        let [x, y, w, h] = chest_button(fonts, i, l);
+        p[0] >= x && p[0] <= x + w && p[1] >= y && p[1] <= y + h
+    })
+}
+
 /// Top-left of armour slot `k` (head, body, legs) on a screen `w` wide.
 pub fn equip_slot(w: f32, k: usize) -> [f32; 2] {
     [(w as i32 - 64 - 28) as f32, (174.0 + (k * 56) as f32 * INV_SCALE) as i32 as f32]
@@ -441,6 +484,35 @@ impl Hud {
             let name = if i < HOTBAR { "Inventory_Back9" } else { "Inventory_Back" };
             p.image(name, at, [0.0; 2], INV_SCALE, gray(back, back));
             self.slot_item(p, at, INV_SCALE, count, |p, c, s| icon(p, i, c, s));
+        }
+    }
+
+    /// `ChestUI.Draw`: the chest's name, its slots (`ItemSlot.Draw` for context 3)
+    /// and the buttons, the hovered one in `Main.OurFavoriteColor`.
+    pub fn draw_chest(
+        &self,
+        p: &mut Painter,
+        name: &str,
+        counts: &[u16],
+        buttons: &[&str],
+        cursor: [f32; 2],
+        icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
+    ) {
+        let c = self.text_color as f32 / 255.0;
+        let k = 1.0 - (1.0 - c) * 0.5;
+        p.text(FontId::MouseText, name, [504.0, INV_BOTTOM], 1.0, gray(k, 1.0), 1.5);
+        let back = (self.inv_alpha as u8) as f32 / 255.0;
+        for (i, &count) in counts.iter().enumerate() {
+            let at = chest_slot(i);
+            p.image("Inventory_Back5", at, [0.0; 2], CHEST_SCALE, gray(back, back));
+            self.slot_item(p, at, CHEST_SCALE, count, |p, c, s| icon(p, i, c, s));
+        }
+        let hover = chest_button_under(p.fonts, cursor, buttons);
+        for (i, label) in buttons.iter().enumerate() {
+            let [x, y, _, h] = chest_button(p.fonts, i, label);
+            let [_, th] = p.measure(FontId::MouseText, label);
+            let color = if hover == Some(i) { [1.0, 231.0 / 255.0, 69.0 / 255.0, 1.0] } else { gray(0.97 * k, 1.0) };
+            p.text(FontId::MouseText, label, [x, y + h / 2.0 - th * BUTTON_SCALE / 2.0], BUTTON_SCALE, color, 1.5);
         }
     }
 

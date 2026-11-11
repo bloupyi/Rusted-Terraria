@@ -27,7 +27,10 @@ impl Item {
             Item::Bucket(_) | Item::Tool(_) => 1,
             Item::Material(_) => MAX_STACK,
             Item::Object(_) => 99,
-            Item::Id(id) => crate::item_ids::stats(id).map_or(MAX_STACK, |s| s.max_stack.min(MAX_STACK)),
+            Item::Id(id) => crate::item_ids::stats(id)
+                .map(|s| s.max_stack)
+                .or_else(|| crate::item_ids::ALL.get(id as usize).map(|e| e.1))
+                .map_or(MAX_STACK, |n| n.clamp(1, MAX_STACK)),
         }
     }
 }
@@ -44,6 +47,40 @@ pub fn armor_slot(item: Item) -> Option<usize> {
 pub struct Stack {
     pub item: Item,
     pub count: u16,
+}
+
+/// `ItemSlot.LeftClick`: swaps the slot with the mouse, then stacks the
+/// mouse onto it when they hold the same item. True when anything is there.
+pub fn swap_click(slot: &mut Option<Stack>, mouse: &mut Option<Stack>) -> bool {
+    std::mem::swap(slot, mouse);
+    if let (Some(s), Some(m)) = (slot.as_mut(), mouse.as_mut()) {
+        let max = s.item.max_stack();
+        if s.item == m.item && s.count != max && m.count != max {
+            let n = m.count.min(max - s.count);
+            s.count += n;
+            m.count -= n;
+        }
+    }
+    if mouse.is_some_and(|m| m.count == 0) {
+        *mouse = None;
+    }
+    mouse.is_some() || slot.is_some()
+}
+
+/// `ItemSlot.RightClick`: takes one into the mouse when it is empty or holds
+/// a smaller stack of the same item. True when one moved.
+pub fn take_one(slot: &mut Option<Stack>, mouse: &mut Option<Stack>) -> bool {
+    let Some(s) = slot.as_mut() else { return false };
+    match mouse {
+        None => *mouse = Some(Stack { item: s.item, count: 1 }),
+        Some(m) if m.item == s.item && m.count < m.item.max_stack() => m.count += 1,
+        Some(_) => return false,
+    }
+    s.count -= 1;
+    if s.count == 0 {
+        *slot = None;
+    }
+    true
 }
 
 pub struct Inventory {
@@ -161,38 +198,14 @@ impl Inventory {
         self.held_mut().take()
     }
 
-    /// `ItemSlot.LeftClick` on slot `i`: swaps it with the mouse, then stacks the
-    /// mouse onto it when they hold the same item. True when anything is there.
+    /// `ItemSlot.LeftClick` on slot `i`.
     pub fn left_click(&mut self, i: usize) -> bool {
-        std::mem::swap(&mut self.slots[i], &mut self.mouse);
-        if let (Some(s), Some(m)) = (&mut self.slots[i], &mut self.mouse) {
-            let max = s.item.max_stack();
-            if s.item == m.item && s.count != max && m.count != max {
-                let n = m.count.min(max - s.count);
-                s.count += n;
-                m.count -= n;
-            }
-        }
-        if self.mouse.is_some_and(|m| m.count == 0) {
-            self.mouse = None;
-        }
-        self.mouse.is_some() || self.slots[i].is_some()
+        swap_click(&mut self.slots[i], &mut self.mouse)
     }
 
-    /// `ItemSlot.RightClick` on slot `i`: takes one into the mouse when it is
-    /// empty or holds a smaller stack of the same item. True when one moved.
+    /// `ItemSlot.RightClick` on slot `i`.
     pub fn right_click(&mut self, i: usize) -> bool {
-        let Some(s) = &mut self.slots[i] else { return false };
-        match &mut self.mouse {
-            None => self.mouse = Some(Stack { item: s.item, count: 1 }),
-            Some(m) if m.item == s.item && m.count < m.item.max_stack() => m.count += 1,
-            Some(_) => return false,
-        }
-        s.count -= 1;
-        if s.count == 0 {
-            self.slots[i] = None;
-        }
-        true
+        take_one(&mut self.slots[i], &mut self.mouse)
     }
 
     /// `ItemSlot.LeftClick` on armour slot `k`: swaps it with the mouse when the
