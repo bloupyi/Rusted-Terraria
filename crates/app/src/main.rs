@@ -12,6 +12,7 @@ mod magic;
 mod net;
 mod pots;
 mod proto;
+mod ranged;
 mod surface;
 mod tooltip;
 mod ui;

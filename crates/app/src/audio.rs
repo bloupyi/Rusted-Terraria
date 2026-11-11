@@ -36,6 +36,7 @@ pub enum Sfx {
     Crystal,
     StarFall,
     StarHit,
+    Bow,
 }
 
 impl Sfx {
@@ -63,6 +64,7 @@ impl Sfx {
             Sfx::Crystal => ("Item_29", 1),
             Sfx::StarFall => ("Item_9", 1),
             Sfx::StarHit => ("Item_10", 1),
+            Sfx::Bow => ("Item_5", 1),
         }
     }
 }
