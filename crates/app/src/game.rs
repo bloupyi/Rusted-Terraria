@@ -165,6 +165,8 @@ pub struct Game {
     pub dust: Vec<Dust>,
     /// `itemRotation` while a staff is held out.
     item_rotation: f32,
+    /// Where the last bolt was aimed, for the ruby staff's second shot.
+    aim: (f32, f32),
     /// Ticks before the swing can hit another monster.
     attack_cd: i32,
     /// World point the held item is used at this frame.
@@ -254,6 +256,7 @@ impl Game {
             stars: Vec::new(),
             dust: Vec::new(),
             item_rotation: 0.0,
+            aim: (0.0, 0.0),
             attack_cd: 0,
             use_target: None,
             release_use: true,
@@ -295,6 +298,7 @@ impl Game {
             self.wind.tick(self.env.wind);
             self.ess.tick();
             self.use_item(target);
+            self.torch_flame();
             if let Some(input) = input {
                 let facing = self.player.facing_left;
                 self.player.tick(&self.world, input);
@@ -924,16 +928,21 @@ impl Game {
         let held = target.is_some();
         if let Some(Stack { item: Item::Id(id), .. }) = self.inventory.selected() {
             if held && self.item_animation == 0 && self.release_use {
-                if id == magic::AMETHYST_STAFF {
-                    self.cast(target.unwrap());
+                if magic::staff_bolt(id).is_some() {
+                    self.cast(id, target.unwrap());
                 } else if id == magic::MANA_CRYSTAL {
                     self.use_crystal();
                 } else if self.drink(id) {
                     self.inventory.consume();
                 }
             }
-            if id == magic::AMETHYST_STAFF && self.item_animation > 0 {
+            if let Some(bolt) = magic::staff_bolt(id).filter(|_| self.item_animation > 0) {
                 self.mana.delay_regen();
+                // The ruby staff shoots again halfway through.
+                let half = item_ids::stats(id).map_or(0, |s| s.use_animation as i32 / 2);
+                if magic::Features::of(bolt).spread && self.item_animation == half {
+                    self.shoot(id, self.aim);
+                }
             }
         }
         if held && self.item_animation == 0 && s.use_animation > 0 && (self.release_use || s.auto_reuse) {
@@ -1048,7 +1057,7 @@ impl Game {
             }
             self.mobs[i].melee_cooldown = self.item_animation;
             self.attack_cd = ((s.use_animation as f64 * 0.33) as i32).max(1);
-            self.strike(i, s.damage, s.knock_back, dir);
+            self.strike(i, s.damage, s.knock_back, dir, 0);
             // A kill shifts the list; the cooldown stops more hits this tick anyway.
             break;
         }
@@ -1056,8 +1065,11 @@ impl Game {
 
     /// The player's hit on monster `i`: varied damage, maybe a crit; on a
     /// client the host applies it.
-    fn strike(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32) {
-        let damage = self.damage_var(damage);
+    /// `armor_pen` adds back up to half the defense (`checkArmorPenetration`).
+    fn strike(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32, armor_pen: i32) {
+        let def = self.mobs[i].kind.defense();
+        let pen = if armor_pen <= 0 || def <= 0 { 0 } else { armor_pen.min(def) / 2 };
+        let damage = self.damage_var(damage) + pen;
         let crit = self.random() % 100 < CRIT_CHANCE;
         if self.client {
             // The number shows here as `StrikeNPC` would work it out.
@@ -1072,24 +1084,46 @@ impl Game {
         }
     }
 
-    /// `ItemCheck_TryStartUse` and `ItemCheck_Shoot` for the Amethyst Staff:
-    /// pays the mana, faces the cursor and sends a bolt at it.
-    fn cast(&mut self, (wx, wy): (f32, f32)) {
-        let Some(s) = item_ids::stats(magic::AMETHYST_STAFF) else { return };
+    /// `ItemCheck_TryStartUse` for a gem staff: pays the mana, faces the cursor
+    /// and shoots at it.
+    fn cast(&mut self, id: u16, (wx, wy): (f32, f32)) {
+        let Some(s) = item_ids::stats(id) else { return };
         if !self.mana.pay(s.mana as i32) {
             return;
         }
         self.item_animation = s.use_animation as i32;
         self.sfx.push(Sfx::Staff);
+        let cx = self.player.center().0;
+        self.player.facing_left = wx - cx <= 0.0;
+        self.shoot(id, (wx, wy));
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        let v = self.bolts.last().map_or([dir, 0.0], |b| b.vel);
+        self.item_rotation = (v[1] * dir).atan2(v[0] * dir);
+    }
+
+    /// `ItemCheck_Shoot` for a gem staff: emerald goes five times as fast,
+    /// sapphire shoots a pair, ruby starts somewhere on a 12 px circle; the
+    /// damage is cut by `GetDamageMultiplier`.
+    fn shoot(&mut self, id: u16, (wx, wy): (f32, f32)) {
+        let (Some(s), Some(kind)) = (item_ids::stats(id), magic::staff_bolt(id)) else { return };
+        self.aim = (wx, wy);
+        let f = magic::Features::of(kind);
         let (cx, cy) = self.player.center();
         let (dx, dy) = (wx - cx, wy - cy);
-        self.player.facing_left = dx <= 0.0;
         let dir = if self.player.facing_left { -1.0 } else { 1.0 };
         let l = (dx * dx + dy * dy).sqrt();
-        let speed = s.shoot_speed;
+        let speed = s.shoot_speed * if f.fast_then_slow { 5.0 } else { 1.0 };
         let vel = if l == 0.0 { [dir * speed, 0.0] } else { [dx * speed / l, dy * speed / l] };
-        self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
-        self.bolts.push(Bolt::new([cx, cy], vel, s.damage as i32, s.knock_back));
+        let mut at = [cx, cy];
+        if f.spread {
+            let a = (self.random() % 10_000) as f32 / 10_000.0 * std::f32::consts::TAU;
+            at = [at[0] + a.cos() * 12.0, at[1] + a.sin() * 12.0];
+        }
+        let damage = (s.damage as f32 * f.damage_multiplier()) as i32;
+        let twins: &[Option<f32>] = if f.twins { &[Some(0.0), Some(1.0)] } else { &[None] };
+        for &twin in twins {
+            self.bolts.push(Bolt::new(kind, at, vel, damage, s.knock_back, twin));
+        }
     }
 
     /// `ItemCheck_UseManaCrystal`: a star more, shown in blue.
@@ -1193,10 +1227,10 @@ impl Game {
     }
 
     fn bolt_tick(&mut self, i: usize) -> bool {
-        let (pos, vel) = (self.bolts[i].pos, self.bolts[i].vel);
+        let (pos, vel, kind) = (self.bolts[i].pos, self.bolts[i].vel, self.bolts[i].dust());
         for _ in 0..2 {
             if self.random().is_multiple_of(5) {
-                let mut d = self.new_dust(pos, vel, 1.2);
+                let mut d = self.new_dust(kind, pos, vel, 1.2);
                 d.vel = [d.vel[0] * 0.3, d.vel[1] * 0.3];
                 self.dust.push(d);
             }
@@ -1205,67 +1239,125 @@ impl Game {
             self.bolts[i].sounded = true;
             self.sfx.push(Sfx::GemBolt);
         }
-        let size = [magic::BOLT_SIZE as i32; 2];
-        let c = self.bolts[i].center();
-        let target = self
-            .mobs
-            .iter()
-            .filter(|m| !m.kind.friendly())
-            .map(|m| (m.body.center(), m))
-            .map(|((x, y), m)| (((x - c[0]).powi(2) + (y - c[1]).powi(2)).sqrt(), [x, y], m))
-            .filter(|&(d, _, m)| {
-                let b = &m.body;
-                d < magic::HOMING_RANGE
-                    && world::collision::can_hit(&self.world, pos, size, [b.x, b.y], [b.w as i32, b.h as i32])
-            })
-            .min_by(|a, b| a.0.total_cmp(&b.0))
-            .map(|t| t.1);
-        if let Some(t) = target {
-            self.bolts[i].home(t);
+        let f = self.bolts[i].features();
+        if f.homing {
+            let size = [magic::BOLT_SIZE as i32; 2];
+            let c = self.bolts[i].center();
+            let target = self
+                .mobs
+                .iter()
+                .filter(|m| !m.kind.friendly())
+                .map(|m| (m.body.center(), m))
+                .map(|((x, y), m)| (((x - c[0]).powi(2) + (y - c[1]).powi(2)).sqrt(), [x, y], m))
+                .filter(|&(d, _, m)| {
+                    let b = &m.body;
+                    d < magic::HOMING_RANGE
+                        && world::collision::can_hit(&self.world, pos, size, [b.x, b.y], [b.w as i32, b.h as i32])
+                })
+                .min_by(|a, b| a.0.total_cmp(&b.0))
+                .map(|t| t.1);
+            if let Some(t) = target {
+                self.bolts[i].home(t);
+            }
         }
-        if !self.bolts[i].advance(&self.world) {
+        let b = &mut self.bolts[i];
+        b.swirl();
+        b.age += 1;
+        for im in &mut b.immune {
+            im.1 -= 1;
+        }
+        b.immune.retain(|im| im.1 > 0);
+        if !b.slow_down() || !b.advance(&self.world) {
             return false;
         }
+
+        // `Projectile.Damage`: every monster under it not hit lately, while it can pierce.
         let b = &self.bolts[i];
-        let [x, y, w, h] = b.hitbox();
         let c = b.center();
-        let hit = self.mobs.iter().position(|m| {
-            let mb = &m.body;
-            !m.kind.friendly()
-                && x < mb.x + mb.w
-                && mb.x < x + w
-                && y < mb.y + mb.h
-                && mb.y < y + h
-                && world::collision::can_hit(&self.world, c, [0, 0], [mb.center().0, mb.center().1], [0, 0])
-        });
-        if let Some(m) = hit {
-            let (damage, kb) = (b.damage, b.knock_back);
-            let dir = if b.vel[0] > 0.0 { 1.0 } else { -1.0 };
-            self.strike(m, damage, kb, dir);
+        let boxes = b.hitboxes();
+        let mut hits: Vec<usize> = (0..self.mobs.len())
+            .filter(|&m| {
+                let mb = &self.mobs[m].body;
+                !self.mobs[m].kind.friendly()
+                    && !b.immune.iter().any(|im| im.0 == m)
+                    && boxes
+                        .iter()
+                        .any(|&[x, y, w, h]| x < mb.x + mb.w && mb.x < x + w && y < mb.y + mb.h && mb.y < y + h)
+                    && world::collision::can_hit(&self.world, c, [0, 0], [mb.center().0, mb.center().1], [0, 0])
+            })
+            .collect();
+        hits.truncate(b.penetrate as usize);
+        let (damage, kb, ap) = (b.damage, b.knock_back, b.armor_pen);
+        let dir = if b.vel[0] > 0.0 { 1.0 } else { -1.0 };
+        // Highest first, so a monster killed and swapped out leaves the rest in place.
+        for &m in hits.iter().rev() {
+            self.strike(m, damage, kb, dir, ap);
+        }
+        let b = &mut self.bolts[i];
+        b.immune.extend(hits.iter().map(|&m| (m, magic::HIT_COOLDOWN)));
+        b.penetrate -= hits.len() as i32;
+        if b.penetrate <= 0 {
             return false;
         }
-        self.bolts[i].time_left -= 1;
-        self.bolts[i].time_left > 0
+        b.time_left -= 1;
+        b.time_left > 0
     }
 
-    /// `Projectile.Kill` of a bolt: a puff of amethyst dust.
+    /// `Projectile.Kill` of a bolt: a puff of its dust, and for topaz a burst
+    /// hitting everything around at 0.35 of the damage.
     fn bolt_killed(&mut self, b: &Bolt) {
         self.sfx.push(Sfx::Dig);
         let l = (b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1]).sqrt();
         let n = if l < 1.0 { [0.0, 0.0] } else { [b.vel[0] / l, b.vel[1] / l] };
         for _ in 0..15 {
-            let mut d = self.new_dust(b.pos, n, 1.2);
+            let mut d = self.new_dust(b.dust(), b.pos, n, 1.2);
             let k = (self.random() % 1000) as f32 / 1000.0;
             d.scale *= 1.25;
             d.vel = [(d.vel[0] * 2.2 + n[0] * 1.5) * k, (d.vel[1] * 2.2 + n[1] * 1.5) * k];
             self.dust.push(d);
         }
+        let f = b.features();
+        if !f.burst {
+            return;
+        }
+        for _ in 0..30 {
+            let mut d = self.new_dust(b.dust(), b.pos, n, 1.2);
+            d.gravity = self.random().is_multiple_of(5);
+            let k = (self.random() % 1000) as f32 / 1000.0;
+            d.scale *= 1.0 + (self.random() % 1000) as f32 / 1000.0;
+            if d.gravity {
+                d.scale *= 0.6;
+            }
+            d.vel = [d.vel[0] * 4.2 * k, d.vel[1] * 4.2 * k];
+            self.dust.push(d);
+        }
+        let damage = (b.damage as f32 * (0.35 / f.damage_multiplier())) as i32;
+        let kb = b.knock_back * 0.35;
+        let c = b.center();
+        let h = magic::BURST / 2.0;
+        let hits: Vec<usize> = (0..self.mobs.len())
+            .filter(|&m| {
+                let mb = &self.mobs[m].body;
+                // Only a monster the bolt itself just hit is spared.
+                !self.mobs[m].kind.friendly()
+                    && !b.immune.iter().any(|im| im.0 == m && im.1 == magic::HIT_COOLDOWN)
+                    && c[0] - h < mb.x + mb.w
+                    && mb.x < c[0] + h
+                    && c[1] - h < mb.y + mb.h
+                    && mb.y < c[1] + h
+                    && world::collision::can_hit(&self.world, c, [0, 0], [mb.center().0, mb.center().1], [0, 0])
+            })
+            .collect();
+        for &m in hits.iter().rev() {
+            let dir = if self.mobs[m].body.center().0 > c[0] { 1.0 } else { -1.0 };
+            self.strike(m, damage, kb, dir, b.armor_pen);
+        }
     }
 
-    /// Amethyst dust in the bolt's box.
-    fn new_dust(&mut self, pos: [f32; 2], speed: [f32; 2], scale: f32) -> Dust {
+    /// Gem dust in a bolt's box.
+    fn new_dust(&mut self, kind: u16, pos: [f32; 2], speed: [f32; 2], scale: f32) -> Dust {
         let size = magic::BOLT_SIZE as i32;
-        Dust::new(magic::AMETHYST_DUST, pos, size, size, speed, scale, |n| (self.random() % n.max(1) as u64) as i32)
+        Dust::new(kind, pos, size, size, speed, scale, |n| (self.random() % n.max(1) as u64) as i32)
     }
 
     /// `IsInTileInteractionRange`: a box of tiles around the player's.
@@ -1831,10 +1923,13 @@ impl Game {
         let mut over = Vec::new();
         self.mob_sprites(&mut over);
         for (_, p) in &self.others {
-            self.player_sprites(p, false, &mut over);
+            self.player_sprites(p, false, 2, &mut over);
         }
         if !free {
-            self.player_sprites(&self.player, self.immune > 0, &mut over);
+            // `holdStyle` 1 raises the arm: body frame 3, front arm frame 5.
+            let torch = self.inventory.selected().and_then(|s| self.torch(s.item)).is_some();
+            let arm = if torch && self.player.wet.is_none() && self.item_animation == 0 { 5 } else { 2 };
+            self.player_sprites(&self.player, self.immune > 0, arm, &mut over);
             self.held_item_sprite(&mut over);
         }
         for d in &self.drops {
@@ -2024,6 +2119,7 @@ impl Game {
             }
         }
         v.extend(self.dust.iter().filter_map(glow::dust));
+        v.extend(self.bolts.iter().filter_map(glow::bolt));
         v.extend(self.stars.iter().filter_map(glow::star));
         for d in &self.drops {
             let center = [d.x + DROP_SIZE / 2.0, d.y + DROP_SIZE / 2.0];
@@ -2039,6 +2135,23 @@ impl Game {
             });
         }
         v
+    }
+
+    /// The flames of `ItemCheck_EmitHeldItemLight`: now and then a speck off the
+    /// held torch, more often while it swings.
+    fn torch_flame(&mut self) {
+        let Some((style, _)) = self.inventory.selected().and_then(|s| self.torch(s.item)) else { return };
+        let max = if self.item_animation > 0 { 7 } else { 30 };
+        if self.player.wet.is_some() || !self.random().is_multiple_of(max) {
+            return;
+        }
+        let ([x, y], dir) = self.torch_hold(style);
+        let at = [x + if dir < 0.0 { -16.0 } else { 6.0 }, y - 14.0];
+        let kind = glow::TORCH_DUST[style.min(glow::TORCH_DUST.len() - 1)];
+        let mut d = Dust::new(kind, at, 4, 4, [0.0; 2], 1.0, |n| (self.random() % n.max(1) as u64) as i32);
+        d.gravity = self.random().is_multiple_of(3);
+        d.vel = [d.vel[0] * 0.3, d.vel[1] * 0.3 - 1.5];
+        self.dust.push(d);
     }
 
     /// Style and light of a torch item.
@@ -2083,9 +2196,11 @@ impl Game {
             self.held_torch_sprite(style, out);
             return;
         }
-        if self.inventory.selected().map(|s| s.item) == Some(Item::Id(magic::AMETHYST_STAFF)) {
-            self.held_staff_sprite(out);
-            return;
+        if let Some(Item::Id(id)) = self.inventory.selected().map(|s| s.item).filter(|_| self.item_animation > 0) {
+            if magic::staff_bolt(id).is_some() {
+                self.held_staff_sprite(id, out);
+                return;
+            }
         }
         let Some(Item::Tool(t)) = self.inventory.selected().map(|s| s.item) else { return };
         let s = t.stats();
@@ -2106,8 +2221,8 @@ impl Game {
 
     /// A staff held out toward the cursor (`useStyle` 5 with `Item.staff`):
     /// its butt at `itemLocation`, turned 45 degrees past `itemRotation`.
-    fn held_staff_sprite(&self, out: &mut Vec<Sprite>) {
-        let Some(sheet) = self.sheet("Item_739").filter(|_| self.item_animation > 0) else { return };
+    fn held_staff_sprite(&self, id: u16, out: &mut Vec<Sprite>) {
+        let Some(sheet) = self.sheet(&format!("Item_{id}")) else { return };
         let left = self.player.facing_left;
         let dir = if left { -1.0 } else { 1.0 };
         let [dx, dy] = self.player.drawn(self.tick_acc);
@@ -2126,9 +2241,19 @@ impl Game {
     /// The bolt is its picture glowing over a trail, which the game draws
     /// with a shader and here is plain strips fading from white to violet.
     fn magic_sprites(&self, out: &mut Vec<Sprite>) {
-        let violet = [238.0, 130.0, 238.0].map(|c: f32| c / 255.0);
-        let purple = [128.0, 0.0, 128.0].map(|c: f32| c / 255.0);
         for b in &self.bolts {
+            // `DrawProj_GemStaffShot`: head, tail and the white the head starts from.
+            let rgb = |c: [f32; 3]| c.map(|c| c / 255.0);
+            let white = [1.0; 3];
+            let (head, tail, start) = match b.kind {
+                122 => (rgb([255.0, 165.0, 0.0]), rgb([255.0, 165.0, 0.0]), white),
+                // Sapphire: blue throughout, at half alpha, which `RainbowRod` adds up the same.
+                123 => (rgb([60.0, 90.0, 255.0]), rgb([60.0, 90.0, 255.0]), rgb([60.0, 90.0, 255.0])),
+                124 => (rgb([50.0, 205.0, 50.0]), rgb([0.0, 128.0, 0.0]), white),
+                125 => (rgb([255.0, 0.0, 0.0]), rgb([255.0, 0.0, 0.0]), white),
+                126 => (rgb([192.0, 192.0, 192.0]), rgb([192.0, 192.0, 192.0]), white),
+                _ => (rgb([238.0, 130.0, 238.0]), rgb([128.0, 0.0, 128.0]), white),
+            };
             let n = b.trail.len();
             let h = magic::BOLT_SIZE / 2.0;
             for (k, w) in b.trail.windows(2).enumerate() {
@@ -2138,8 +2263,8 @@ impl Game {
                 let fade = (1.0 - p / 0.98).max(0.0) * 0.5;
                 let c: Vec<f32> = (0..3)
                     .map(|i| {
-                        let mid = violet[i] + (purple[i] - violet[i]) * p;
-                        (1.0 + (mid - 1.0) * toward) * fade
+                        let mid = head[i] + (tail[i] - head[i]) * p;
+                        (start[i] + (mid - start[i]) * toward) * fade
                     })
                     .collect();
                 let (vx, vy) = (z[0] - a[0], z[1] - a[1]);
@@ -2148,9 +2273,9 @@ impl Game {
                 (s.rot, s.pivot) = (vy.atan2(vx), [0.0, 8.0]);
                 out.push(s);
             }
-            if let Some(sheet) = self.sheet("Projectile_121") {
-                let t = (300 - b.time_left) as f32 / 60.0;
-                let k = 0.6 * (1.0 + (t * std::f32::consts::TAU).cos() * 0.2);
+            if let Some(sheet) = self.sheet(&format!("Projectile_{}", b.kind)) {
+                let t = b.age as f32 / 60.0;
+                let k = 0.6 * (1.0 + (t * std::f32::consts::TAU).cos() * 0.2) * b.scale;
                 let size = [sheet.w as f32 * 1.25 * k, sheet.h as f32 * k];
                 let [cx, cy] = b.center();
                 let mut s = Sprite::sheet([cx - size[0] / 2.0, cy - size[1] / 2.0], sheet, [0, 0, sheet.w, sheet.h], 0);
@@ -2158,6 +2283,19 @@ impl Game {
                 s.color = [80.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 0.0];
                 // Four copies on top of each other.
                 out.extend([s; 4]);
+                if b.features().bigger {
+                    // A pulsing cross twice as long each way, at half the glow.
+                    let q = 1.0 + (t * std::f32::consts::TAU * 4.0).cos() * 0.2;
+                    for scale in [[1.0, 2.0], [2.0, 1.0]] {
+                        let size = [sheet.w as f32 * scale[0] * q, sheet.h as f32 * scale[1] * q];
+                        let mut x = s;
+                        x.pos = [cx - size[0] / 2.0, cy - size[1] / 2.0];
+                        (x.size, x.pivot) = (size, [size[0] / 2.0, size[1] / 2.0]);
+                        x.rot = b.rotation() + std::f32::consts::FRAC_PI_4;
+                        x.color = [40.0 / 255.0, 40.0 / 255.0, 40.0 / 255.0, 0.0];
+                        out.push(x);
+                    }
+                }
             }
         }
         self.star_sprites(out);
@@ -2210,7 +2348,8 @@ impl Game {
     }
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
-    fn player_sprites(&self, p: &Player, dim: bool, out: &mut Vec<Sprite>) {
+    /// `arm`: column of the front arm frame.
+    fn player_sprites(&self, p: &Player, dim: bool, arm: u32, out: &mut Vec<Sprite>) {
         let [x, y] = p.drawn(self.tick_acc);
         let (x, y) = (x, y + p.gfx_off_y);
         let pos = [x + player::WIDTH / 2.0 - 20.0, y + player::HEIGHT - 54.0];
@@ -2220,6 +2359,7 @@ impl Game {
         for &(name, col, row, color) in &PLAYER_LAYERS {
             let Some(sheet) = self.sheet(name) else { continue };
             let row = if row == u32::MAX { legs } else { row };
+            let col = if col == 2 { arm } else { col };
             if (col + 1) * 40 > sheet.w || (row + 1) * 56 > sheet.h {
                 continue;
             }
@@ -2524,6 +2664,59 @@ mod tests {
         (g.mana.cur, g.item_animation, g.release_use) = (6, 0, true);
         g.use_item(target);
         assert!(g.bolts.is_empty() && g.item_animation == 0, "not enough mana");
+    }
+
+    #[test]
+    fn gem_staffs_shoot_their_own_way() {
+        let staff = |g: &mut Game, id: u16| {
+            g.inventory.slots[9] = Some(Stack { item: Item::Id(id), count: 1 });
+            g.inventory.selected = 9;
+            (g.mana.max, g.mana.cur, g.item_animation, g.release_use) = (200, 200, 0, true);
+            g.bolts.clear();
+        };
+        let mut g = game();
+        let (px, py) = g.player.center();
+        let target = Some((px + 100.0, py));
+
+        staff(&mut g, 741);
+        g.use_item(target);
+        assert_eq!(
+            g.bolts.iter().map(|b| (b.kind, b.twin, b.damage)).collect::<Vec<_>>(),
+            [(123, Some(0.0), 10), (123, Some(1.0), 10)]
+        );
+
+        // Ruby: a second bolt halfway through the swing, without more mana.
+        staff(&mut g, 743);
+        g.use_item(target);
+        let mana = g.mana.cur;
+        for _ in 0..30 {
+            g.use_item(None);
+        }
+        assert_eq!((g.bolts.len(), g.mana.cur), (2, mana));
+        assert_eq!(g.bolts[0].damage, 9, "half of 18");
+
+        staff(&mut g, 742);
+        g.use_item(target);
+        let s = item_ids::stats(742).unwrap().shoot_speed;
+        assert!((g.bolts[0].vel[0] - s * 5.0).abs() < 1e-3);
+
+        // Topaz: the bolt bursts on the floor and hurts a slime beside it.
+        staff(&mut g, 740);
+        g.bolts.push(Bolt::new(122, [200.0, 300.0], [0.0, 8.0], 16, 1.0, None));
+        g.mobs = vec![Mob::new(Kind::Slime, 250.0, 320.0)];
+        for _ in 0..10 {
+            g.update_bolts();
+        }
+        assert!(g.bolts.is_empty());
+        assert!(g.mobs.is_empty() || g.mobs[0].hp < Kind::Slime.max_hp(), "burst");
+    }
+
+    #[test]
+    fn bars_and_staffs_are_crafted_from_ore_and_gems() {
+        let out = |id: u16| RECIPES.iter().find(|r| r.out == Out::Item(Item::Id(id))).unwrap();
+        assert_eq!(out(706).inputs, [(Item::Block(169), 4)]);
+        assert_eq!(out(744).inputs, [(Item::Id(706), 7), (Item::Id(182), 8)]);
+        assert_eq!(out(744).station, Some(items::ANVIL));
     }
 
     #[test]
