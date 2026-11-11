@@ -42,6 +42,8 @@ pub enum Sfx {
     DoorClose,
     MenuOpen,
     MenuClose,
+    LifeCrystal,
+    Mirror,
 }
 
 impl Sfx {
@@ -75,6 +77,8 @@ impl Sfx {
             Sfx::StarFall => ("Item_9", 1),
             Sfx::StarHit => ("Item_10", 1),
             Sfx::Bow => ("Item_5", 1),
+            Sfx::LifeCrystal => ("Item_4", 1),
+            Sfx::Mirror => ("Item_6", 1),
         }
     }
 }

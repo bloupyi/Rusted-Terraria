@@ -6,6 +6,7 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
+use crate::equip::{self, Buff, Effects};
 use crate::house::{self, Chest};
 use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
@@ -59,6 +60,7 @@ pub const TREE: u16 = 5;
 pub const WOOD: u16 = 30;
 const TORCH: u16 = 4;
 const POT: u16 = 28;
+const LIFE_CRYSTAL_TILE: u16 = 12;
 /// `Item.potionDelay`: a minute of potion sickness.
 const POTION_DELAY: i32 = 3600;
 /// Grass, vines and other plants: break without dropping anything.
@@ -68,6 +70,7 @@ const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
+/// `statLifeMax` to start with.
 pub const MAX_HP: i32 = 100;
 const MAX_MOBS: usize = 5;
 const SPAWN_EVERY: f32 = 2.0;
@@ -138,6 +141,8 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(ranged::SHEETS.iter().map(|s| s.to_string()));
     v.extend(coins::SHEETS.iter().map(|s| s.to_string()));
     v.extend(house::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(equip::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(equip::buff_sheets());
     v.extend(armor::picture_sheets());
     v
 }
@@ -195,6 +200,12 @@ pub struct Game {
     /// Edits to send to the other players.
     pub outbox: Vec<Msg>,
     pub hp: i32,
+    /// `statLifeMax`: 100, and 20 more a life crystal up to 400.
+    pub life_max: i32,
+    /// Buffs from potions, in the order they came.
+    pub buffs: Vec<Buff>,
+    /// What accessories and buffs add, worked out each tick.
+    pub effects: Effects,
     /// Ticks without damage after a hit.
     immune: i32,
     /// `lifeRegenTime` and `lifeRegenCount`.
@@ -297,6 +308,9 @@ impl Game {
             client: false,
             outbox: Vec::new(),
             hp: MAX_HP,
+            life_max: MAX_HP,
+            buffs: Vec::new(),
+            effects: equip::effects([], &[]),
             immune: 0,
             regen_time: 0.0,
             regen_count: 0,
@@ -411,7 +425,13 @@ impl Game {
             self.torch_flame();
             if let Some(input) = input {
                 let facing = self.player.facing_left;
+                self.effects = equip::effects(self.inventory.accessories(), &self.buffs);
+                equip::tick_buffs(&mut self.buffs);
+                self.player.moves = self.effects.moves;
                 self.player.tick(&self.world, input);
+                if self.player.fall_damage > 0 {
+                    self.hurt(self.player.fall_damage, 0.0);
+                }
                 if self.item_animation > 0 && !self.held_tool().use_turn {
                     self.player.facing_left = facing;
                 }
@@ -759,18 +779,37 @@ impl Game {
         let p = self.player.body;
         let Some(m) = self.mobs.iter().find(|m| m.kind.damage() > 0 && m.body.touches(&p)) else { return };
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
-        let damage = armor::damage_taken(self.damage_var(m.kind.damage()), self.defense());
+        let damage = self.damage_var(m.kind.damage());
+        self.hurt(damage, dir);
+    }
+
+    /// `Player.Hurt`: `damage` less half the defense, then 40 ticks without
+    /// damage and, from a side (`dir` not 0), a knockback away from it.
+    fn hurt(&mut self, damage: i32, dir: f32) {
+        if self.immune > 0 {
+            return;
+        }
+        let damage = armor::damage_taken(damage, self.defense());
         self.hp -= damage;
         self.regen_time = 0.0;
         let b = self.player.body;
         self.text_at([b.x, b.y, b.w, b.h], combat_text::DAMAGED_FRIENDLY, damage, false);
         self.immune = if damage == 1 { 20 } else { 40 };
-        (self.player.vx, self.player.vy) = (4.5 * dir, -3.5);
+        if dir != 0.0 {
+            (self.player.vx, self.player.vy) = (4.5 * dir, -3.5);
+        }
         self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
         if self.hp <= 0 {
-            self.hp = MAX_HP;
-            self.player = Player::spawn(&self.world, self.spawn_x);
+            self.hp = self.life_max;
+            self.respawn();
         }
+    }
+
+    /// `Player.Spawn`: back at the spawn point.
+    fn respawn(&mut self) {
+        let facing = self.player.facing_left;
+        self.player = Player::spawn(&self.world, self.spawn_x);
+        self.player.facing_left = facing;
     }
 
     /// `headSlot`, `bodySlot` and `legSlot` of what the player wears.
@@ -779,13 +818,15 @@ impl Game {
         [h.map_or(0, |s| s.head_slot), b.map_or(0, |s| s.body_slot), l.map_or(0, |s| s.leg_slot)]
     }
 
-    /// `statDefense` of what the player wears.
+    /// `statDefense` of what the player wears, and from buffs.
     pub fn defense(&self) -> i32 {
-        armor::defense(self.inventory.worn())
+        let acc: i32 = self.inventory.accessories().filter_map(item_ids::stats).map(|s| s.defense as i32).sum();
+        armor::defense(self.inventory.worn()) + acc + self.effects.defense
     }
 
-    /// `UpdateLifeRegen` without buffs, debuffs or accessories: after five
-    /// seconds unhurt life comes back faster and faster, more when standing still.
+    /// `UpdateLifeRegen` without debuffs: what accessories and buffs give, and
+    /// after five seconds unhurt life coming back faster and faster, more when
+    /// standing still.
     fn life_regen(&mut self) {
         self.regen_time = (self.regen_time + 1.0).min(3600.0);
         let t = self.regen_time;
@@ -795,28 +836,29 @@ impl Game {
         if self.env.expert {
             regen /= 2.0;
         }
-        regen *= MAX_HP as f32 / 400.0 * 0.85 + 0.15;
+        regen *= self.life_max as f32 / 400.0 * 0.85 + 0.15;
         // `Math.Round` rounds halves to even.
-        self.regen_count += regen.round_ties_even() as i32;
+        self.regen_count += self.effects.life_regen + regen.round_ties_even() as i32;
         while self.regen_count >= 120 {
             self.regen_count -= 120;
-            self.hp = (self.hp + 1).min(MAX_HP);
+            self.hp = (self.hp + 1).min(self.life_max);
         }
     }
 
     /// `Player.Heal`: life back, shown in green over the player.
     fn heal(&mut self, n: i32) {
-        self.hp = (self.hp + n).min(MAX_HP);
+        self.hp = (self.hp + n).min(self.life_max);
         let b = self.player.body;
         self.text_at([b.x, b.y, b.w, b.h], combat_text::HEAL_LIFE, n, false);
     }
 
-    /// Drinks `id` if it heals (`ItemCheck` with `ApplyPotionDelay` and
-    /// `ApplyLifeAndOrMana`): potion sickness for a minute, life back at once.
+    /// Drinks `id` if it heals or gives a buff (`ItemCheck` with
+    /// `ApplyPotionDelay`, `ApplyLifeAndOrMana` and `AddBuff`): potion sickness
+    /// for a minute and life back at once, or the buff for its time.
     fn drink(&mut self, id: u16) -> bool {
         let Some(s) = item_ids::stats(id) else { return false };
         let potion = s.flags & item_ids::POTION != 0;
-        if s.heal_life <= 0 || (potion && self.potion_delay > 0) {
+        if (s.heal_life <= 0 && s.buff_type <= 0) || (potion && self.potion_delay > 0) {
             return false;
         }
         if potion {
@@ -824,16 +866,21 @@ impl Game {
         }
         self.item_animation = s.use_animation as i32;
         self.sfx.push(Sfx::Drink);
-        self.heal(s.heal_life as i32);
+        if s.heal_life > 0 {
+            self.heal(s.heal_life as i32);
+        }
+        if s.buff_type > 0 {
+            equip::add_buff(&mut self.buffs, s.buff_type as u16, s.buff_time);
+        }
         true
     }
 
     /// `QuickHeal` (H): the potion whose healing best fits the missing life.
     pub fn quick_heal(&mut self) {
-        if self.hp >= MAX_HP || self.potion_delay > 0 || self.item_animation > 0 {
+        if self.hp >= self.life_max || self.potion_delay > 0 || self.item_animation > 0 {
             return;
         }
-        let missing = MAX_HP - self.hp;
+        let missing = self.life_max - self.hp;
         let mut best: Option<(usize, i32)> = None;
         for (i, slot) in self.inventory.slots.iter().enumerate() {
             let Some(Stack { item: Item::Id(id), .. }) = slot else { continue };
@@ -884,7 +931,7 @@ impl Game {
             dungeon_wall: matches!(wall, 7..=9 | 94..=99),
             in_liquid: self.world.liquid(x, ty) > 0,
             expert: self.env.expert,
-            hurt: self.hp < MAX_HP,
+            hurt: self.hp < self.life_max,
             torches,
         };
         let loot = pots::loot(&pot, |n| (self.random() % n.max(1) as u64) as i32);
@@ -966,7 +1013,7 @@ impl Game {
         if self.random().is_multiple_of(6) {
             if self.random().is_multiple_of(2) && short {
                 self.toss(x, y, Item::Id(magic::MANA_STAR), 1);
-            } else if self.random().is_multiple_of(2) && self.hp < MAX_HP {
+            } else if self.random().is_multiple_of(2) && self.hp < self.life_max {
                 self.toss(x, y, Item::Id(pots::HEART), 1);
             }
         }
@@ -1296,9 +1343,18 @@ impl Game {
                     self.fire(id, target.unwrap());
                 } else if id == magic::MANA_CRYSTAL {
                     self.use_crystal();
+                } else if id == equip::LIFE_CRYSTAL {
+                    self.use_life_crystal();
+                } else if id == equip::MAGIC_MIRROR {
+                    self.item_animation = 90;
+                    self.item_time = 90;
+                    self.sfx.push(Sfx::Mirror);
                 } else if self.drink(id) {
                     self.inventory.consume();
                 }
+            }
+            if id == equip::MAGIC_MIRROR && self.item_animation > 0 {
+                self.mirror();
             }
             if let Some(bolt) = magic::staff_bolt(id).filter(|_| self.item_animation > 0) {
                 self.mana.delay_regen();
@@ -1514,6 +1570,46 @@ impl Game {
         let damage = bow.damage as i32 + arrow.damage as i32;
         self.arrows.push(Arrow::new([cx, cy], vel, damage, bow.knock_back + arrow.knock_back));
         self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
+    }
+
+    /// `ItemCheck_UseLifeCrystal`: 20 life more, up to 400, and 20 life back.
+    fn use_life_crystal(&mut self) {
+        if self.life_max >= equip::LIFE_CRYSTAL_CAP {
+            return;
+        }
+        self.item_animation = 30;
+        self.item_time = 30;
+        self.life_max += 20;
+        self.sfx.push(Sfx::LifeCrystal);
+        self.heal(20);
+        self.inventory.consume();
+    }
+
+    /// The magic mirror while in use: sparkles, and halfway the trip home
+    /// between two clouds of them.
+    fn mirror(&mut self) {
+        if self.random().is_multiple_of(2) {
+            self.mirror_dust([0.0; 2], 1.1);
+        }
+        if self.item_time == 45 {
+            let v = [self.player.vx * 0.5, self.player.vy * 0.5];
+            for _ in 0..70 {
+                self.mirror_dust(v, 1.5);
+            }
+            self.respawn();
+            for _ in 0..70 {
+                self.mirror_dust([0.0; 2], 1.5);
+            }
+        }
+    }
+
+    /// `Dust.NewDust` of type 15 over the player.
+    fn mirror_dust(&mut self, speed: [f32; 2], scale: f32) {
+        let b = self.player.body;
+        let d = Dust::new(15, [b.x, b.y], b.w as i32, b.h as i32, speed, scale, |n| {
+            (self.random() % n.max(1) as u64) as i32
+        });
+        self.dust.push(d);
     }
 
     /// `ItemCheck_UseManaCrystal`: a star more, shown in blue.
@@ -1838,7 +1934,7 @@ impl Game {
                 self.damage_tile(x, y, damage);
             }
             if s.pick > 0 {
-                self.item_time = s.use_time;
+                self.item_time = (s.use_time as f32 * self.effects.pick_speed) as i32;
             }
         }
         if walls && t == NO_TILE && s.hammer > 0 && self.world.wall(x, y) != 0 && self.can_smash_wall(x, y) {
@@ -1938,6 +2034,8 @@ impl Game {
             (cells.filter(|&(x, y)| world.tile(x, y) == t).collect(), Some((Item::Id(coins::DOOR), 1)))
         } else if t == house::PLATFORM {
             (vec![(tx, ty)], Some((Item::Block(t), 1)))
+        } else if t == LIFE_CRYSTAL_TILE {
+            (self.object_cells(tx, ty), Some((Item::Id(equip::LIFE_CRYSTAL), 1)))
         } else if self.important(t) {
             if house::is_chest(t) {
                 let o = house::chest_origin(&self.world, tx, ty);
@@ -2670,6 +2768,13 @@ impl Game {
                 let ([x, y], dir) = self.torch_hold(style);
                 v.extend(glow::at([x + 12.0 * dir + self.player.vx, y - 14.0 + self.player.vy], rgb));
             }
+        }
+        if self.effects.shine {
+            // `UpdateBuffs` for the shine potion.
+            v.extend(glow::at(
+                [self.player.x + player::WIDTH / 2.0, self.player.y + player::HEIGHT / 2.0],
+                [0.8, 0.95, 1.0],
+            ));
         }
         v.extend(self.dust.iter().filter_map(glow::dust));
         v.extend(self.bolts.iter().filter_map(glow::bolt));
@@ -3437,6 +3542,91 @@ mod tests {
         g.contact_damage();
         let lost = MAX_HP - g.hp;
         assert!((3..=5).contains(&lost), "7 within 15%, less 3: {lost}");
+    }
+
+    fn hold(g: &mut Game, id: u16, count: u16) {
+        g.inventory.slots[0] = Some(Stack { item: Item::Id(id), count });
+        g.inventory.selected = 0;
+    }
+
+    fn walk(g: &mut Game, input: Input, ticks: u32) {
+        for _ in 0..ticks {
+            g.update(Some(input), 1.0 / 60.0, 1.0);
+        }
+    }
+
+    #[test]
+    fn life_crystals_raise_life_to_400() {
+        let mut g = game();
+        hold(&mut g, equip::LIFE_CRYSTAL, 20);
+        g.hp = 50;
+        g.use_item(Some((0.0, 0.0)));
+        assert_eq!((g.life_max, g.hp), (120, 70));
+        for _ in 0..30 * 40 {
+            g.use_item(Some((0.0, 0.0)));
+            g.use_item(None);
+        }
+        assert_eq!(g.life_max, equip::LIFE_CRYSTAL_CAP);
+        assert_eq!(g.inventory.count(Item::Id(equip::LIFE_CRYSTAL)), 5, "one per 20 life");
+        g.world.set_tile(40, 18, LIFE_CRYSTAL_TILE, 0, 0);
+        g.break_tile(40, 18, true);
+        assert!(g.drops.iter().any(|d| d.item == Item::Id(equip::LIFE_CRYSTAL)));
+    }
+
+    #[test]
+    fn the_mirror_takes_the_player_home_halfway() {
+        let mut g = game();
+        let home = Player::spawn(&g.world, g.spawn_x);
+        g.player = Player::spawn(&g.world, 5);
+        hold(&mut g, equip::MAGIC_MIRROR, 1);
+        g.use_item(Some((0.0, 0.0)));
+        for _ in 0..44 {
+            g.use_item(Some((0.0, 0.0)));
+        }
+        assert!(g.player.x < 100.0, "not yet");
+        g.use_item(Some((0.0, 0.0)));
+        assert_eq!((g.player.x, g.player.y), (home.x, home.y));
+        assert_eq!(g.inventory.count(Item::Id(equip::MAGIC_MIRROR)), 1, "kept");
+    }
+
+    #[test]
+    fn potions_and_accessories_change_the_player() {
+        let mut g = game();
+        hold(&mut g, 292, 2);
+        g.use_item(Some((0.0, 0.0)));
+        assert_eq!(g.buffs, [Buff { kind: 5, time: 28800 }]);
+        assert_eq!(g.inventory.count(Item::Id(292)), 1);
+        walk(&mut g, Input::default(), 1);
+        assert_eq!(g.defense(), 8, "ironskin");
+        g.inventory.armor[3] = Some(Stack { item: Item::Id(54), count: 1 });
+        walk(&mut g, Input::default(), 1);
+        assert_eq!(g.player.moves.acc_run, 6.0);
+        g.buffs[0].time = 2;
+        walk(&mut g, Input::default(), 3);
+        assert!(g.buffs.is_empty());
+        assert_eq!(g.defense(), 0);
+    }
+
+    #[test]
+    fn long_falls_hurt_unless_horseshoe() {
+        let fall = |worn: Option<u16>| {
+            let world = World::parse(&formats::synth::write_world("f", 64, 120, &[false; 2], |_, y| Tile {
+                tile: if y >= 70 { 1 } else { NO_TILE },
+                ..Tile::default()
+            }))
+            .unwrap();
+            let scene = Scene::build(&world, None, &EXTRA_TILES, &house::WALLS, &[], Vec::new());
+            let mut g = Game::new(world, scene);
+            g.mobs.clear();
+            g.player = Player::at(15.0 * 16.0, 40.0 * 16.0);
+            g.inventory.armor[3] = worn.map(|id| Stack { item: Item::Id(id), count: 1 });
+            walk(&mut g, Input::default(), 300);
+            assert!(g.player.on_ground);
+            MAX_HP - g.hp
+        };
+        // 30 rows down less the player's height: 2 rows past the safe 25.
+        assert_eq!(fall(None), 20);
+        assert_eq!(fall(Some(158)), 0);
     }
 
     #[test]

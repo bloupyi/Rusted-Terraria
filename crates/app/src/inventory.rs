@@ -43,6 +43,14 @@ pub fn armor_slot(item: Item) -> Option<usize> {
     }
 }
 
+/// `Item.accessory`.
+pub fn is_accessory(item: Item) -> bool {
+    matches!(item, Item::Id(id) if crate::item_ids::stats(id).is_some_and(|s| s.flags & crate::item_ids::ACCESSORY != 0))
+}
+
+/// Armour and accessory slots (`Player.armor[0..8]`).
+pub const EQUIP_SLOTS: usize = 3 + crate::equip::ACCESSORIES;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stack {
     pub item: Item,
@@ -88,13 +96,13 @@ pub struct Inventory {
     pub selected: usize,
     /// What the cursor carries (`Main.mouseItem`).
     pub mouse: Option<Stack>,
-    /// Worn head, body and legs (`Player.armor[0..3]`).
-    pub armor: [Option<Stack>; 3],
+    /// Worn head, body and legs, then the accessories (`Player.armor[0..8]`).
+    pub armor: [Option<Stack>; EQUIP_SLOTS],
 }
 
 impl Inventory {
     pub fn new(items: &[Item]) -> Self {
-        let mut inv = Self { slots: [None; SLOTS], selected: 0, mouse: None, armor: [None; 3] };
+        let mut inv = Self { slots: [None; SLOTS], selected: 0, mouse: None, armor: [None; EQUIP_SLOTS] };
         for &item in items {
             inv.add(item, 1);
         }
@@ -208,10 +216,18 @@ impl Inventory {
         take_one(&mut self.slots[i], &mut self.mouse)
     }
 
-    /// `ItemSlot.LeftClick` on armour slot `k`: swaps it with the mouse when the
-    /// mouse is empty or holds a piece for that slot. True when anything moved.
+    /// `ItemSlot.LeftClick` on equipment slot `k`: swaps it with the mouse when
+    /// the mouse is empty or holds a piece for that slot, or an accessory not
+    /// worn in another slot (`AccCheck`). True when anything moved.
     pub fn armor_click(&mut self, k: usize) -> bool {
-        let fits = self.mouse.is_none_or(|m| armor_slot(m.item) == Some(k));
+        let fits = self.mouse.is_none_or(|m| {
+            if k < 3 {
+                armor_slot(m.item) == Some(k)
+            } else {
+                is_accessory(m.item)
+                    && !(3..EQUIP_SLOTS).any(|j| j != k && self.armor[j].is_some_and(|a| a.item == m.item))
+            }
+        });
         if !fits || (self.mouse.is_none() && self.armor[k].is_none()) {
             return false;
         }
@@ -219,18 +235,38 @@ impl Inventory {
         true
     }
 
-    /// `ItemSlot.SwapEquip` on slot `i`: a single armour piece goes on, the one
-    /// it replaces takes its place. True when it did.
+    /// `ItemSlot.SwapEquip` on slot `i` (`ArmorSwap`): a single armour piece
+    /// goes on, the one it replaces takes its place; an accessory replaces the
+    /// same one worn, else takes the first free accessory slot, else the first.
+    /// True when it did.
     pub fn equip(&mut self, i: usize) -> bool {
         let Some(s) = self.slots[i].filter(|s| s.count == 1) else { return false };
-        let Some(k) = armor_slot(s.item) else { return false };
+        let k = match armor_slot(s.item) {
+            Some(k) => k,
+            None if is_accessory(s.item) => {
+                let acc = 3..EQUIP_SLOTS;
+                acc.clone()
+                    .find(|&j| self.armor[j].is_some_and(|a| a.item == s.item))
+                    .or_else(|| acc.clone().find(|&j| self.armor[j].is_none()))
+                    .unwrap_or(3)
+            }
+            None => return false,
+        };
         std::mem::swap(&mut self.slots[i], &mut self.armor[k]);
         true
     }
 
     /// The ids of the worn pieces.
     pub fn worn(&self) -> [Option<u16>; 3] {
-        self.armor.map(|a| match a?.item {
+        [0, 1, 2].map(|k| match self.armor[k]?.item {
+            Item::Id(id) => Some(id),
+            _ => None,
+        })
+    }
+
+    /// The ids of the worn accessories.
+    pub fn accessories(&self) -> impl Iterator<Item = u16> + '_ {
+        self.armor[3..].iter().flatten().filter_map(|a| match a.item {
             Item::Id(id) => Some(id),
             _ => None,
         })
@@ -326,6 +362,24 @@ mod tests {
         assert!(!inv.armor_click(1), "a helmet is not a shirt");
         assert!(inv.armor_click(0));
         assert_eq!((inv.mouse.map(|m| m.item), inv.worn()[0]), (Some(Item::Id(90)), Some(89)));
+    }
+
+    #[test]
+    fn accessories_fill_their_slots_once_each() {
+        let mut inv = Inventory::new(&[Item::Id(54), Item::Id(53), Item::Id(54)]);
+        assert!(inv.equip(0) && inv.equip(1));
+        assert_eq!(inv.accessories().collect::<Vec<_>>(), [54, 53]);
+        assert!(inv.equip(2), "the same boots swap with the worn ones");
+        assert_eq!(
+            (inv.armor[3].map(|a| a.item), inv.slots[2].map(|s| s.item)),
+            (Some(Item::Id(54)), Some(Item::Id(54)))
+        );
+        inv.mouse = inv.slots[2].take();
+        assert!(!inv.armor_click(5), "no second pair");
+        assert!(!inv.armor_click(0), "not on the head");
+        inv.mouse = Some(Stack { item: Item::Id(158), count: 1 });
+        assert!(inv.armor_click(5));
+        assert_eq!(inv.accessories().collect::<Vec<_>>(), [54, 53, 158]);
     }
 
     #[test]

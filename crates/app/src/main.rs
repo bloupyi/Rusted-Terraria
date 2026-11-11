@@ -4,6 +4,7 @@ mod backdrop;
 mod cave;
 mod coins;
 mod combat_text;
+mod equip;
 mod game;
 mod glow;
 mod house;
@@ -128,6 +129,7 @@ impl App {
     fn update(&mut self, dt: f32, size: Vec2) {
         let open = self.inventory_open;
         for _ in 0..self.hud.update(dt, self.game.inventory.selected, !open) {
+            self.hud.tick_buffs(self.game.buffs.len(), self.buff_under_cursor());
             self.split.tick(self.buttons[0] || self.buttons[1]);
             let slot = ui::inventory_under(self.cursor.into(), SLOTS).filter(|_| open && self.buttons[1]);
             let chest = ui::chest_under(self.cursor.into(), house::SLOTS)
@@ -141,8 +143,10 @@ impl App {
                 }
             }
             if let Some(i) = slot.filter(|_| !self.game.using_item()) {
-                // `SwapEquip`: armour goes on at the press instead of splitting.
-                if self.game.inventory.slots[i].and_then(|s| inventory::armor_slot(s.item)).is_some() {
+                // `SwapEquip`: armour and accessories go on at the press instead of splitting.
+                if self.game.inventory.slots[i]
+                    .is_some_and(|s| inventory::armor_slot(s.item).is_some() || inventory::is_accessory(s.item))
+                {
                     if std::mem::take(&mut self.right_fresh) && self.game.inventory.equip(i) {
                         self.game.sfx.push(audio::Sfx::Grab);
                     }
@@ -288,7 +292,14 @@ impl App {
             self.hud.draw_hotbar(&mut p, inv.selected, &counts, title, slot_icon);
         }
         let life = game.texts.get("LegacyInterface.0").unwrap_or("");
-        self.hud.draw_life(&mut p, size.x, game.hp.max(0), game::MAX_HP, life);
+        self.hud.draw_life(&mut p, size.x, game.hp.max(0), game.life_max, life);
+        let (min, sec) =
+            (game.texts.get("Misc.ShortMinutes").unwrap_or("m"), game.texts.get("Misc.ShortSeconds").unwrap_or("s"));
+        // `DrawInterface_Resources_Buffs` runs while the inventory is closed.
+        if !self.inventory_open {
+            let buffs: Vec<_> = game.buffs.iter().map(|b| (b.kind, equip::duration(b.time, min, sec))).collect();
+            self.hud.draw_buffs(&mut p, &buffs);
+        }
         let mana = game.texts.get("LegacyInterface.2").unwrap_or("");
         self.hud.draw_mana(&mut p, size.x, game.mana.cur, game.mana.max, mana);
         if let Some(life) = game.boss_life() {
@@ -328,6 +339,13 @@ impl App {
             let lines = [(format!("{d} {name}"), [255; 3]), (cut, [255; 3])];
             self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &lines, inv.mouse.is_some());
         }
+        if let Some(b) = self.buff_under_cursor().map(|i| game.buffs[i]) {
+            // `DrawInterface_Resources_Buffs`' hover text: the name and what it does.
+            if let Some((name, desc)) = equip::buff_keys(b.kind) {
+                let line = |k: &str| (game.texts.get(k).unwrap_or("").to_string(), [255; 3]);
+                self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &[line(&name), line(&desc)], false);
+            }
+        }
         if let Some(stack) = hovered {
             if let (Some(name), Some((key, stats))) = (game.item_name(stack.item), game.item_data(stack.item)) {
                 let id = game.item_id(stack.item).unwrap_or(0);
@@ -350,6 +368,16 @@ impl App {
         }
     }
 
+    /// The buff icon under the cursor.
+    fn buff_under_cursor(&self) -> Option<usize> {
+        if self.inventory_open {
+            return None;
+        }
+        let sheets = &self.game.scene.mesher.atlas.named;
+        let size = sheets.get("Buff_1").map_or([32.0; 2], |s| [s.w as f32, s.h as f32]);
+        equip::icon_under(self.cursor.into(), self.game.buffs.len(), size)
+    }
+
     /// The open chest's slot under the cursor.
     fn chest_slot_under_cursor(&self) -> Option<usize> {
         self.game.open_chest.filter(|_| self.inventory_open)?;
@@ -367,6 +395,7 @@ impl App {
         let cursor = self.cursor.into();
         let sheets = &self.game.scene.mesher.atlas.named;
         self.slot_under_cursor().is_some()
+            || self.buff_under_cursor().is_some()
             || self.chest_slot_under_cursor().is_some()
             || self.chest_button_under_cursor().is_some()
             || (self.inventory_open && (ui::equip_under(cursor, w).is_some() || ui::defense_under(sheets, cursor, w)))
@@ -548,6 +577,11 @@ impl ApplicationHandler for App {
                     MouseButton::Right => {
                         self.buttons[1] = down;
                         self.right_fresh = down;
+                        // `TryRemovingBuff`: a right click on an icon ends the buff.
+                        if let Some(i) = self.buff_under_cursor().filter(|_| down) {
+                            self.game.buffs.remove(i);
+                            self.right_fresh = false;
+                        }
                     }
                     MouseButton::Middle if self.free => self.drag = down.then_some(self.cursor),
                     _ => {}

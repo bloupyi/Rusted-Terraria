@@ -12,42 +12,49 @@ import re
 import sys
 from pathlib import Path
 
-CASE_RE = re.compile(r"^\t\tcase (\d+):$")
+CASE_RE = re.compile(r"^(\t+)case (\d+):$")
+TOP_CASE_RE = re.compile(r"^\t\tcase (\d+):$")
+SWITCH_RE = re.compile(r"^(\t+)switch \((.+)\)$")
 CREATE_RE = re.compile(r"\bcreateTile = (\d+);")
 STYLE_RE = re.compile(r"\bplaceStyle = (\d+);")
 PLACE_RE = re.compile(r"DefaultToPlaceableTile\(\(ushort\)(\d+)(?:, (\d+))?\)")
 ID_RE = re.compile(r"public const short (\w+) = (\d+);")
 USED_RE = re.compile(r'"Item_(\d+)"')
-ASSIGN_RE = re.compile(r"^\t\t\t(\w+) = (.+);$")
-BASE_RE = re.compile(r"^\t\t\tSetDefaults[1-5]\((\d+)\);$")
+ASSIGN_RE = re.compile(r"^(\w+) = (.+);$")
+BASE_RE = re.compile(r"^SetDefaults[1-5]\((\d+)\);$")
 INGREDIENT_RE = re.compile(r"requiredItem\[\d+\]\.SetDefaults\((\d+)\);")
 GROUP_RE = re.compile(r"RecipeGroups\.(\w+) = new RecipeGroup\([^,]+, ([\d, ]+)\)")
 NEEDS_GROUP_RE = re.compile(r"RequireGroup\(RecipeGroups\.(\w+)\)")
-END = ("\t\t\tbreak;", "\t\t\treturn;")
-FLAGS = ["melee", "ranged", "magic", "summon", "consumable", "material", "ammo", "equip", "places", "container", "potion"]
+FLAGS = ["melee", "ranged", "magic", "summon", "consumable", "material", "ammo", "equip", "places", "container", "potion", "accessory"]
 
 
 def item_defaults(item_cs):
     """Assignments of each item's `SetDefaultsN` case, bases first, as `ResetStats` leaves the rest."""
     text = item_cs[item_cs.index("private void SetDefaults1(int type)"):]
-    bodies, labels, body = {}, [], None
+    # Cases of `switch (type)` at any depth, each body up to its `break` or
+    # `return`, with the case's own indentation and one tab more taken off.
+    bodies, labels, body, depth, switches = {}, [], None, "", {}
     for line in text.split("\n"):
+        if (m := SWITCH_RE.match(line)) and not labels:
+            switches[m.group(1)] = m.group(2)
+            continue
         m = CASE_RE.match(line)
-        if m:
+        if m and (not labels or m.group(1) == depth) and switches.get(m.group(1)) == "type":
             if body is not None:
                 labels, body = [], None
-            labels.append(int(m.group(1)))
+            depth = m.group(1)
+            labels.append(int(m.group(2)))
             continue
         if not labels:
+            continue
+        if line in (depth + "\tbreak;", depth + "\treturn;"):
+            labels, body = [], None
             continue
         if body is None:
             body = []
             for i in labels:
                 bodies.setdefault(i, body)
-        if line in END:
-            labels, body = [], None
-            continue
-        body.append(line)
+        body.append(line[len(depth) + 1 :] if line.startswith(depth + "\t") else line)
 
     def fields(i, depth=0):
         out = {"createTile": "-1"}
@@ -106,6 +113,7 @@ def stats(f, material):
         "places": num(f, "createTile", -1) > -1 or num(f, "createWall") > 0,
         "container": num(f, "createTile", -1) in (21, 467),
         "potion": f.get("potion") == "true",
+        "accessory": f.get("accessory") == "true",
     }
     bits = " | ".join(f"{k.upper()}" for k in FLAGS if flag[k]) or "0"
     kb = float(num(f, "knockBack"))
@@ -116,7 +124,8 @@ def stats(f, material):
             f"heal_life: {int(num(f, 'healLife'))}, mana: {int(num(f, 'mana'))}, "
             f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {max_stack(f)}, "
             f"head_slot: {int(num(f, 'headSlot'))}, body_slot: {int(num(f, 'bodySlot'))}, "
-            f"leg_slot: {int(num(f, 'legSlot'))}, flags: {bits}")
+            f"leg_slot: {int(num(f, 'legSlot'))}, buff_type: {int(num(f, 'buffType'))}, "
+            f"buff_time: {int(num(f, 'buffTime'))}, life_regen: {int(num(f, 'lifeRegen'))}, flags: {bits}")
 
 
 def placing_items(item_cs):
@@ -124,7 +133,7 @@ def placing_items(item_cs):
     out = []
     labels, body, tile, style = [], False, None, 0
     for line in item_cs.split("\n"):
-        m = CASE_RE.match(line)
+        m = TOP_CASE_RE.match(line)
         if m:
             if body:
                 labels, body, tile, style = [], False, None, 0
@@ -195,6 +204,11 @@ def main():
         "    pub head_slot: i16,",
         "    pub body_slot: i16,",
         "    pub leg_slot: i16,",
+        "    /// `buffType` and `buffTime` (ticks) of what it gives when used.",
+        "    pub buff_type: i16,",
+        "    pub buff_time: i32,",
+        "    /// `lifeRegen` while worn.",
+        "    pub life_regen: i16,",
         "    pub flags: u16,",
         "}",
         "",
