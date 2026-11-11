@@ -1,17 +1,37 @@
 //! Mana and the first magic weapon: `Player.UpdateManaRegen` without buffs or
 //! accessories, the Amethyst Staff and its bolt (projectile 121,
 //! `AI_029_GemStaffs` with the homing it gets from `PackGemStaffFeatures`),
-//! and the dust both leave.
+//! and the dust both leave. Then where mana comes from: falling stars at
+//! night (projectiles 720 and 12), the mana crystal they make, and the mana
+//! stars monsters drop.
 
 use world::collision::{self, V2};
 use world::World;
 
 pub const AMETHYST_STAFF: u16 = 739;
-/// `statManaMax2`: one star.
+pub const FALLEN_STAR: u16 = 75;
+pub const MANA_CRYSTAL: u16 = 109;
+pub const MANA_STAR: u16 = 184;
+/// `statManaMax` to start with, and as far as mana crystals take it.
 pub const MAX_MANA: i32 = 20;
-/// Sheets the staff, the gems and the bolt draw with.
-pub const SHEETS: &[&str] =
-    &["Item_739", "Item_177", "Item_178", "Item_179", "Item_180", "Item_181", "Item_182", "Projectile_121", "Dust"];
+pub const MANA_CRYSTAL_CAP: i32 = 200;
+/// Sheets the staff, the gems, the bolt and the stars draw with.
+pub const SHEETS: &[&str] = &[
+    "Item_739",
+    "Item_177",
+    "Item_178",
+    "Item_179",
+    "Item_180",
+    "Item_181",
+    "Item_182",
+    "Item_75",
+    "Item_109",
+    "Item_184",
+    "Projectile_121",
+    "Projectile_12",
+    "Extra_91",
+    "Dust",
+];
 /// Gem stone tiles 63 to 68 drop gems 177 to 182 (`KillTile_GetItemDrops`).
 pub const GEM_STONES: std::ops::RangeInclusive<u16> = 63..=68;
 pub const fn gem(tile: u16) -> u16 {
@@ -27,6 +47,8 @@ pub const HOMING_RANGE: f32 = 500.0;
 
 pub struct Mana {
     pub cur: i32,
+    /// `statManaMax2`.
+    pub max: i32,
     /// `manaRegenDelay` and `manaRegenCount`.
     delay: f32,
     count: i32,
@@ -34,7 +56,7 @@ pub struct Mana {
 
 impl Default for Mana {
     fn default() -> Self {
-        Self { cur: MAX_MANA, delay: 0.0, count: 0 }
+        Self { cur: MAX_MANA, max: MAX_MANA, delay: 0.0, count: 0 }
     }
 }
 
@@ -50,7 +72,7 @@ impl Mana {
 
     /// `ApplyManaRegenerationDelay`: longer the emptier the stars.
     pub fn delay_regen(&mut self) {
-        let empty = 1.0 - self.cur as f32 / MAX_MANA as f32;
+        let empty = 1.0 - self.cur as f32 / self.max as f32;
         self.delay = ((empty * 60.0 * 4.0 + 45.0) * 0.7) as i32 as f32;
     }
 
@@ -64,9 +86,9 @@ impl Mana {
             }
         }
         let regen = if self.delay <= 0.0 {
-            let base = MAX_MANA / 3 + 1;
+            let base = self.max / 3 + 1;
             let regen = if still { base * 2 } else { base };
-            let k = 0.5 + 0.5 * (self.cur as f32 / MAX_MANA as f32);
+            let k = 0.5 + 0.5 * (self.cur as f32 / self.max as f32);
             ((regen as f32 * k) as i32).max(2)
         } else {
             0
@@ -75,17 +97,89 @@ impl Mana {
         let mut filled = false;
         while self.count >= 120 {
             self.count -= 120;
-            let gained = self.cur < MAX_MANA;
+            let gained = self.cur < self.max;
             if gained {
                 self.cur += 1;
             }
-            if self.cur >= MAX_MANA {
+            if self.cur >= self.max {
                 filled |= gained;
-                self.cur = MAX_MANA;
+                self.cur = self.max;
             }
         }
         filled
     }
+
+    /// `ItemCheck_UseManaCrystal`: 20 more, up to 200.
+    pub fn crystal(&mut self) -> bool {
+        if self.max >= MANA_CRYSTAL_CAP {
+            return false;
+        }
+        self.max += 20;
+        self.cur += 20;
+        true
+    }
+
+    /// Picking up a mana star (`PickupItem`): 100 back.
+    pub fn star(&mut self) {
+        self.cur = (self.cur + 100).min(self.max);
+    }
+}
+
+/// A falling star: first `AI_148_StarSpawner` waiting three seconds out of
+/// sight, then projectile 12 (`aiStyle` 5) coming down until it lands.
+pub struct Star {
+    /// Top-left of its 18x18 box.
+    pub pos: V2,
+    pub vel: V2,
+    pub rot: f32,
+    /// Ticks the spawner still waits; drawn and moved only after.
+    pub wait: i32,
+    /// Hits tiles only once it has been clear of them (`ai[1]`).
+    collide: bool,
+    pub sound_delay: i32,
+    pub time_left: i32,
+    pub age: u32,
+}
+
+pub const STAR_SIZE: f32 = 18.0;
+
+impl Star {
+    pub fn new(pos: V2, vel: V2) -> Self {
+        Self { pos, vel, rot: 0.0, wait: 180, collide: false, sound_delay: 0, time_left: 3600, age: 0 }
+    }
+
+    pub fn center(&self) -> V2 {
+        [self.pos[0] + STAR_SIZE / 2.0, self.pos[1] + STAR_SIZE / 2.0]
+    }
+
+    /// One tick in flight: spin, then move, against the tiles once clear of
+    /// them. False when it lands.
+    pub fn advance(&mut self, world: &World) -> bool {
+        self.age += 1;
+        if !self.collide && !solid_in(world, self.pos, STAR_SIZE) {
+            self.collide = true;
+        }
+        let dir = if self.vel[0] < 0.0 { -1.0 } else { 1.0 };
+        self.rot += (self.vel[0].abs() + self.vel[1].abs()) * 0.01 * dir;
+        let vel = if self.collide {
+            let s = STAR_SIZE as i32;
+            collision::Box { world, pos: self.pos, size: [s, s] }.tiles(self.vel, true, true).vel
+        } else {
+            self.vel
+        };
+        let landed = vel != self.vel;
+        self.vel = vel;
+        self.pos = [self.pos[0] + vel[0], self.pos[1] + vel[1]];
+        self.time_left -= 1;
+        !landed && self.time_left > 0
+    }
+}
+
+/// `Collision.SolidCollision`: any solid tile under the square box.
+pub fn solid_in(world: &World, pos: V2, size: f32) -> bool {
+    let (x0, y0) = ((pos[0] / 16.0).floor() as i64, (pos[1] / 16.0).floor() as i64);
+    let (x1, y1) = (((pos[0] + size) / 16.0).floor() as i64, ((pos[1] + size) / 16.0).floor() as i64);
+    (x0..=x1).any(|x| (y0..=y1).any(|y| world.solid(x, y)))
 }
 
 /// The amethyst bolt: invisible itself, drawn as a glow and a trail.
@@ -272,7 +366,8 @@ mod tests {
         // ((1 - 6/20) * 240 + 45) * 0.7 = 149
         assert_eq!(m.delay, 149.0);
         let ticks = |still: bool| {
-            let mut m = Mana { cur: 6, delay: 149.0, count: 0 };
+            let mut m = Mana { cur: 6, max: MAX_MANA, delay: 0.0, count: 0 };
+            m.delay = 149.0;
             let mut t = 0;
             while !m.regen(still) {
                 t += 1;
@@ -282,6 +377,17 @@ mod tests {
         let (moving, still) = (ticks(false), ticks(true));
         assert!(still < moving, "{still} {moving}");
         assert!((150..1500).contains(&moving), "{moving}");
+    }
+
+    #[test]
+    fn crystals_and_stars() {
+        let mut m = Mana { cur: 5, ..Default::default() };
+        assert!(m.crystal());
+        assert_eq!((m.cur, m.max), (25, 40));
+        m.star();
+        assert_eq!(m.cur, 40);
+        m.max = MANA_CRYSTAL_CAP;
+        assert!(!m.crystal(), "200 at most");
     }
 
     #[test]

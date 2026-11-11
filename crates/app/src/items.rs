@@ -174,6 +174,12 @@ pub const RECIPES: &[Recipe] = &[
         station: None,
     },
     Recipe {
+        out: Out::Item(Item::Id(crate::magic::MANA_CRYSTAL)),
+        count: 1,
+        inputs: &[(Item::Id(crate::magic::FALLEN_STAR), 5)],
+        station: None,
+    },
+    Recipe {
         out: Out::Item(Item::Tool(Tool::Sword(Tier::Wood))),
         count: 1,
         inputs: &[wood(7)],
