@@ -10,7 +10,7 @@ use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
-use crate::{backdrop, cave, glow, item_ids, pots};
+use crate::{armor, backdrop, cave, glow, item_ids, pots};
 use formats::wld::Env;
 use world::light::{self, Glow, Rect};
 use world::liquid::{LiquidSim, OBSIDIAN};
@@ -97,6 +97,8 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(pots::SHEETS.iter().map(|s| s.to_string()));
     v.extend(magic::SHEETS.iter().map(|s| s.to_string()));
     v.extend(glow::TORCH_ITEMS.iter().map(|id| format!("Item_{id}")));
+    v.extend(armor::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(armor::picture_sheets());
     v
 }
 
@@ -421,7 +423,7 @@ impl Game {
         let p = self.player.body;
         let Some(m) = self.mobs.iter().find(|m| m.kind.damage() > 0 && m.body.touches(&p)) else { return };
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
-        let damage = self.damage_var(m.kind.damage()).max(1);
+        let damage = armor::damage_taken(self.damage_var(m.kind.damage()), self.defense());
         self.hp -= damage;
         self.regen_time = 0.0;
         let b = self.player.body;
@@ -433,6 +435,17 @@ impl Game {
             self.hp = MAX_HP;
             self.player = Player::spawn(&self.world, self.spawn_x);
         }
+    }
+
+    /// `headSlot`, `bodySlot` and `legSlot` of what the player wears.
+    fn worn_pictures(&self) -> [i16; 3] {
+        let [h, b, l] = self.inventory.worn().map(|w| w.and_then(item_ids::stats));
+        [h.map_or(0, |s| s.head_slot), b.map_or(0, |s| s.body_slot), l.map_or(0, |s| s.leg_slot)]
+    }
+
+    /// `statDefense` of what the player wears.
+    pub fn defense(&self) -> i32 {
+        armor::defense(self.inventory.worn())
     }
 
     /// `UpdateLifeRegen` without buffs, debuffs or accessories: after five
@@ -1923,13 +1936,13 @@ impl Game {
         let mut over = Vec::new();
         self.mob_sprites(&mut over);
         for (_, p) in &self.others {
-            self.player_sprites(p, false, 2, &mut over);
+            self.player_sprites(p, [0; 3], false, 2, &mut over);
         }
         if !free {
             // `holdStyle` 1 raises the arm: body frame 3, front arm frame 5.
             let torch = self.inventory.selected().and_then(|s| self.torch(s.item)).is_some();
             let arm = if torch && self.player.wet.is_none() && self.item_animation == 0 { 5 } else { 2 };
-            self.player_sprites(&self.player, self.immune > 0, arm, &mut over);
+            self.player_sprites(&self.player, self.worn_pictures(), self.immune > 0, arm, &mut over);
             self.held_item_sprite(&mut over);
         }
         for d in &self.drops {
@@ -2349,24 +2362,56 @@ impl Game {
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
     /// `arm`: column of the front arm frame.
-    fn player_sprites(&self, p: &Player, dim: bool, arm: u32, out: &mut Vec<Sprite>) {
+    /// `PlayerDrawLayers` for the composite body: skin and clothes, with the worn
+    /// armour (`head`, `body`, `legs` picture numbers, 0 for none) in place of
+    /// the hair, the shirt and the pants and shoes.
+    fn player_sprites(&self, p: &Player, worn: [i16; 3], dim: bool, arm: u32, out: &mut Vec<Sprite>) {
         let [x, y] = p.drawn(self.tick_acc);
         let (x, y) = (x, y + p.gfx_off_y);
         let pos = [x + player::WIDTH / 2.0 - 20.0, y + player::HEIGHT - 54.0];
         let legs = p.leg_frame;
         let flip = if p.facing_left { SPRITE_FLIP } else { 0 } | SPRITE_LIT;
+        let [head, body, leg] = worn;
         let mut any = false;
-        for &(name, col, row, color) in &PLAYER_LAYERS {
-            let Some(sheet) = self.sheet(name) else { continue };
-            let row = if row == u32::MAX { legs } else { row };
-            let col = if col == 2 { arm } else { col };
+        let mut draw = |name: &str, col: u32, row: u32, color: [f32; 4], out: &mut Vec<Sprite>| {
+            let Some(sheet) = self.sheet(name) else { return };
             if (col + 1) * 40 > sheet.w || (row + 1) * 56 > sheet.h {
-                continue;
+                return;
             }
             let mut s = Sprite::sheet(pos, sheet, [col * 40, row * 56, 40, 56], flip);
             s.color = if dim { color.map(|c| c * 0.5) } else { color };
             out.push(s);
             any = true;
+        };
+        let body_sheet = format!("Armor/Armor_{body}");
+        if body > 0 {
+            // `DrawPlayer_12_SkinComposite_BackArmShirt`: the back arm and shoulder.
+            draw(&body_sheet, arm, 2, [1.0; 4], out);
+            draw(&body_sheet, 1, 1, [1.0; 4], out);
+        }
+        for &(name, col, row, color) in &PLAYER_LAYERS {
+            let hidden = match name {
+                "Player_0_11" | "Player_0_12" => leg > 0,
+                "Player_0_6" | "Player_0_7" => body > 0,
+                "Player_Hair_1" => head > 0,
+                _ => false,
+            };
+            if !hidden {
+                let row = if row == u32::MAX { legs } else { row };
+                let col = if col == 2 { arm } else { col };
+                draw(name, col, row, color, out);
+            }
+            match name {
+                "Player_0_12" if leg > 0 => draw(&format!("Armor_Legs_{leg}"), 0, legs, [1.0; 4], out),
+                "Player_0_6" if body > 0 => draw(&body_sheet, 0, 0, [1.0; 4], out),
+                "Player_Hair_1" if head > 0 => draw(&format!("Armor_Head_{head}"), 0, 0, [1.0; 4], out),
+                _ => {}
+            }
+        }
+        if body > 0 {
+            // `DrawPlayer_28_ArmOverItemComposite`: the front shoulder and arm.
+            draw(&body_sheet, 0, 1, [1.0; 4], out);
+            draw(&body_sheet, arm, 0, [1.0; 4], out);
         }
         if !any {
             out.push(Sprite::flat([x, y], [player::WIDTH, player::HEIGHT], [0.85, 0.65, 0.45, 1.0]));
@@ -2717,6 +2762,36 @@ mod tests {
         assert_eq!(out(706).inputs, [(Item::Block(169), 4)]);
         assert_eq!(out(744).inputs, [(Item::Id(706), 7), (Item::Id(182), 8)]);
         assert_eq!(out(744).station, Some(items::ANVIL));
+    }
+
+    #[test]
+    fn armour_is_crafted_worn_and_takes_off_damage() {
+        let out = |id: u16| RECIPES.iter().find(|r| r.out == Out::Item(Item::Id(id))).unwrap();
+        assert_eq!(out(727).inputs, [(Item::Block(WOOD), 20)]);
+        assert_eq!(out(727).station, Some(items::WORK_BENCH));
+        assert_eq!(out(80).inputs, [(Item::Material(Material::CopperBar), 20)]);
+        assert_eq!(out(698).inputs, [(Item::Id(706), 25)]);
+        assert_eq!(out(704).inputs, [(Item::Block(167), 3)]);
+        for id in [
+            727, 728, 729, 89, 80, 76, 687, 688, 689, 90, 81, 77, 690, 691, 692, 91, 82, 78, 693, 694, 695, 92, 83, 79,
+            696, 697, 698,
+        ] {
+            assert!(armor::slot_of(id).is_some() && RECIPES.iter().any(|r| r.out == Out::Item(Item::Id(id))), "{id}");
+        }
+
+        let mut g = game();
+        g.mobs.clear();
+        for (i, id) in [89, 80, 76].into_iter().enumerate() {
+            g.inventory.slots[i] = Some(Stack { item: Item::Id(id), count: 1 });
+            assert!(g.inventory.equip(i));
+        }
+        assert_eq!(g.defense(), 6);
+        assert_eq!(g.worn_pictures(), [1, 1, 1]);
+        let (px, py) = g.player.center();
+        g.mobs.push(Mob::new(Kind::Slime, px, py + 21.0));
+        g.contact_damage();
+        let lost = MAX_HP - g.hp;
+        assert!((3..=5).contains(&lost), "7 within 15%, less 3: {lost}");
     }
 
     #[test]

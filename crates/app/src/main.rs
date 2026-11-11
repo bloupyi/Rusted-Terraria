@@ -1,3 +1,4 @@
+mod armor;
 mod audio;
 mod backdrop;
 mod cave;
@@ -120,6 +121,13 @@ impl App {
             self.split.tick(self.buttons[0] || self.buttons[1]);
             let slot = ui::inventory_under(self.cursor.into(), SLOTS).filter(|_| open && self.buttons[1]);
             if let Some(i) = slot.filter(|_| !self.game.using_item()) {
+                // `SwapEquip`: armour goes on at the press instead of splitting.
+                if self.game.inventory.slots[i].and_then(|s| inventory::armor_slot(s.item)).is_some() {
+                    if std::mem::take(&mut self.right_fresh) && self.game.inventory.equip(i) {
+                        self.game.sfx.push(audio::Sfx::Grab);
+                    }
+                    continue;
+                }
                 for _ in 0..self.split.takes() {
                     if self.game.inventory.right_click(i) {
                         self.game.sfx.push(audio::Sfx::MenuTick);
@@ -153,7 +161,7 @@ impl App {
             if self.buttons[0] {
                 self.game.use_at(w.x, w.y, self.free);
             }
-            if self.buttons[1] && !self.over_ui() {
+            if self.buttons[1] && !self.over_ui(size.x) {
                 // A right click in the world throws what the cursor carries.
                 if self.game.inventory.mouse.is_some() {
                     if self.right_fresh {
@@ -228,6 +236,12 @@ impl App {
             let counts: Vec<u16> = inv.slots.iter().map(|s| s.map_or(0, |s| s.count)).collect();
             let label = game.texts.get("LegacyInterface.4").unwrap_or("");
             self.hud.draw_inventory(&mut p, label, &counts, slot_icon);
+            let worn = inv.armor.map(|a| a.is_some());
+            self.hud.draw_equipment(&mut p, size.x, worn, game.defense(), |p, k, c, s| {
+                if let Some(a) = inv.armor[k] {
+                    icon(p, a.item, c, s);
+                }
+            });
         } else {
             let counts: Vec<u16> = (0..HOTBAR).map(|i| inv.slots[i].map_or(0, |s| s.count)).collect();
             let selected = inv.slots[inv.selected].map(|s| s.item);
@@ -262,7 +276,21 @@ impl App {
         }
         // `ItemSlot.MouseHover`: the tooltip of what is under the cursor.
         let cursor = self.cursor.into();
-        if let Some(stack) = self.slot_under_cursor().and_then(|i| inv.slots[i]) {
+        let equip = ui::equip_under(cursor, size.x).filter(|_| self.inventory_open);
+        let hovered = match equip {
+            Some(k) => inv.armor[k],
+            None => self.slot_under_cursor().and_then(|i| inv.slots[i]),
+        };
+        if self.inventory_open && ui::defense_under(p.sheets, cursor, size.x) {
+            // `DrawDefenseCounter`'s hover text.
+            let d = game.defense();
+            let name = game.texts.get("LegacyInterface.10").unwrap_or("");
+            let cut =
+                game.texts.get("UI.DefenseDamageReduction").unwrap_or("").replace("{0}", &(d / 2 + d % 2).to_string());
+            let lines = [(format!("{d} {name}"), [255; 3]), (cut, [255; 3])];
+            self.hud.draw_item_tooltip(&mut p, cursor, size.into(), &lines, inv.mouse.is_some());
+        }
+        if let Some(stack) = hovered {
             if let (Some(name), Some((key, stats))) = (game.item_name(stack.item), game.item_data(stack.item)) {
                 let id = game.item_id(stack.item).unwrap_or(0);
                 let lines = tooltip::lines(&game.texts, id, name, key, &stats, stack.count);
@@ -284,15 +312,24 @@ impl App {
         }
     }
 
-    fn over_ui(&self) -> bool {
+    fn over_ui(&self, w: f32) -> bool {
+        let cursor = self.cursor.into();
+        let sheets = &self.game.scene.mesher.atlas.named;
         self.slot_under_cursor().is_some()
+            || (self.inventory_open && (ui::equip_under(cursor, w).is_some() || ui::defense_under(sheets, cursor, w)))
             || (self.inventory_open && slot_under(self.cursor, craft_y(), self.recipes.len()).is_some())
     }
 
     /// A left press on the interface: moves items in the open inventory, picks a
     /// hotbar slot or crafts. True if it hit one.
-    fn click_ui(&mut self) -> bool {
+    fn click_ui(&mut self, w: f32) -> bool {
         if self.inventory_open {
+            if let Some(k) = ui::equip_under(self.cursor.into(), w) {
+                if !self.game.using_item() && self.game.inventory.armor_click(k) {
+                    self.game.sfx.push(audio::Sfx::Grab);
+                }
+                return true;
+            }
             if let Some(i) = ui::inventory_under(self.cursor.into(), SLOTS) {
                 if !self.game.using_item() && self.game.inventory.left_click(i) {
                     self.game.sfx.push(audio::Sfx::Grab);
@@ -434,7 +471,8 @@ impl ApplicationHandler for App {
                 match button {
                     MouseButton::Left => {
                         self.buttons[0] = down;
-                        self.ui_click = down && self.click_ui();
+                        let w = self.window.as_ref().map_or(0.0, |w| w.inner_size().width as f32);
+                        self.ui_click = down && self.click_ui(w);
                     }
                     MouseButton::Right => {
                         self.buttons[1] = down;

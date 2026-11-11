@@ -263,6 +263,31 @@ pub fn inventory_bottom(slots: usize) -> f32 {
     inventory_slot(slots - 1)[1] + BACK * INV_SCALE
 }
 
+/// Top-left of armour slot `k` (head, body, legs) on a screen `w` wide.
+pub fn equip_slot(w: f32, k: usize) -> [f32; 2] {
+    [(w as i32 - 64 - 28) as f32, (174.0 + (k * 56) as f32 * INV_SCALE) as i32 as f32]
+}
+
+pub fn equip_under(p: [f32; 2], w: f32) -> Option<usize> {
+    (0..3).find(|&k| {
+        let [x, y] = equip_slot(w, k);
+        p[0] >= x && p[0] <= x + BACK * INV_SCALE && p[1] >= y && p[1] <= y + BACK * INV_SCALE
+    })
+}
+
+/// `DrawDefenseCounter`'s centre, beside the last armour row.
+fn defense_center(w: f32) -> [f32; 2] {
+    let [x, y] = equip_slot(w, 2);
+    [x - 10.0 - 47.0 - 47.0 - 14.0, y + BACK * 0.5]
+}
+
+/// Whether `p` is over the defense shield.
+pub fn defense_under(sheets: &HashMap<String, SheetRef>, p: [f32; 2], w: f32) -> bool {
+    let Some(s) = sheets.get("Extra_58") else { return false };
+    let ([cx, cy], hw, hh) = (defense_center(w), (s.w / 3) as f32 / 2.0, (s.h / 2) as f32 / 2.0);
+    (p[0] - cx).abs() < hw && (p[1] - cy).abs() < hh
+}
+
 /// Draws in screen pixels onto world sprites under the camera.
 pub struct Painter<'a> {
     pub sheets: &'a HashMap<String, SheetRef>,
@@ -417,6 +442,42 @@ impl Hud {
             p.image(name, at, [0.0; 2], INV_SCALE, gray(back, back));
             self.slot_item(p, at, INV_SCALE, count, |p, c, s| icon(p, i, c, s));
         }
+    }
+
+    /// The armour slots of `DrawInventory` (`ItemSlot.Draw` for context 8): the
+    /// loadout's green back, the piece or its faded outline, and the defense.
+    pub fn draw_equipment(
+        &self,
+        p: &mut Painter,
+        w: f32,
+        worn: [bool; 3],
+        defense: i32,
+        icon: impl Fn(&mut Painter, usize, [f32; 2], f32),
+    ) {
+        let a = (self.inv_alpha as u8) as f32 / 255.0;
+        let back = [50.0 / 255.0 * a, 106.0 / 255.0 * a, 64.0 / 255.0 * a, a];
+        for (k, &on) in worn.iter().enumerate() {
+            let at = equip_slot(w, k);
+            p.image("Inventory_Back13", at, [0.0; 2], INV_SCALE, back);
+            if on {
+                self.slot_item(p, at, INV_SCALE, 1, |p, c, s| icon(p, k, c, s));
+            } else if let Some(&SheetRef { w: tw, h: th, .. }) = p.sheets.get("Extra_54") {
+                let (fw, fh) = (tw / 3, th / 7);
+                let src = [0, (k as u32 * 6 / 3) * fh, fw - 2, fh - 2];
+                let size = [(fw - 2) as f32 * INV_SCALE, (fh - 2) as f32 * INV_SCALE];
+                let c = [at[0] + BACK * INV_SCALE / 2.0, at[1] + BACK * INV_SCALE / 2.0];
+                p.region("Extra_54", src, [c[0] - size[0] / 2.0, c[1] - size[1] / 2.0], size, gray(0.35, 0.35));
+            }
+        }
+        let Some(&SheetRef { w: tw, h: th, .. }) = p.sheets.get("Extra_58") else { return };
+        let (fw, fh) = (tw / 3, th / 2);
+        let size = [fw as f32 * INV_SCALE, fh as f32 * INV_SCALE];
+        let c = defense_center(w);
+        p.region("Extra_58", [0, 0, fw, fh], [c[0] - size[0] / 2.0, c[1] - size[1] / 2.0], size, [1.0; 4]);
+        let text = defense.to_string();
+        let [tw, th] = p.measure(FontId::MouseText, &text);
+        let at = [c[0] - tw * 0.5 * INV_SCALE, c[1] - th * 0.5 * INV_SCALE + 2.0 * INV_SCALE];
+        p.text(FontId::MouseText, &text, at, INV_SCALE, [1.0; 4], 2.0);
     }
 
     /// The item and its stack number in a slot whose top-left is `at`.
