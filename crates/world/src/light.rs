@@ -174,6 +174,9 @@ pub struct LightMap {
     pub rgba: Vec<[u8; 4]>,
 }
 
+/// A light added for one frame (`Lighting.AddLight`): tile and colour.
+pub type Glow = (u32, u32, [f32; 3]);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rect {
     pub x0: u32,
@@ -200,18 +203,18 @@ impl LightMap {
 
     pub fn compute(world: &World) -> Self {
         let all = Rect { x0: 0, y0: 0, x1: world.width, y1: world.height };
-        Self { width: world.width, height: world.height, rgba: window(world, all) }
+        Self { width: world.width, height: world.height, rgba: window(world, all, &[]) }
     }
 
-    /// Recomputes `r` after an edit inside it.
-    pub fn update(&mut self, world: &World, r: Rect) {
+    /// Recomputes `r` after an edit inside it, with this frame's `glows`.
+    pub fn update(&mut self, world: &World, r: Rect, glows: &[Glow]) {
         let win = Rect {
             x0: r.x0.saturating_sub(REACH),
             y0: r.y0.saturating_sub(REACH),
             x1: (r.x1 + REACH).min(world.width),
             y1: (r.y1 + REACH).min(world.height),
         };
-        let light = window(world, win);
+        let light = window(world, win, glows);
         let ww = win.width() as usize;
         for y in r.y0..r.y1 {
             let src = (y - win.y0) as usize * ww + (r.x0 - win.x0) as usize;
@@ -222,7 +225,7 @@ impl LightMap {
 }
 
 /// Light of every tile of `win`, row-major, from the sources inside it.
-fn window(world: &World, win: Rect) -> Vec<[u8; 4]> {
+fn window(world: &World, win: Rect, glows: &[Glow]) -> Vec<[u8; 4]> {
     let (w, h) = (win.width() as usize, (win.y1 - win.y0) as usize);
     // Worlds without saved flags (generated ones) get a surface line and no underworld.
     let surface = world.header.env.as_ref().map_or(world.height as f64 * 0.3, |e| e.world_surface) as u32;
@@ -274,6 +277,15 @@ fn window(world: &World, win: Rect) -> Vec<[u8; 4]> {
             }
         }
     });
+    // `ApplyPerFrameLights`: the brighter of the tile and the added light, per channel.
+    for &(x, y, rgb) in glows {
+        if (win.x0..win.x1).contains(&x) && (win.y0..win.y1).contains(&y) {
+            let l = &mut light[(y - win.y0) as usize * w + (x - win.x0) as usize];
+            for n in 0..3 {
+                l[n] = l[n].max(store(rgb[n]));
+            }
+        }
+    }
 
     for _ in 0..ROUNDS {
         vertical(&mut light, &kind, w);
@@ -382,7 +394,7 @@ mod tests {
         let mut l = LightMap::compute(&world);
         assert_eq!(l.get(25, 33), [0; 4]);
         world.set_tile(21, 33, 4, 0, 0);
-        l.update(&world, Rect::of_chunk(0, 1, &world));
+        l.update(&world, Rect::of_chunk(0, 1, &world), &[]);
         let full = LightMap::compute(&world);
         assert_eq!(l.get(21, 33), full.get(21, 33));
         assert!(l.get(25, 33)[0] > 0);
@@ -392,5 +404,21 @@ mod tests {
                 assert_eq!(l.get(x, y), full.get(x, y), "{x},{y}");
             }
         }
+    }
+
+    #[test]
+    fn glows_light_like_a_torch_and_go_away() {
+        let world = cave_world(true);
+        let mut lit = LightMap::compute(&cave_world(true));
+        let mut l = LightMap::compute(&cave_world(false));
+        let r = Rect::of_chunk(0, 1, &world);
+        l.update(&cave_world(false), r, &[(21, 33, [1.0, 0.95, 0.8])]);
+        lit.update(&world, r, &[]);
+        assert_eq!(l.get(25, 33), lit.get(25, 33));
+        // Brighter channel wins over the torch already there.
+        lit.update(&world, r, &[(21, 33, [0.0, 0.0, 1.5])]);
+        assert_eq!(&lit.get(21, 33)[..3], &[128, 121, 192]);
+        l.update(&cave_world(false), r, &[]);
+        assert_eq!(l.get(25, 33), [0; 4]);
     }
 }

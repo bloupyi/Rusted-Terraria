@@ -10,9 +10,9 @@ use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
-use crate::{backdrop, cave, item_ids, pots};
+use crate::{backdrop, cave, glow, item_ids, pots};
 use formats::wld::Env;
-use world::light::Rect;
+use world::light::{self, Glow, Rect};
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::mining::{self, HitTiles, Place, Target};
 use world::mob::{Kind, Mob};
@@ -96,6 +96,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(items::sheets());
     v.extend(pots::SHEETS.iter().map(|s| s.to_string()));
     v.extend(magic::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(glow::TORCH_ITEMS.iter().map(|id| format!("Item_{id}")));
     v
 }
 
@@ -198,6 +199,10 @@ pub struct Game {
     pub wind: world::draw::Wind,
     /// Part of a 60 Hz tick not yet run.
     pub tick_acc: f32,
+    /// Pulse of glowing items on the ground.
+    ess: glow::Ess,
+    /// Moving lights in the light map now, relit away when they change.
+    glows: Vec<Glow>,
 }
 
 impl Game {
@@ -271,6 +276,8 @@ impl Game {
             bg_tick: None,
             wind: Default::default(),
             tick_acc: 0.0,
+            ess: Default::default(),
+            glows: Vec::new(),
         };
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
@@ -286,6 +293,7 @@ impl Game {
         while self.tick_acc >= 1.0 {
             self.tick_acc -= 1.0;
             self.wind.tick(self.env.wind);
+            self.ess.tick();
             self.use_item(target);
             if let Some(input) = input {
                 let facing = self.player.facing_left;
@@ -2005,9 +2013,76 @@ impl Game {
         }
     }
 
+    /// Every `Lighting.AddLight` of this frame.
+    fn glows(&self) -> Vec<Glow> {
+        let mut v = Vec::new();
+        if let Some((style, rgb)) = self.inventory.selected().and_then(|s| self.torch(s.item)) {
+            // `ItemCheck_EmitHeldItemLight`: by the flame, a tick ahead.
+            if self.player.wet.is_none() {
+                let ([x, y], dir) = self.torch_hold(style);
+                v.extend(glow::at([x + 12.0 * dir + self.player.vx, y - 14.0 + self.player.vy], rgb));
+            }
+        }
+        v.extend(self.dust.iter().filter_map(glow::dust));
+        v.extend(self.stars.iter().filter_map(glow::star));
+        for d in &self.drops {
+            let center = [d.x + DROP_SIZE / 2.0, d.y + DROP_SIZE / 2.0];
+            let ess = self.ess.scale * 0.5;
+            v.extend(match d.item {
+                Item::Id(magic::FALLEN_STAR) => glow::at([d.x + DROP_SIZE, center[1]], [0.8, 0.7, 0.1]),
+                Item::Id(pots::HEART) => glow::at(center, [0.5, 0.1, 0.1].map(|c| c * ess)),
+                Item::Id(magic::MANA_STAR) => glow::at(center, [0.1, 0.1, 0.5].map(|c| c * ess)),
+                item => self
+                    .torch(item)
+                    .filter(|_| world::collision::wet(&self.world, [d.x, d.y], [DROP_SIZE as i32; 2]).is_none())
+                    .and_then(|(_, rgb)| glow::at(center, rgb)),
+            });
+        }
+        v
+    }
+
+    /// Style and light of a torch item.
+    fn torch(&self, item: Item) -> Option<(usize, [f32; 3])> {
+        let Item::Object(id) = item else { return None };
+        let t = &self.templates[id as usize];
+        let fy = t.cells.first().filter(|_| t.tile == 4)?.3;
+        Some(((fy / 22) as usize, light::emission(4, 0, fy)?))
+    }
+
+    /// `ItemCheck_ApplyHoldStyle` 1: where a held torch's bottom corner is,
+    /// beside the hand, and the way the player faces.
+    fn torch_hold(&self, style: usize) -> ([f32; 2], f32) {
+        let w =
+            glow::TORCH_ITEMS.get(style).and_then(|id| self.sheet(&format!("Item_{id}"))).map_or(16.0, |s| s.w as f32);
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        ([self.player.x + player::WIDTH * 0.5 + (w * 0.5 + 2.0) * dir, self.player.y + 24.0], dir)
+    }
+
+    /// A torch held up beside the player (`holdStyle` 1), gone under water.
+    fn held_torch_sprite(&self, style: usize, out: &mut Vec<Sprite>) {
+        let Some(sheet) = glow::TORCH_ITEMS.get(style).and_then(|id| self.sheet(&format!("Item_{id}"))) else {
+            return;
+        };
+        if self.player.wet.is_some() {
+            return;
+        }
+        let ([x, y], _) = self.torch_hold(style);
+        let [dx, dy] = self.player.drawn(self.tick_acc);
+        let (x, y) = ((x + dx - self.player.x).floor(), (y + dy - self.player.y + self.player.gfx_off_y).floor());
+        let left = self.player.facing_left;
+        let (w, h) = (sheet.w as f32, sheet.h as f32);
+        let grip = [if left { w } else { 0.0 }, h];
+        let flags = SPRITE_LIT | if left { SPRITE_FLIP } else { 0 };
+        out.push(Sprite::sheet([x - grip[0], y - grip[1]], sheet, [0, 0, sheet.w, sheet.h], flags));
+    }
+
     /// The item in the player's hand during a swing, turning about its grip
     /// (`useStyle` 1 in `DrawPlayer`).
     fn held_item_sprite(&self, out: &mut Vec<Sprite>) {
+        if let Some((style, _)) = self.inventory.selected().and_then(|s| self.torch(s.item)) {
+            self.held_torch_sprite(style, out);
+            return;
+        }
         if self.inventory.selected().map(|s| s.item) == Some(Item::Id(magic::AMETHYST_STAFF)) {
             self.held_staff_sprite(out);
             return;
@@ -2214,6 +2289,22 @@ impl Game {
             renderer.update_rows(self.scene.mesher.update(&self.world, &remesh));
         }
 
+        // Moving lights: relight around where they were and where they are.
+        let glows = self.glows();
+        if glows != self.glows {
+            let (cw, ch) = (self.world.chunks_x, self.world.chunks_y);
+            for &(x, y, _) in self.glows.iter().chain(&glows) {
+                let (x0, y0) = (x.saturating_sub(light::REACH) / CHUNK, y.saturating_sub(light::REACH) / CHUNK);
+                let (x1, y1) = (((x + light::REACH) / CHUNK + 1).min(cw), ((y + light::REACH) / CHUNK + 1).min(ch));
+                for cy in y0..y1 {
+                    for cx in x0..x1 {
+                        self.stale[(cy * cw + cx) as usize] |= STALE_LIGHT;
+                    }
+                }
+            }
+            self.glows = glows;
+        }
+
         let mut light_bits = STALE_LIGHT;
         if self.liquid_light_at.elapsed() >= LIQUID_LIGHT_EVERY {
             self.liquid_light_at = std::time::Instant::now();
@@ -2245,7 +2336,7 @@ impl Game {
                 }
             }
             for (b, _) in boxes {
-                self.scene.light.update(&self.world, b);
+                self.scene.light.update(&self.world, b, &self.glows);
             }
             for (r, (cx, cy)) in rects.into_iter().zip(relight) {
                 renderer.update_light(&self.scene.light, r);
@@ -2524,6 +2615,27 @@ mod tests {
         g.inventory.selected = 1;
         mine(&mut g, 12, 20);
         assert_eq!((g.world.tile(12, 19), g.world.tile(13, 19)), (NO_TILE, NO_TILE));
+    }
+
+    #[test]
+    fn held_torches_and_ground_stars_glow() {
+        let mut g = game();
+        assert!(g.glows().is_empty());
+        let torch = g.furniture(Furniture::Torch);
+        g.inventory.slots[0] = Some(Stack { item: torch, count: 1 });
+        g.inventory.selected = 0;
+        let (px, py) = (g.player.x, g.player.y);
+        g.player.facing_left = false;
+        // No sheet here: a 16 px wide torch, its flame 12 px ahead of it and 14 up.
+        let x = px + player::WIDTH * 0.5 + 10.0 + 12.0;
+        assert_eq!(g.glows(), [((x / 16.0) as u32, ((py + 10.0) / 16.0) as u32, [1.0, 0.95, 0.8])]);
+        g.player.wet = Some(0);
+        assert!(g.glows().is_empty(), "out under water");
+
+        g.toss(100.0, 100.0, Item::Id(magic::FALLEN_STAR), 1);
+        let d = &g.drops[0];
+        let want = (((d.x + DROP_SIZE) / 16.0) as u32, ((d.y + DROP_SIZE / 2.0) / 16.0) as u32, [0.8, 0.7, 0.1]);
+        assert_eq!(g.glows(), [want]);
     }
 
     #[test]
