@@ -6,6 +6,7 @@ use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
+use crate::house::{self, Chest};
 use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
@@ -40,8 +41,20 @@ const LOD_BUDGET: usize = 256;
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
 /// Obsidian from liquids, wood from trees, and the craftable furniture.
-pub const EXTRA_TILES: [u16; 8] =
-    [OBSIDIAN, WOOD, 4, items::WORK_BENCH, items::FURNACE, items::ANVIL, door::CLOSED, door::OPEN];
+pub const EXTRA_TILES: [u16; 12] = [
+    OBSIDIAN,
+    WOOD,
+    4,
+    items::WORK_BENCH,
+    items::FURNACE,
+    items::ANVIL,
+    door::CLOSED,
+    door::OPEN,
+    house::PLATFORM,
+    house::CHAIR,
+    house::TABLE,
+    house::CHEST,
+];
 pub const TREE: u16 = 5;
 pub const WOOD: u16 = 30;
 const TORCH: u16 = 4;
@@ -89,12 +102,33 @@ pub fn sprite_sheets() -> Vec<String> {
     // Leaf styles the trees of `world::draw::tree_foliage` use.
     v.extend((0..=20).flat_map(|s| [format!("Tree_Tops_{s}"), format!("Tree_Branches_{s}")]));
     v.extend(
-        ["Item_205", "Item_206", "Item_207", "Item_1128", "NPC_1", "NPC_2", "NPC_3", "NPC_4", "NPC_22", "TileCracks"]
-            .map(String::from),
+        [
+            "Item_205",
+            "Item_206",
+            "Item_207",
+            "Item_1128",
+            "NPC_1",
+            "NPC_2",
+            "NPC_3",
+            "NPC_4",
+            "NPC_21",
+            "NPC_22",
+            "NPC_49",
+            "TileCracks",
+        ]
+        .map(String::from),
     );
     v.extend(
-        ["Inventory_Back", "Inventory_Back9", "Inventory_Back13", "Inventory_Back14", "Heart", "Mana"]
-            .map(String::from),
+        [
+            "Inventory_Back",
+            "Inventory_Back5",
+            "Inventory_Back9",
+            "Inventory_Back13",
+            "Inventory_Back14",
+            "Heart",
+            "Mana",
+        ]
+        .map(String::from),
     );
     v.extend(items::sheets());
     v.extend(pots::SHEETS.iter().map(|s| s.to_string()));
@@ -103,6 +137,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(armor::SHEETS.iter().map(|s| s.to_string()));
     v.extend(ranged::SHEETS.iter().map(|s| s.to_string()));
     v.extend(coins::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(house::SHEETS.iter().map(|s| s.to_string()));
     v.extend(armor::picture_sheets());
     v
 }
@@ -143,6 +178,9 @@ pub struct Game {
     pub inventory: Inventory,
     pub drops: Vec<Drop>,
     pub templates: Vec<Template>,
+    pub chests: Vec<Chest>,
+    /// The chest the player looks into (`Player.chest`).
+    pub open_chest: Option<usize>,
     /// Damage numbers in flight.
     pub combat_text: Vec<CombatText>,
     /// The game's texts in the player's language; empty without an install.
@@ -249,6 +287,8 @@ impl Game {
             ]),
             drops: Vec::new(),
             templates: Vec::new(),
+            chests: Vec::new(),
+            open_chest: None,
             texts: Default::default(),
             combat_text: Vec::new(),
             mobs: Vec::new(),
@@ -297,7 +337,63 @@ impl Game {
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
         g.mobs.push(Mob::new(Kind::Guide, gx, gy));
+        for c in std::mem::take(&mut g.world.chests) {
+            let mut chest = Chest::new(c.x as i64, c.y as i64);
+            for (slot, &(id, n)) in chest.items.iter_mut().zip(&c.items) {
+                if n > 0 && id > 0 && id <= u16::MAX as i32 {
+                    let item = g.item_of_id(id as u16);
+                    *slot = Some(Stack { item, count: (n as u16).min(item.max_stack()) });
+                }
+            }
+            g.chests.push(chest);
+        }
         g
+    }
+
+    /// The engine's item for the game's item `id`: its tool, material, bucket,
+    /// block or furniture where it has one, else the id itself.
+    pub fn item_of_id(&mut self, id: u16) -> Item {
+        use items::Tier::*;
+        // Iron first: the wooden pickaxe and axe the game lacks share its ids.
+        let tools = [Iron, Wood, Copper, Tin, Lead, Silver, Tungsten, Gold, Platinum]
+            .into_iter()
+            .flat_map(|t| [Tool::Pickaxe(t), Tool::Axe(t), Tool::Hammer(t), Tool::Sword(t)]);
+        let materials =
+            [Material::Gel, Material::CopperBar, Material::IronBar, Material::Lens, Material::SuspiciousEye];
+        let furniture = [
+            Furniture::WorkBench,
+            Furniture::Furnace,
+            Furniture::Anvil,
+            Furniture::Torch,
+            Furniture::Chair,
+            Furniture::Table,
+            Furniture::Chest,
+        ];
+        let placing = |t: u16| {
+            let i = item_ids::TILE_ITEM.binary_search_by_key(&t, |e| e.0).ok()?;
+            Some(item_ids::TILE_ITEM[i].1)
+        };
+        if let Some(t) = tools.into_iter().find(|t| t.id() == id) {
+            return Item::Tool(t);
+        }
+        if let Some(m) = materials.into_iter().find(|m| m.sheet() == format!("Item_{id}")) {
+            return Item::Material(m);
+        }
+        if let Some(f) = furniture.into_iter().find(|f| placing(f.tile().0) == Some(id)) {
+            return self.furniture(f);
+        }
+        match id {
+            205 => return Item::Bucket(None),
+            206 => return Item::Bucket(Some(Liquid::Water)),
+            207 => return Item::Bucket(Some(Liquid::Lava)),
+            1128 => return Item::Bucket(Some(Liquid::Honey)),
+            _ => {}
+        }
+        let tile = item_ids::TILE_ITEM.iter().find(|e| e.1 == id).map(|e| e.0);
+        match tile {
+            Some(t) if t == house::PLATFORM || !self.important(t) => Item::Block(t),
+            _ => Item::Id(id),
+        }
     }
 
     pub fn update(&mut self, input: Option<Input>, dt: f32, time_scale: f32) {
@@ -311,6 +407,7 @@ impl Game {
             self.wind.tick(self.env.wind);
             self.ess.tick();
             self.use_item(target);
+            self.check_chest();
             self.torch_flame();
             if let Some(input) = input {
                 let facing = self.player.facing_left;
@@ -424,12 +521,31 @@ impl Game {
 
     /// Right click on a tile (`TileInteractionsUse`): opens a closed door,
     /// toward where the player faces or else the other way, or closes an open
-    /// one. False when there is nothing there to use.
+    /// one; opens a chest, or closes it when it is the open one. False when
+    /// there is nothing there to use.
     pub fn interact(&mut self, tx: i64, ty: i64, free: bool) -> bool {
         if !self.in_reach(tx, ty, free) {
             return false;
         }
         match self.world.tile(tx, ty) {
+            t if house::is_chest(t) => {
+                let (x, y) = house::chest_origin(&self.world, tx, ty);
+                let i = match self.chests.iter().position(|c| (c.x, c.y) == (x, y)) {
+                    Some(i) => i,
+                    None => {
+                        self.chests.push(Chest::new(x, y));
+                        self.chests.len() - 1
+                    }
+                };
+                if self.open_chest == Some(i) {
+                    self.open_chest = None;
+                    self.sfx.push(Sfx::MenuClose);
+                } else {
+                    self.open_chest = Some(i);
+                    self.sfx.push(Sfx::MenuOpen);
+                }
+                true
+            }
             door::CLOSED => {
                 let dir = if self.player.facing_left { -1 } else { 1 };
                 if !self.open_door(tx, ty, dir) {
@@ -486,6 +602,92 @@ impl Game {
         }
     }
 
+    /// `IsInInteractionRangeToMultiTileHitbox`: the chest's nearest tile to the
+    /// player within 5 tiles across and 3 up or down of the player's tiles.
+    fn chest_in_range(&self, i: usize) -> bool {
+        let c = &self.chests[i];
+        let p = &self.player;
+        let (cx, cy) = p.center();
+        let (x0, y0) = (c.x as f32 * 16.0 + 1.0, c.y as f32 * 16.0 + 1.0);
+        let (nx, ny) = ((cx.clamp(x0, x0 + 30.0) / 16.0) as i64, (cy.clamp(y0, y0 + 30.0) / 16.0) as i64);
+        let (lx, hx) = ((p.x / 16.0) as i64 - 5, ((p.x + p.w) / 16.0).ceil() as i64 - 1 + 5);
+        let (ly, hy) = ((p.y / 16.0) as i64 - 3, ((p.y + p.h) / 16.0).ceil() as i64 - 1 + 3);
+        (lx..=hx).contains(&nx) && (ly..=hy).contains(&ny)
+    }
+
+    /// Shuts the open chest when the player walks away or it is gone.
+    fn check_chest(&mut self) {
+        let Some(i) = self.open_chest else { return };
+        let c = &self.chests[i];
+        if !house::is_chest(self.world.tile(c.x, c.y)) || !self.chest_in_range(i) {
+            self.open_chest = None;
+            self.sfx.push(Sfx::MenuClose);
+        }
+    }
+
+    /// `ItemSlot.LeftClick` on slot `k` of the open chest.
+    pub fn chest_left_click(&mut self, k: usize) -> bool {
+        let Some(i) = self.open_chest else { return false };
+        crate::inventory::swap_click(&mut self.chests[i].items[k], &mut self.inventory.mouse)
+    }
+
+    /// `ItemSlot.RightClick` on slot `k` of the open chest.
+    pub fn chest_right_click(&mut self, k: usize) -> bool {
+        let Some(i) = self.open_chest else { return false };
+        crate::inventory::take_one(&mut self.chests[i].items[k], &mut self.inventory.mouse)
+    }
+
+    /// `ChestUI.LootAll`: everything that fits into the inventory.
+    pub fn chest_loot_all(&mut self) {
+        let Some(c) = self.open_chest else { return };
+        for k in 0..house::SLOTS {
+            if let Some(s) = self.chests[c].items[k] {
+                let left = self.inventory.add(s.item, s.count);
+                self.chests[c].items[k] = (left > 0).then_some(Stack { item: s.item, count: left });
+            }
+        }
+        self.sfx.push(Sfx::Grab);
+    }
+
+    /// `ChestUI.DepositAll`: the inventory past the hotbar, last slots first,
+    /// onto the chest's stacks of the same item, then into its first empty slot.
+    pub fn chest_deposit_all(&mut self) {
+        let Some(c) = self.open_chest else { return };
+        let chest = &mut self.chests[c].items;
+        for i in (crate::inventory::HOTBAR..crate::inventory::SLOTS).rev() {
+            let Some(mut s) = self.inventory.slots[i] else { continue };
+            let max = s.item.max_stack();
+            if max > 1 {
+                for t in chest.iter_mut().flatten().filter(|t| t.item == s.item && t.count < max) {
+                    let n = s.count.min(max - t.count);
+                    t.count += n;
+                    s.count -= n;
+                    if s.count == 0 {
+                        break;
+                    }
+                }
+            }
+            if s.count > 0 {
+                if let Some(e) = chest.iter_mut().find(|e| e.is_none()) {
+                    *e = Some(s);
+                    s.count = 0;
+                }
+            }
+            self.inventory.slots[i] = (s.count > 0).then_some(s);
+        }
+        self.sfx.push(Sfx::Grab);
+    }
+
+    /// `CanKillTile`: a chest with something in it, and the blocks under a chest, stay.
+    fn can_kill(&self, x: i64, y: i64) -> bool {
+        let t = self.world.tile(x, y);
+        if house::is_chest(t) {
+            let o = house::chest_origin(&self.world, x, y);
+            return self.chests.iter().find(|c| (c.x, c.y) == o).is_none_or(|c| c.is_empty());
+        }
+        !house::is_chest(self.world.tile(x, y - 1))
+    }
+
     /// A monster on open ground to one side, off screen: slimes by day, zombies too at night.
     fn try_spawn(&mut self) {
         let r = self.random();
@@ -499,6 +701,32 @@ impl Game {
         let Some(y) = (pty - 25..pty + 25).find(|&y| w.solid(x, y) && open(y)) else { return };
         let night = self.time >= DAYTIME;
         let roll = (r >> 8) % 10;
+        let (a, b, c) = ((r >> 16) % 10, (r >> 24) % 5, (r >> 32) % 4);
+        let feet = (x as f32 * 16.0 + 8.0, y as f32 * 16.0);
+        if pty as f64 > self.env.rock_layer {
+            // The caverns of `SpawnNPC` before hard mode, away from snow and jungle.
+            let kind = if a == 0 || c == 0 {
+                Kind::BlackSlime
+            } else if b < 3 {
+                Kind::Skeleton
+            } else {
+                Kind::CaveBat
+            };
+            self.mobs.push(Mob::new(kind, feet.0, feet.1));
+            return;
+        }
+        if pty as f64 > self.env.world_surface {
+            // `GetBasicSlimeToSpawn` underground.
+            let kind = if b == 0 {
+                Kind::YellowSlime
+            } else if c < 2 {
+                Kind::Slime
+            } else {
+                Kind::RedSlime
+            };
+            self.mobs.push(Mob::new(kind, feet.0, feet.1));
+            return;
+        }
         if night && roll < 3 {
             // Demon eyes come in the air, above the ground found.
             let air = y - 10;
@@ -507,7 +735,17 @@ impl Game {
             }
             return;
         }
-        let kind = if night && roll < 7 { Kind::Zombie } else { Kind::Slime };
+        // `GetBasicSlimeToSpawn` on the surface, by distance from the spawn point.
+        let dist = (x - self.spawn_x as i64).abs();
+        let kind = if night && roll < 7 {
+            Kind::Zombie
+        } else if (r >> 40).is_multiple_of(3) || dist < 200 {
+            Kind::GreenSlime
+        } else if a == 0 && dist > 400 {
+            Kind::PurpleSlime
+        } else {
+            Kind::Slime
+        };
         self.mobs.push(Mob::new(kind, x as f32 * 16.0 + 8.0, y as f32 * 16.0));
     }
 
@@ -702,7 +940,7 @@ impl Game {
         let (x, y) = m.body.center();
         let r = self.random();
         let drop = match m.kind {
-            Kind::Slime => Some((Item::Material(Material::Gel), 1 + (r % 2) as u16)),
+            k if k.is_slime() => Some((Item::Material(Material::Gel), 1 + (r % 2) as u16)),
             Kind::DemonEye if r.is_multiple_of(2) => Some((Item::Material(Material::Lens), 1)),
             Kind::EyeBoss => Some((Item::Block(items::DEMONITE_ORE), 30 + (r % 30) as u16)),
             _ => None,
@@ -1607,8 +1845,21 @@ impl Game {
             let total = self.hits.add(x, y, Target::Wall, (s.hammer as f32 * 1.5) as i32);
             if total >= 100 {
                 self.hits.clear(x, y, Target::Wall);
+                let wall = self.world.wall(x, y);
                 self.world.set_wall(x as u32, y as u32, 0);
                 self.send_tile(x as u32, y as u32);
+                if let Some(id) = house::item_of_wall(wall) {
+                    let (wx, wy) = (x as f32 * 16.0 + 8.0, y as f32 * 16.0 + 8.0);
+                    self.drops.push(Drop {
+                        x: wx,
+                        y: wy,
+                        vx: 0.0,
+                        vy: -120.0,
+                        item: Item::Id(id),
+                        count: 1,
+                        grab_delay: 0.0,
+                    });
+                }
             }
             self.sfx.push(Sfx::Dig);
             self.prune_hits();
@@ -1627,6 +1878,10 @@ impl Game {
     /// Adds damage to a tile: 100 breaks it, less leaves grass and moss bare.
     fn damage_tile(&mut self, x: i64, y: i64, damage: i32) {
         let t = self.world.tile(x, y);
+        if !self.can_kill(x, y) {
+            self.sfx.push(if items::HARD_SOUND.contains(&t) { Sfx::Tink } else { Sfx::Dig });
+            return;
+        }
         if self.hits.add(x, y, Target::Tile, damage) >= 100 {
             self.hits.clear(x, y, Target::Tile);
             self.break_tile(x, y, true);
@@ -1681,7 +1936,20 @@ impl Game {
             let world = &self.world;
             let cells = (left..left + w).flat_map(|x| (top..top + 3).map(move |y| (x, y)));
             (cells.filter(|&(x, y)| world.tile(x, y) == t).collect(), Some((Item::Id(coins::DOOR), 1)))
+        } else if t == house::PLATFORM {
+            (vec![(tx, ty)], Some((Item::Block(t), 1)))
         } else if self.important(t) {
+            if house::is_chest(t) {
+                let o = house::chest_origin(&self.world, tx, ty);
+                if let Some(i) = self.chests.iter().position(|c| (c.x, c.y) == o) {
+                    self.chests.remove(i);
+                    self.open_chest = match self.open_chest {
+                        Some(k) if k == i => None,
+                        Some(k) if k > i => Some(k - 1),
+                        k => k,
+                    };
+                }
+            }
             let cells = self.object_cells(tx, ty);
             let item = (!PLANTS.contains(&t)).then(|| (Item::Object(self.template(t, &cells)), 1));
             (cells, item)
@@ -1695,6 +1963,9 @@ impl Game {
             self.world.set_tile(x as u32, y as u32, NO_TILE, -1, -1);
             self.send_tile(x as u32, y as u32);
             self.sim.wake(&self.world, x as u32, y as u32);
+        }
+        if t == house::PLATFORM {
+            self.frame_platforms(tx, ty);
         }
         if let Some((item, count)) = item.filter(|_| drop) {
             self.drops.push(Drop {
@@ -1722,6 +1993,18 @@ impl Game {
                 if rests && !(n == TORCH && self.torch_held(nx, ny)) {
                     self.break_tile(nx, ny, drop);
                 }
+            }
+        }
+    }
+
+    /// Reframes the platforms at and beside `(x, y)`.
+    fn frame_platforms(&mut self, x: i64, y: i64) {
+        for x in x - 1..=x + 1 {
+            if self.world.tile(x, y) == house::PLATFORM {
+                let fx = house::platform_frame(&self.world, x, y);
+                let fy = self.world.frame(x, y).1.max(0);
+                self.world.set_tile(x as u32, y as u32, house::PLATFORM, fx, fy);
+                self.send_tile(x as u32, y as u32);
             }
         }
     }
@@ -1882,6 +2165,18 @@ impl Game {
                 door::place(&mut self.world, tx, top, variants);
                 self.send_cells(tx, top, 1, 3);
             }
+            Item::Id(id) if house::wall_of(id).is_some() => {
+                let wall = house::wall_of(id).unwrap();
+                let w = &self.world;
+                let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)]
+                    .iter()
+                    .any(|&(dx, dy)| w.tile(tx + dx, ty + dy) != NO_TILE || w.wall(tx + dx, ty + dy) != 0);
+                if w.wall(tx, ty) != 0 || !anchored {
+                    return;
+                }
+                self.world.set_wall(x, y, wall);
+                self.send_tile(x, y);
+            }
             Item::Tool(_) | Item::Material(_) | Item::Id(_) => return,
             Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
@@ -1893,6 +2188,9 @@ impl Game {
                 self.world.set_liquid(x, y, 0, 0);
                 self.world.set_tile(x, y, t, -1, -1);
                 self.send_tile(x, y);
+                if t == house::PLATFORM {
+                    self.frame_platforms(tx, ty);
+                }
             }
             Item::Object(id) => {
                 let tpl = &self.templates[id as usize];
@@ -1917,7 +2215,15 @@ impl Game {
                     return;
                 }
                 let tile = tpl.tile;
+                // Chairs face the way the player does (the alternate placement, one frame over).
+                let turn = if tile == house::CHAIR && !self.player.facing_left { 18 } else { 0 };
+                if house::is_chest(tile) {
+                    let (x0, y0) = (cells.iter().map(|c| c.0).min().unwrap(), top);
+                    self.chests.retain(|c| (c.x, c.y) != (x0, y0));
+                    self.chests.push(Chest::new(x0, y0));
+                }
                 for (cx, cy, fx, fy) in cells {
+                    let fx = if tile == house::CHAIR { turn } else { fx };
                     self.world.set_liquid(cx as u32, cy as u32, 0, 0);
                     self.world.set_tile(cx as u32, cy as u32, tile, fx, fy);
                     self.send_tile(cx as u32, cy as u32);
@@ -1953,7 +2259,8 @@ impl Game {
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
         }
-        if matches!(stack.item, Item::Block(_) | Item::Object(_) | Item::Id(coins::DOOR)) {
+        let wall = matches!(stack.item, Item::Id(id) if house::wall_of(id).is_some());
+        if wall || matches!(stack.item, Item::Block(_) | Item::Object(_) | Item::Id(coins::DOOR)) {
             self.sfx.push(Sfx::Dig);
             if !free {
                 self.inventory.consume();
@@ -2019,10 +2326,16 @@ impl Game {
     }
 
     /// `item`'s `ItemID` name and the defaults its tooltip shows.
+    /// Items the engine does not draw (from a world's chests) have only their name and stack.
     pub fn item_data(&self, item: Item) -> Option<(&'static str, item_ids::Stats)> {
         let id = self.item_id(item)?;
-        let i = item_ids::ITEMS.binary_search_by_key(&id, |e| e.0).ok()?;
-        Some((item_ids::ITEMS[i].1, item_ids::ITEMS[i].2))
+        match item_ids::ITEMS.binary_search_by_key(&id, |e| e.0) {
+            Ok(i) => Some((item_ids::ITEMS[i].1, item_ids::ITEMS[i].2)),
+            Err(_) => {
+                let &(name, max_stack) = item_ids::ALL.get(id as usize).filter(|e| !e.0.is_empty())?;
+                Some((name, item_ids::Stats { max_stack, ..Default::default() }))
+            }
+        }
     }
 
     /// `item`'s name in the game's language (`Lang.GetItemName`).
@@ -2034,6 +2347,7 @@ impl Game {
     pub fn item_size(&self, item: Item) -> f32 {
         let sheet = |name: &str| self.sheet(name).map_or(16.0, |s| s.w.max(s.h) as f32);
         match item {
+            Item::Block(house::PLATFORM) => sheet(&format!("Item_{}", house::WOOD_PLATFORM)),
             Item::Block(_) => 16.0,
             Item::Tool(t) => sheet(&t.sheet()),
             Item::Material(m) => sheet(m.sheet()),
@@ -2061,6 +2375,10 @@ impl Game {
             vec![s]
         };
         match item {
+            Item::Block(house::PLATFORM) => match self.sheet(&format!("Item_{}", house::WOOD_PLATFORM)) {
+                Some(s) => fit(s, [0, 0, s.w, s.h]),
+                None => flat([160, 120, 80, 255]),
+            },
             Item::Block(t) => match atlas.tiles.get(t as usize).copied().flatten() {
                 Some(s) if !s.fallback => fit(&s, [18, 18, 16, 16]),
                 _ => flat(atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4])),
@@ -2290,10 +2608,24 @@ impl Game {
             let hurt = m.stun > 0.0;
             // Monster sheets face left.
             let flags = SPRITE_LIT | if m.facing_left { 0 } else { SPRITE_FLIP };
+            // The slimes' grey sheet takes their colour.
+            let tint = m.kind.color().map_or([1.0; 4], |c| {
+                let k = |v: u8| 0.3 + 0.7 * v as f32 / 255.0;
+                [k(c[0]), k(c[1]), k(c[2]), 0.85]
+            });
+            let frames = |name: &str, n: u32| self.sheet(name).map_or((32, 32), |s| (s.w, s.h / n));
             let (sheet, w, h, frame, color) = match m.kind {
-                Kind::Slime => ("NPC_1", 32, 26, m.frame, [0.45, 0.95, 0.45, 1.0]),
+                k if k.is_slime() => ("NPC_1", 32, 26, m.frame, tint),
                 Kind::Zombie => ("NPC_3", 38, 48, m.frame, [1.0; 4]),
                 Kind::DemonEye => ("NPC_2", 38, 24, m.frame, [1.0; 4]),
+                Kind::Skeleton => {
+                    let (w, h) = frames("NPC_21", 15);
+                    ("NPC_21", w, h, m.frame, [1.0; 4])
+                }
+                Kind::CaveBat => {
+                    let (w, h) = frames("NPC_49", 5);
+                    ("NPC_49", w, h, m.frame, [1.0; 4])
+                }
                 Kind::Guide => {
                     let frame = if !b.on_ground {
                         1
@@ -2308,15 +2640,18 @@ impl Game {
                     let frame = (m.timer * 8.0) as u32 % 3 + if m.enraged() { 3 } else { 0 };
                     ("NPC_4", 110, 166, frame, [1.0; 4])
                 }
+                _ => unreachable!(),
             };
             let color = if hurt { [1.0, 0.35, 0.35, 1.0] } else { color };
             match self.sheet(sheet) {
                 Some(s) => {
                     // Fliers are drawn around their centre, walkers on their feet.
-                    let top = if m.kind.flies() { b.y + b.h / 2.0 - h as f32 / 2.0 } else { bottom - h as f32 + 2.0 };
-                    let mut sp = Sprite::sheet([cx - w as f32 / 2.0, top], s, [0, frame * h, w, h], flags);
-                    sp.color = color;
-                    if m.kind == Kind::DemonEye {
+                    let k = m.kind.scale();
+                    let (dw, dh) = (w as f32 * k, h as f32 * k);
+                    let top = if m.kind.flies() { b.y + b.h / 2.0 - dh / 2.0 } else { bottom - dh + 2.0 };
+                    let mut sp = Sprite::sheet([cx - dw / 2.0, top], s, [0, frame * h, w, h], flags);
+                    (sp.size, sp.color) = ([dw, dh], color);
+                    if matches!(m.kind, Kind::DemonEye | Kind::CaveBat) {
                         (sp.rot, sp.pivot) = (m.rotation, [w as f32 / 2.0, h as f32 / 2.0]);
                     }
                     out.push(sp);
@@ -2819,6 +3154,9 @@ mod tests {
         important[POT as usize] = true;
         important[door::CLOSED as usize] = true;
         important[door::OPEN as usize] = true;
+        for t in [house::PLATFORM, house::CHAIR, house::TABLE, house::CHEST] {
+            important[t as usize] = true;
+        }
         let world = World::parse(&formats::synth::write_world("g", 64, 64, &important, |x, y| {
             let (tile, fx) = match (x, y) {
                 (_, 20..) => (1, 0),
@@ -2831,7 +3169,7 @@ mod tests {
             Tile { tile, frame_x: fx, frame_y: fy, ..Tile::default() }
         }))
         .unwrap();
-        let scene = Scene::build(&world, None, &EXTRA_TILES, &[], Vec::new());
+        let scene = Scene::build(&world, None, &EXTRA_TILES, &house::WALLS, &[], Vec::new());
         let mut g = Game::new(world, scene);
         g.player = Player::spawn(&g.world, 15);
         g
@@ -3421,5 +3759,116 @@ mod tests {
         g.item_animation = 2;
         let [x, _, w, _] = g.melee_hitbox(s);
         assert!(x + w < px + 20, "{x}+{w} from {px}");
+    }
+
+    #[test]
+    fn platforms_frame_with_their_neighbours() {
+        let mut g = game();
+        g.inventory.slots[0] = Some(Stack { item: Item::Block(house::PLATFORM), count: 9 });
+        g.inventory.selected = 0;
+        g.world.set_tile(16, 15, 1, -1, -1);
+        for x in 17..20 {
+            g.place(x, 15, false);
+        }
+        let frames: Vec<i16> = (17..20).map(|x| g.world.frame(x, 15).0).collect();
+        assert_eq!(frames, [54, 0, 18]);
+        g.break_tile(19, 15, true);
+        assert_eq!(g.world.frame(18, 15).0, 18, "now the end");
+        assert!(g.drops.iter().any(|d| d.item == Item::Block(house::PLATFORM)));
+    }
+
+    #[test]
+    fn walls_are_placed_and_give_back_their_item() {
+        let mut g = game();
+        g.inventory.slots[0] = Some(Stack { item: Item::Id(house::WOOD_WALL), count: 2 });
+        g.inventory.selected = 0;
+        g.place(17, 19, false);
+        assert_eq!(g.world.wall(17, 19), 4);
+        assert_eq!(g.inventory.slots[0].unwrap().count, 1);
+        g.place(17, 5, false);
+        assert_eq!(g.world.wall(17, 5), 0, "nothing to hold it");
+        g.inventory.slots[0] = Some(Stack { item: Item::Tool(Tool::Hammer(Tier::Iron)), count: 1 });
+        while g.world.wall(17, 19) != 0 {
+            g.item_time = 0;
+            g.item_animation = 0;
+            swing(&mut g, 17, 19);
+        }
+        assert!(g.drops.iter().any(|d| d.item == Item::Id(house::WOOD_WALL)));
+    }
+
+    #[test]
+    fn chairs_face_the_player() {
+        let mut g = game();
+        let chair = g.furniture(Furniture::Chair);
+        g.inventory.slots[0] = Some(Stack { item: chair, count: 2 });
+        g.inventory.selected = 0;
+        g.player.facing_left = false;
+        g.place(17, 19, false);
+        assert_eq!((g.world.tile(17, 18), g.world.frame(17, 19)), (house::CHAIR, (18, 18)));
+        g.player.facing_left = true;
+        g.place(18, 19, false);
+        assert_eq!(g.world.frame(18, 18), (0, 0));
+    }
+
+    #[test]
+    fn chests_store_items_and_keep_what_they_hold() {
+        let mut g = game();
+        let chest = g.furniture(Furniture::Chest);
+        g.inventory.slots[0] = Some(Stack { item: chest, count: 1 });
+        g.inventory.slots[12] = Some(Stack { item: Item::Material(Material::Gel), count: 30 });
+        g.inventory.selected = 0;
+        g.place(17, 19, false);
+        assert_eq!(g.chests, vec![Chest::new(17, 18)]);
+        assert!(g.interact(18, 19, false));
+        assert_eq!(g.open_chest, Some(0));
+
+        g.chest_deposit_all();
+        assert_eq!(g.inventory.slots[12], None);
+        assert_eq!(g.chests[0].items[0], Some(Stack { item: Item::Material(Material::Gel), count: 30 }));
+        assert!(g.chest_right_click(0));
+        assert_eq!(g.inventory.mouse, Some(Stack { item: Item::Material(Material::Gel), count: 1 }));
+        assert!(g.chest_left_click(0), "the mouse stack goes back");
+        assert_eq!(g.chests[0].items[0].unwrap().count, 30);
+
+        // Neither a full chest nor the block under it can be broken.
+        g.damage_tile(17, 18, 100);
+        g.damage_tile(17, 20, 100);
+        assert_eq!((g.world.tile(17, 18), g.world.tile(17, 20)), (house::CHEST, 1));
+
+        g.chest_loot_all();
+        assert!(g.chests[0].is_empty());
+        assert_eq!(g.inventory.count(Item::Material(Material::Gel)), 30);
+        g.damage_tile(17, 18, 100);
+        assert_eq!(g.world.tile(17, 18), NO_TILE);
+        assert!(g.chests.is_empty() && g.open_chest.is_none());
+    }
+
+    #[test]
+    fn the_open_chest_shuts_when_the_player_walks_off() {
+        let mut g = game();
+        g.world.set_tile(17, 18, house::CHEST, 0, 0);
+        g.world.set_tile(18, 18, house::CHEST, 18, 0);
+        g.world.set_tile(17, 19, house::CHEST, 0, 18);
+        g.world.set_tile(18, 19, house::CHEST, 18, 18);
+        assert!(g.interact(17, 19, false));
+        g.check_chest();
+        assert_eq!(g.open_chest, Some(0), "near enough");
+        g.player.x += 16.0 * 12.0;
+        g.check_chest();
+        assert_eq!(g.open_chest, None);
+    }
+
+    #[test]
+    fn world_chest_items_become_engine_items() {
+        let mut g = game();
+        assert_eq!(g.item_of_id(1), Item::Tool(Tool::Pickaxe(Tier::Iron)));
+        assert_eq!(g.item_of_id(3509), Item::Tool(Tool::Pickaxe(Tier::Copper)));
+        assert_eq!(g.item_of_id(22), Item::Material(Material::IronBar));
+        assert_eq!(g.item_of_id(206), Item::Bucket(Some(Liquid::Water)));
+        assert_eq!(g.item_of_id(3), Item::Block(1));
+        assert_eq!(g.item_of_id(house::WOOD_PLATFORM), Item::Block(house::PLATFORM));
+        assert!(matches!(g.item_of_id(8), Item::Object(t) if g.templates[t as usize].tile == TORCH));
+        assert_eq!(g.item_of_id(29), Item::Id(29), "life crystal");
+        assert_eq!(Item::Id(280).max_stack(), 1, "a spear stays alone");
     }
 }

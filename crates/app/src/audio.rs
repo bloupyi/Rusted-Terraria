@@ -40,6 +40,8 @@ pub enum Sfx {
     Coin,
     DoorOpen,
     DoorClose,
+    MenuOpen,
+    MenuClose,
 }
 
 impl Sfx {
@@ -52,6 +54,8 @@ impl Sfx {
             Sfx::Coin => ("Coin", 5),
             Sfx::DoorOpen => ("Door_Opened", 1),
             Sfx::DoorClose => ("Door_Closed", 1),
+            Sfx::MenuOpen => ("Menu_Open", 1),
+            Sfx::MenuClose => ("Menu_Close", 1),
             Sfx::Splash => ("Splash", 2),
             Sfx::Swing => ("Item_1", 1),
             Sfx::PlayerHit => ("Player_Hit", 3),

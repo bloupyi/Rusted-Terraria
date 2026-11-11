@@ -83,6 +83,8 @@ pub struct World {
     pub chunks_y: u32,
     /// Row-major: `cy * chunks_x + cx`.
     pub chunks: Vec<Box<Chunk>>,
+    /// Chests saved in the world file, with what they hold.
+    pub chests: Vec<wld::Chest>,
     /// Per chunk, `DIRTY_*` bits set by edits since the last `take_dirty`.
     dirty: Vec<u8>,
     dirty_list: Vec<u32>,
@@ -115,7 +117,8 @@ impl World {
             }
         })?;
         let dirty = vec![0; chunks.len()];
-        Ok(Self { header, width, height, chunks_x, chunks_y, chunks, dirty, dirty_list: Vec::new() })
+        let chests = wld::read_chests(data, &header).unwrap_or_default();
+        Ok(Self { header, width, height, chunks_x, chunks_y, chunks, chests, dirty, dirty_list: Vec::new() })
     }
 
     #[inline]

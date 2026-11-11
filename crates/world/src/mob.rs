@@ -14,18 +14,38 @@ pub enum Kind {
     DemonEye,
     Guide,
     EyeBoss,
+    GreenSlime,
+    PurpleSlime,
+    RedSlime,
+    YellowSlime,
+    BlackSlime,
+    Skeleton,
+    CaveBat,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 5] = [Kind::Slime, Kind::Zombie, Kind::DemonEye, Kind::Guide, Kind::EyeBoss];
+    pub const ALL: [Kind; 12] = [
+        Kind::Slime,
+        Kind::Zombie,
+        Kind::DemonEye,
+        Kind::Guide,
+        Kind::EyeBoss,
+        Kind::GreenSlime,
+        Kind::PurpleSlime,
+        Kind::RedSlime,
+        Kind::YellowSlime,
+        Kind::BlackSlime,
+        Kind::Skeleton,
+        Kind::CaveBat,
+    ];
 
     pub fn from_u8(v: u8) -> Option<Kind> {
         Kind::ALL.get(v as usize).copied()
     }
 
-    /// The game's `NPC.SetDefaults` for the blue slime, zombie, demon eye,
-    /// guide and eye of Cthulhu: size, life, contact damage, defense and
-    /// knockback taken.
+    /// The game's `NPC.SetDefaults` (and `SetDefaultsFromNetId` for the
+    /// slime colours, scaled from the blue slime's 24x18, 16 or 32 high grown
+    /// by one): size, life, contact damage, defense and knockback taken.
     fn stats(self) -> (f32, f32, i32, i32, i32, f32) {
         match self {
             Kind::Slime => (24.0, 18.0, 25, 7, 2, 1.0),
@@ -33,7 +53,48 @@ impl Kind {
             Kind::DemonEye => (30.0, 32.0, 60, 18, 2, 0.8),
             Kind::Guide => (18.0, 40.0, 250, 10, 15, 0.5),
             Kind::EyeBoss => (100.0, 110.0, 2800, 15, 12, 0.0),
+            Kind::GreenSlime => (21.0, 17.0, 14, 6, 0, 1.2),
+            Kind::PurpleSlime => (28.0, 21.0, 40, 12, 6, 0.9),
+            Kind::RedSlime => (24.0, 18.0, 35, 12, 4, 1.0),
+            Kind::YellowSlime => (28.0, 21.0, 45, 15, 7, 1.0),
+            Kind::BlackSlime => (25.0, 18.0, 45, 15, 4, 1.0),
+            Kind::Skeleton => (18.0, 40.0, 60, 20, 8, 0.5),
+            Kind::CaveBat => (22.0, 18.0, 16, 13, 2, 0.8),
         }
+    }
+
+    /// `NPC.scale`: how much bigger than its sheet it is drawn.
+    pub fn scale(self) -> f32 {
+        match self {
+            Kind::GreenSlime => 0.9,
+            Kind::PurpleSlime | Kind::YellowSlime => 1.2,
+            Kind::RedSlime => 1.025,
+            Kind::BlackSlime => 1.05,
+            _ => 1.0,
+        }
+    }
+
+    /// `NPC.color` of the slimes, which tints their grey sheet.
+    pub fn color(self) -> Option<[u8; 4]> {
+        match self {
+            Kind::Slime => Some([0, 80, 255, 100]),
+            Kind::GreenSlime => Some([0, 220, 40, 100]),
+            Kind::PurpleSlime => Some([200, 0, 255, 150]),
+            Kind::RedSlime => Some([255, 30, 0, 100]),
+            Kind::YellowSlime => Some([255, 255, 0, 100]),
+            Kind::BlackSlime => Some([0, 0, 0, 50]),
+            _ => None,
+        }
+    }
+
+    /// Runs `AI_001_Slimes`.
+    pub fn is_slime(self) -> bool {
+        self.color().is_some()
+    }
+
+    /// Runs `AI_003_Fighters`.
+    pub fn is_fighter(self) -> bool {
+        matches!(self, Kind::Zombie | Kind::Skeleton)
     }
 
     pub fn size(self) -> (f32, f32) {
@@ -70,6 +131,12 @@ impl Kind {
             Kind::DemonEye => 75.0,
             Kind::Guide => 0.0,
             Kind::EyeBoss => 30000.0,
+            Kind::GreenSlime => 3.0,
+            Kind::PurpleSlime | Kind::YellowSlime => 10.0,
+            Kind::RedSlime => 8.0,
+            Kind::BlackSlime => 20.0,
+            Kind::Skeleton => 100.0,
+            Kind::CaveBat => 90.0,
         }
     }
 
@@ -78,7 +145,7 @@ impl Kind {
     }
 
     pub fn flies(self) -> bool {
-        matches!(self, Kind::DemonEye | Kind::EyeBoss)
+        matches!(self, Kind::DemonEye | Kind::EyeBoss | Kind::CaveBat)
     }
 }
 
@@ -219,12 +286,13 @@ impl Mob {
             if self.gfx_off_y > 0.0 { (self.gfx_off_y - k).max(0.0) } else { (self.gfx_off_y + k).min(0.0) };
         self.gfx_off_y = self.gfx_off_y.clamp(-16.0, 16.0);
         match self.kind {
-            Kind::Slime => self.slime(world, target, sky),
-            Kind::Zombie => self.fighter(world, target, sky),
+            k if k.is_slime() => self.slime(world, target, sky),
+            k if k.is_fighter() => self.fighter(world, target, sky),
+            Kind::CaveBat => self.bat(world, target),
             _ => self.floating_eye(target, sky),
         }
         let b = &mut self.body;
-        if self.kind != Kind::DemonEye {
+        if !self.kind.flies() {
             b.vy = (b.vy + gravity).min(max_fall);
         }
         if b.vx.abs() < 0.005 {
@@ -256,7 +324,7 @@ impl Mob {
         let v = self.at_box(world).walk_down_slope([self.body.vx, self.body.vy], gravity);
         let b = self.at_box(world);
         self.wet = collision::wet(world, b.pos, b.size);
-        let fall = self.kind == Kind::DemonEye || (self.kind == Kind::Zombie && self.direction_y == 1);
+        let fall = self.kind == Kind::DemonEye || (self.kind.is_fighter() && self.direction_y == 1);
         self.old_vel = v;
         let hit = self.at_box(world).tiles(v, fall, fall);
         let mut vel = hit.vel;
@@ -413,6 +481,27 @@ impl Mob {
     /// `AI_002_FloatingEye`: bounces off blocks and swoops at the target;
     /// flies away by day above ground.
     fn floating_eye(&mut self, target: [f32; 4], sky: Sky) {
+        self.bounce();
+        let b = &mut self.body;
+        if sky.day && b.y <= sky.surface * 16.0 {
+            self.direction_y = -1;
+            self.direction = if b.vx > 0.0 { 1 } else { -1 };
+        } else {
+            self.face(target);
+        }
+        self.steer();
+        let b = &mut self.body;
+        if self.wet.is_some() {
+            if b.vy > 0.0 {
+                b.vy *= 0.95;
+            }
+            b.vy = (b.vy - 0.5).max(-4.0);
+            self.face(target);
+        }
+    }
+
+    /// The fliers' turn off a block they hit (`collideX`, `collideY`).
+    fn bounce(&mut self) {
         let b = &mut self.body;
         if self.collide_x {
             b.vx = self.old_vel[0] * -0.5;
@@ -432,12 +521,10 @@ impl Mob {
                 b.vy = -1.0;
             }
         }
-        if sky.day && b.y <= sky.surface * 16.0 {
-            self.direction_y = -1;
-            self.direction = if b.vx > 0.0 { 1 } else { -1 };
-        } else {
-            self.face(target);
-        }
+    }
+
+    /// The fliers' pull toward `direction` and `direction_y`.
+    fn steer(&mut self) {
         let (sx, sy) = (4.0, 1.5);
         let b = &mut self.body;
         if self.direction == -1 && b.vx > -sx {
@@ -474,12 +561,60 @@ impl Mob {
             }
             b.vy = b.vy.min(sy);
         }
+    }
+
+    /// `AI_014` for the cave bat: steers at the target twice a tick, rises
+    /// out of liquid, and drifts on its own after 200 ticks without sight of it.
+    fn bat(&mut self, world: &World, target: [f32; 4]) {
+        self.bounce();
+        self.face(target);
+        self.steer();
         if self.wet.is_some() {
+            let b = &mut self.body;
             if b.vy > 0.0 {
                 b.vy *= 0.95;
             }
             b.vy = (b.vy - 0.5).max(-4.0);
             self.face(target);
+        }
+        self.steer();
+        self.ai[1] += 1.0;
+        if self.ai[1] > 200.0 {
+            let b = &self.body;
+            let size = |w: f32, h: f32| [w as i32, h as i32];
+            let seen = collision::can_hit(
+                world,
+                [b.x, b.y],
+                size(b.w, b.h),
+                [target[0], target[1]],
+                size(target[2], target[3]),
+            );
+            if seen {
+                self.ai[1] = 0.0;
+            }
+            let (ax, ay, sx, sy) = (0.2, 0.1, 4.0, 1.5);
+            if self.ai[1] > 1000.0 {
+                self.ai[1] = 0.0;
+            }
+            self.ai[2] += 1.0;
+            let b = &mut self.body;
+            if self.ai[2] > 0.0 {
+                if b.vy < sy {
+                    b.vy += ay;
+                }
+            } else if b.vy > -sy {
+                b.vy -= ay;
+            }
+            if self.ai[2] < -150.0 || self.ai[2] > 150.0 {
+                if b.vx < sx {
+                    b.vx += ax;
+                }
+            } else if b.vx > -sx {
+                b.vx -= ax;
+            }
+            if self.ai[2] > 300.0 {
+                self.ai[2] = -300.0;
+            }
         }
     }
 
@@ -650,11 +785,11 @@ impl Mob {
         }
     }
 
-    /// `FindFrame` for the three monsters.
+    /// `FindFrame` of the monsters.
     pub fn find_frame(&mut self) {
         let b = &self.body;
         match self.kind {
-            Kind::Slime => {
+            k if k.is_slime() => {
                 let pose = if self.ai_action == 1 {
                     4
                 } else if b.vy != 0.0 || b.vx != 0.0 {
@@ -711,6 +846,47 @@ impl Mob {
                             self.frame
                         }
                     };
+                }
+            }
+            Kind::Skeleton => {
+                if b.vy != 0.0 {
+                    self.frame_counter = 0.0;
+                    self.frame = 0;
+                } else {
+                    if self.direction != 0 {
+                        self.sprite_dir = self.direction;
+                    }
+                    if b.vx == 0.0 {
+                        self.frame_counter = 0.0;
+                        self.frame = 0;
+                    } else {
+                        self.frame_counter += b.vx.abs() * 2.0 + 1.0;
+                        self.frame = self.frame.max(2);
+                        if self.frame_counter > 6.0 {
+                            self.frame += 1;
+                            self.frame_counter = 0.0;
+                        }
+                        if self.frame >= 15 {
+                            self.frame = 2;
+                        }
+                    }
+                }
+            }
+            Kind::CaveBat => {
+                if b.vx > 0.0 {
+                    self.sprite_dir = 1;
+                }
+                if b.vx < 0.0 {
+                    self.sprite_dir = -1;
+                }
+                self.rotation = b.vx * 0.1;
+                self.frame_counter += 1.0;
+                if self.frame_counter >= 6.0 {
+                    self.frame += 1;
+                    self.frame_counter = 0.0;
+                }
+                if self.frame >= 4 {
+                    self.frame = 0;
                 }
             }
             _ => {}
@@ -973,5 +1149,46 @@ mod tests {
         assert_eq!(z.strike(4, 5.0, -1.0, false), (1, false), "at least 1");
         assert_eq!((z.body.vx, z.body.vy), (-1.25, -0.9375), "a light hit: scaled by the resist twice");
         assert_eq!(m.strike(9, 0.0, 1.0, true), (16, true), "crits double");
+    }
+
+    #[test]
+    fn cave_bat_flies_at_the_target_and_flaps() {
+        let w = world();
+        let mut m = Mob::new(Kind::CaveBat, 10.0 * 16.0, 90.0 * 16.0);
+        let target = at(22.0 * 16.0, 95.0 * 16.0);
+        let mut frames = std::collections::HashSet::new();
+        let mut closest = f32::MAX;
+        for _ in 0..360 {
+            m.tick(&w, target, NIGHT);
+            frames.insert(m.frame);
+            closest = closest.min((m.body.center().0 - 22.0 * 16.0).abs());
+            assert!(m.body.vx.abs() <= 4.0 + 1e-3 && m.body.vy.abs() <= 1.5 + 0.2, "{:?}", m.body);
+        }
+        assert!(closest < 32.0, "{closest}");
+        assert_eq!(frames.len(), 4, "four flaps, the fifth frame unused");
+    }
+
+    #[test]
+    fn skeleton_walks_with_the_fighter_ai() {
+        let w = world();
+        let mut m = Mob::new(Kind::Skeleton, 10.0 * 16.0, 100.0 * 16.0);
+        let x0 = m.body.x;
+        let mut frames = std::collections::HashSet::new();
+        for _ in 0..120 {
+            m.tick(&w, at(25.0 * 16.0, 99.0 * 16.0), NIGHT);
+            frames.insert(m.frame);
+        }
+        assert!(m.body.x > x0 + 48.0);
+        assert!(frames.iter().all(|&f| f == 0 || (2..15).contains(&f)) && frames.len() > 5, "{frames:?}");
+        assert!(!m.facing_left);
+    }
+
+    #[test]
+    fn slime_colours_take_their_stats() {
+        let g = Mob::new(Kind::GreenSlime, 0.0, 0.0);
+        assert_eq!((g.body.w, g.body.h, g.hp), (21.0, 17.0, 14));
+        assert_eq!(Kind::YellowSlime.damage(), 15);
+        assert!(Kind::ALL.iter().filter(|k| k.is_slime()).count() == 6);
+        assert_eq!(Kind::from_u8(11), Some(Kind::CaveBat));
     }
 }

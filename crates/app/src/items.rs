@@ -59,6 +59,9 @@ pub enum Furniture {
     Furnace,
     Anvil,
     Torch,
+    Chair,
+    Table,
+    Chest,
 }
 
 impl Furniture {
@@ -69,6 +72,9 @@ impl Furniture {
             Furniture::Furnace => (FURNACE, 3, 2),
             Furniture::Anvil => (ANVIL, 2, 1),
             Furniture::Torch => (4, 1, 1),
+            Furniture::Chair => (crate::house::CHAIR, 1, 2),
+            Furniture::Table => (crate::house::TABLE, 3, 2),
+            Furniture::Chest => (crate::house::CHEST, 2, 2),
         }
     }
 }
@@ -237,6 +243,27 @@ pub const RECIPES: &[Recipe] = &[
         station: Some(WORK_BENCH),
     },
     Recipe { out: Out::Item(Item::Id(crate::coins::DOOR)), count: 1, inputs: &[wood(6)], station: Some(WORK_BENCH) },
+    Recipe { out: Out::Item(Item::Block(crate::house::PLATFORM)), count: 2, inputs: &[wood(1)], station: None },
+    Recipe { out: Out::Furniture(Furniture::Chair), count: 1, inputs: &[wood(4)], station: Some(WORK_BENCH) },
+    Recipe { out: Out::Furniture(Furniture::Table), count: 1, inputs: &[wood(8)], station: Some(WORK_BENCH) },
+    Recipe {
+        out: Out::Furniture(Furniture::Chest),
+        count: 1,
+        inputs: &[wood(8), (Item::Material(Material::IronBar), 2)],
+        station: Some(WORK_BENCH),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(crate::house::WOOD_WALL)),
+        count: 4,
+        inputs: &[wood(1)],
+        station: Some(WORK_BENCH),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(crate::house::STONE_WALL)),
+        count: 4,
+        inputs: &[(Item::Block(STONE), 1)],
+        station: Some(WORK_BENCH),
+    },
     Recipe {
         out: Out::Item(Item::Tool(Tool::Hammer(Tier::Wood))),
         count: 1,

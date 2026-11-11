@@ -81,6 +81,18 @@ def num(f, key, default=0):
     return float(m.group(1)) if m else default
 
 
+def max_stack(f):
+    """`maxStack`; this decompilation sets none for tools, weapons and armour,
+    which the game keeps one per slot."""
+    if "maxStack" in f:
+        return int(num(f, "maxStack", 9999))
+    single = any(num(f, k) > 0 for k in ("damage", "pick", "axe", "hammer", "headSlot", "bodySlot", "legSlot"))
+    single |= f.get("accessory") == "true"
+    if single and f.get("consumable") != "true" and f.get("ammo", "0") == "0":
+        return 1
+    return 9999
+
+
 def stats(f, material):
     flag = {
         "melee": f.get("melee") == "true",
@@ -102,7 +114,7 @@ def stats(f, material):
             f"pick: {int(num(f, 'pick'))}, axe: {int(num(f, 'axe'))}, hammer: {int(num(f, 'hammer'))}, "
             f"tile_boost: {int(num(f, 'tileBoost'))}, defense: {int(num(f, 'defense'))}, "
             f"heal_life: {int(num(f, 'healLife'))}, mana: {int(num(f, 'mana'))}, "
-            f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {int(num(f, 'maxStack', 9999))}, "
+            f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {max_stack(f)}, "
             f"head_slot: {int(num(f, 'headSlot'))}, body_slot: {int(num(f, 'bodySlot'))}, "
             f"leg_slot: {int(num(f, 'legSlot'))}, flags: {bits}")
 
@@ -162,7 +174,7 @@ def main():
     lines += [
         "",
         "/// What the tooltip shows of an item, from its `SetDefaults`.",
-        "#[derive(Clone, Copy, Debug)]",
+        "#[derive(Clone, Copy, Debug, Default)]",
         "pub struct Stats {",
         "    pub rare: i8,",
         "    pub damage: i16,",
@@ -197,7 +209,13 @@ def main():
         "    ITEMS.binary_search_by_key(&id, |e| e.0).ok().map(|i| ITEMS[i].2)",
         "}",
         "",
+        "/// `(ItemID name, maxStack)` of every item, by id: what a world's chests may hold.",
+        "pub const ALL: &[(&str, u16)] = &[",
     ]
+    top = max(names)
+    lines += [f'    ("{names.get(i, "")}", {max_stack(defaults(i)) if i in names else 0}),'
+              for i in range(top + 1)]
+    lines += ["];", ""]
     (root / "crates/app/src/item_ids.rs").write_text("\n".join(lines))
 
 

@@ -6,6 +6,7 @@ mod coins;
 mod combat_text;
 mod game;
 mod glow;
+mod house;
 mod inventory;
 mod item_ids;
 mod items;
@@ -37,10 +38,17 @@ use world::player::{self, Input, Player};
 /// Screen pixels of a hotbar or crafting slot, and the gap after it.
 const SLOT: f32 = 40.0;
 const SLOT_GAP: f32 = 4.0;
-/// Top of the crafting rows, under the inventory.
-fn craft_y() -> f32 {
-    ui::inventory_bottom(SLOTS) + 10.0
+/// Top of the crafting rows, under the inventory, or under the open chest.
+fn craft_y(chest: bool) -> f32 {
+    if chest {
+        ui::chest_bottom() + 10.0
+    } else {
+        ui::inventory_bottom(SLOTS) + 10.0
+    }
 }
+
+/// `Lang.inter[29]` and `[30]`: Loot All and Deposit All.
+const CHEST_BUTTONS: [&str; 2] = ["LegacyInterface.29", "LegacyInterface.30"];
 
 /// Top-left of slot `i` of a row of ten starting at `y`.
 fn slot_at(i: usize, y: f32) -> Vec2 {
@@ -122,6 +130,16 @@ impl App {
         for _ in 0..self.hud.update(dt, self.game.inventory.selected, !open) {
             self.split.tick(self.buttons[0] || self.buttons[1]);
             let slot = ui::inventory_under(self.cursor.into(), SLOTS).filter(|_| open && self.buttons[1]);
+            let chest = ui::chest_under(self.cursor.into(), house::SLOTS)
+                .filter(|_| open && self.buttons[1] && self.game.open_chest.is_some());
+            if let Some(k) = chest.filter(|_| !self.game.using_item()) {
+                for _ in 0..self.split.takes() {
+                    if self.game.chest_right_click(k) {
+                        self.game.sfx.push(audio::Sfx::MenuTick);
+                        self.split.took();
+                    }
+                }
+            }
             if let Some(i) = slot.filter(|_| !self.game.using_item()) {
                 // `SwapEquip`: armour goes on at the press instead of splitting.
                 if self.game.inventory.slots[i].and_then(|s| inventory::armor_slot(s.item)).is_some() {
@@ -171,6 +189,10 @@ impl App {
                     }
                 } else if !(self.right_fresh && self.game.interact(tx, ty, self.free)) {
                     self.game.place(tx, ty, self.free);
+                }
+                // `TileInteractionsUse` on a chest opens the inventory with it.
+                if self.game.open_chest.is_some() {
+                    self.inventory_open = true;
                 }
             }
         }
@@ -238,6 +260,19 @@ impl App {
             let counts: Vec<u16> = inv.slots.iter().map(|s| s.map_or(0, |s| s.count)).collect();
             let label = game.texts.get("LegacyInterface.4").unwrap_or("");
             self.hud.draw_inventory(&mut p, label, &counts, slot_icon);
+            if let Some(c) = game.open_chest {
+                let chest = &game.chests[c];
+                let counts: Vec<u16> = chest.items.iter().map(|s| s.map_or(0, |s| s.count)).collect();
+                // `Lang.chestType` by the chest's style.
+                let style = game.world.frame(chest.x, chest.y).0 / 36;
+                let name = game.texts.get(&format!("LegacyChestType.{style}")).unwrap_or("");
+                let buttons = CHEST_BUTTONS.map(|k| game.texts.get(k).unwrap_or(""));
+                self.hud.draw_chest(&mut p, name, &counts, &buttons, self.cursor.into(), |p, k, c, s| {
+                    if let Some(stack) = chest.items[k] {
+                        icon(p, stack.item, c, s);
+                    }
+                });
+            }
             let worn = inv.armor.map(|a| a.is_some());
             self.hud.draw_equipment(&mut p, size.x, worn, game.defense(), |p, k, c, s| {
                 if let Some(a) = inv.armor[k] {
@@ -261,7 +296,7 @@ impl App {
             p.rect([x, size.y - 40.0], w, 14.0, [0.1, 0.1, 0.15, 0.7]);
             p.rect([x + 2.0, size.y - 38.0], (w - 4.0) * life, 10.0, [0.75, 0.1, 0.2, 0.95]);
         }
-        let craft_y = craft_y();
+        let craft_y = craft_y(self.game.open_chest.is_some());
         for (k, &(r, item)) in self.recipes.iter().enumerate() {
             let hover = slot_under(self.cursor, craft_y, self.recipes.len()) == Some(k);
             let o = slot_at(k, craft_y);
@@ -279,9 +314,10 @@ impl App {
         // `ItemSlot.MouseHover`: the tooltip of what is under the cursor.
         let cursor = self.cursor.into();
         let equip = ui::equip_under(cursor, size.x).filter(|_| self.inventory_open);
+        let in_chest = self.chest_slot_under_cursor().and_then(|k| game.chests[game.open_chest?].items[k]);
         let hovered = match equip {
             Some(k) => inv.armor[k],
-            None => self.slot_under_cursor().and_then(|i| inv.slots[i]),
+            None => self.slot_under_cursor().and_then(|i| inv.slots[i]).or(in_chest),
         };
         if self.inventory_open && ui::defense_under(p.sheets, cursor, size.x) {
             // `DrawDefenseCounter`'s hover text.
@@ -314,12 +350,28 @@ impl App {
         }
     }
 
+    /// The open chest's slot under the cursor.
+    fn chest_slot_under_cursor(&self) -> Option<usize> {
+        self.game.open_chest.filter(|_| self.inventory_open)?;
+        ui::chest_under(self.cursor.into(), house::SLOTS)
+    }
+
+    /// The open chest's button under the cursor.
+    fn chest_button_under_cursor(&self) -> Option<usize> {
+        self.game.open_chest.filter(|_| self.inventory_open)?;
+        let labels = CHEST_BUTTONS.map(|k| self.game.texts.get(k).unwrap_or(""));
+        ui::chest_button_under(&self.fonts, self.cursor.into(), &labels)
+    }
+
     fn over_ui(&self, w: f32) -> bool {
         let cursor = self.cursor.into();
         let sheets = &self.game.scene.mesher.atlas.named;
         self.slot_under_cursor().is_some()
+            || self.chest_slot_under_cursor().is_some()
+            || self.chest_button_under_cursor().is_some()
             || (self.inventory_open && (ui::equip_under(cursor, w).is_some() || ui::defense_under(sheets, cursor, w)))
-            || (self.inventory_open && slot_under(self.cursor, craft_y(), self.recipes.len()).is_some())
+            || (self.inventory_open
+                && slot_under(self.cursor, craft_y(self.game.open_chest.is_some()), self.recipes.len()).is_some())
     }
 
     /// A left press on the interface: moves items in the open inventory, picks a
@@ -338,11 +390,25 @@ impl App {
                 }
                 return true;
             }
+            if let Some(k) = self.chest_slot_under_cursor() {
+                if !self.game.using_item() && self.game.chest_left_click(k) {
+                    self.game.sfx.push(audio::Sfx::Grab);
+                }
+                return true;
+            }
+            if let Some(b) = self.chest_button_under_cursor() {
+                if b == 0 {
+                    self.game.chest_loot_all();
+                } else {
+                    self.game.chest_deposit_all();
+                }
+                return true;
+            }
         } else if let Some(i) = self.hud.hotbar_under(self.cursor.into()) {
             self.game.inventory.selected = i;
             return true;
         }
-        if let Some(k) = slot_under(self.cursor, craft_y(), self.recipes.len()) {
+        if let Some(k) = slot_under(self.cursor, craft_y(self.game.open_chest.is_some()), self.recipes.len()) {
             self.game.craft(self.recipes[k].0);
             return true;
         }
@@ -431,6 +497,9 @@ impl ApplicationHandler for App {
                     KeyCode::Escape if press => {
                         self.inventory_open = !self.inventory_open;
                         if !self.inventory_open {
+                            if self.game.open_chest.take().is_some() {
+                                self.game.sfx.push(audio::Sfx::MenuClose);
+                            }
                             // `GetOrDropItem`: back into the inventory, the rest thrown.
                             self.game.inventory.return_mouse();
                             self.game.throw_held(false);
@@ -646,13 +715,17 @@ fn main() {
     let env = world.header.env.clone().unwrap_or_default();
     sheets.extend(backdrop::sheets(&env));
     sheets.extend(cave::sheets(&env, world.header.world_id));
+    // What the world's chests hold.
+    sheets.extend(world.chests.iter().flat_map(|c| &c.items).filter(|i| i.1 > 0).map(|i| format!("Item_{}", i.0)));
+    sheets.sort_unstable();
+    sheets.dedup();
     let culture = formats::lang::culture();
     let exe = formats::install::exe_path().and_then(|p| std::fs::read(p).ok());
     let texts = exe.and_then(|e| formats::lang::Texts::load(&e, &culture).ok()).unwrap_or_default();
     println!("texts: {culture}, {} entries", texts.len());
     let fonts_dir = images.as_deref().and_then(|d| d.parent()).map(|c| c.join("Fonts"));
     let (fonts, pages) = ui::Fonts::load(fonts_dir.as_deref(), &texts.chars());
-    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &sheets, pages);
+    let scene = Scene::build(&world, images.as_deref(), &game::EXTRA_TILES, &house::WALLS, &sheets, pages);
     println!(
         "{} ({}x{}, v{}): parse {parsed:.2?}, scene {:.2?}, {} sheets missing",
         world.header.name,

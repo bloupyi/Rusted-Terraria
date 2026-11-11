@@ -275,6 +275,50 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     Ok(e)
 }
 
+/// A chest's top-left tile and its 40 slots: `(item id, stack)`, stack 0 for empty.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Chest {
+    pub x: i32,
+    pub y: i32,
+    pub items: Vec<(i32, i16)>,
+}
+
+/// `Chest.maxItems`.
+pub const CHEST_SLOTS: usize = 40;
+
+/// Parses section 3 (`WorldFile.LoadChests`); names and prefixes are skipped.
+pub fn read_chests(data: &[u8], h: &Header) -> Result<Vec<Chest>, Error> {
+    let mut r = Reader::new(data);
+    r.seek(*h.sections.get(2).ok_or(Error::Eof)? as usize)?;
+    let n = r.i16()?;
+    let mut slots = if h.version < 294 { r.i16()? as usize } else { 0 };
+    let mut out: Vec<Chest> = Vec::new();
+    for _ in 0..n {
+        let (x, y) = (r.i32()?, r.i32()?);
+        r.string()?;
+        if h.version >= 294 {
+            slots = r.i32()? as usize;
+        }
+        let mut items = vec![(0, 0); CHEST_SLOTS];
+        for k in 0..slots {
+            let stack = r.i16()?;
+            if stack == 0 {
+                continue;
+            }
+            let id = r.i32()?;
+            r.u8()?;
+            if let Some(slot) = items.get_mut(k) {
+                *slot = (id, stack.max(1));
+            }
+        }
+        // A second chest at the same place is dropped, as the game does.
+        if !out.iter().any(|c| (c.x, c.y) == (x, y)) {
+            out.push(Chest { x, y, items });
+        }
+    }
+    Ok(out)
+}
+
 /// Parses section 2. Tiles are stored column-major (x outer, y inner) with
 /// vertical run-length repeats; `sink(x, y, run, tile)` gets each run.
 pub fn read_tiles(data: &[u8], h: &Header, mut sink: impl FnMut(u32, u32, u32, &Tile)) -> Result<(), Error> {
