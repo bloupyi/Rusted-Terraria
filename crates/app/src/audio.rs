@@ -33,6 +33,9 @@ pub enum Sfx {
     Staff,
     GemBolt,
     MaxMana,
+    Crystal,
+    StarFall,
+    StarHit,
 }
 
 impl Sfx {
@@ -57,6 +60,9 @@ impl Sfx {
             Sfx::Staff => ("Item_43", 1),
             Sfx::GemBolt => ("Item_205", 1),
             Sfx::MaxMana => ("MaxMana", 1),
+            Sfx::Crystal => ("Item_29", 1),
+            Sfx::StarFall => ("Item_9", 1),
+            Sfx::StarHit => ("Item_10", 1),
         }
     }
 }

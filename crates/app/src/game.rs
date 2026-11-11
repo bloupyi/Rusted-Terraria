@@ -8,7 +8,7 @@ use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
 use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
-use crate::magic::{self, Bolt, Dust};
+use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
 use crate::{backdrop, cave, item_ids, pots};
 use formats::wld::Env;
@@ -159,6 +159,8 @@ pub struct Game {
     pub mana: magic::Mana,
     /// Bolts in flight and dust in the air.
     pub bolts: Vec<Bolt>,
+    /// Falling stars and their spawners.
+    pub stars: Vec<Star>,
     pub dust: Vec<Dust>,
     /// `itemRotation` while a staff is held out.
     item_rotation: f32,
@@ -244,6 +246,7 @@ impl Game {
             potion_delay: 0,
             mana: Default::default(),
             bolts: Vec::new(),
+            stars: Vec::new(),
             dust: Vec::new(),
             item_rotation: 0.0,
             attack_cd: 0,
@@ -299,6 +302,7 @@ impl Game {
                 }
             }
             self.update_bolts();
+            self.update_stars();
             self.dust.retain_mut(|d| d.update());
             for (_, p) in &mut self.others {
                 p.animate();
@@ -529,11 +533,7 @@ impl Game {
                 965 => Item::Block(213),
                 _ => Item::Id(id),
             };
-            // `Item.NewItem`: a small random toss.
-            let vx = ((self.random() % 61) as f32 - 30.0) * 0.1 * 60.0;
-            let vy = ((self.random() % 26) as f32 - 40.0) * 0.1 * 60.0;
-            let (px, py) = (x as f32 * 16.0 + 8.0, ty as f32 * 16.0);
-            self.drops.push(Drop { x: px, y: py, vx, vy, item, count, grab_delay: 0.0 });
+            self.toss(x as f32 * 16.0 + 8.0, ty as f32 * 16.0, item, count);
         }
     }
 
@@ -587,6 +587,32 @@ impl Game {
         if let Some((item, count)) = drop {
             self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count, grab_delay: 0.0 });
         }
+        if !m.kind.friendly() {
+            self.drop_life_and_mana(x, y);
+        }
+    }
+
+    /// `NPCLoot_DropCommonLifeAndMana` without luck: now and then a heart or a
+    /// mana star, and a mana star every other kill while mana is short.
+    fn drop_life_and_mana(&mut self, x: f32, y: f32) {
+        let short = self.mana.cur < self.mana.max;
+        if self.random().is_multiple_of(6) {
+            if self.random().is_multiple_of(2) && short {
+                self.toss(x, y, Item::Id(magic::MANA_STAR), 1);
+            } else if self.random().is_multiple_of(2) && self.hp < MAX_HP {
+                self.toss(x, y, Item::Id(pots::HEART), 1);
+            }
+        }
+        if self.random().is_multiple_of(2) && short {
+            self.toss(x, y, Item::Id(magic::MANA_STAR), 1);
+        }
+    }
+
+    /// `Item.NewItem`: an item dropped with a small random toss.
+    fn toss(&mut self, x: f32, y: f32, item: Item, count: u16) {
+        let vx = ((self.random() % 61) as f32 - 30.0) * 0.1 * 60.0;
+        let vy = ((self.random() % 26) as f32 - 40.0) * 0.1 * 60.0;
+        self.drops.push(Drop { x, y, vx, vy, item, count, grab_delay: 0.0 });
     }
 
     /// The eye boss, at night and if none is around, from above the player.
@@ -673,6 +699,12 @@ impl Game {
 
     /// Drops fall onto blocks, fly to a nearby player and go into the inventory.
     fn update_drops(&mut self, dt: f32) {
+        let mut stars = 0;
+        let night = self.time >= DAYTIME;
+        // Mana stars come only to a player short of mana or holding a magic weapon.
+        let magic_held = matches!(self.inventory.selected().map(|s| s.item), Some(Item::Id(id))
+            if item_ids::stats(id).is_some_and(|s| s.flags & item_ids::MAGIC != 0));
+        let wants_stars = magic_held || self.mana.cur < self.mana.max;
         let (px, py) = self.player.center();
         let world = &self.world;
         let inventory = &mut self.inventory;
@@ -683,6 +715,16 @@ impl Game {
             d.grab_delay = (d.grab_delay - dt).max(0.0);
             // Out of reach while the thrower's delay runs.
             let dist = if d.grab_delay > 0.0 { f32::INFINITY } else { (dx * dx + dy * dy).sqrt() };
+            if d.item == Item::Id(magic::FALLEN_STAR) && !night {
+                // Fallen stars vanish at daybreak.
+                return false;
+            }
+            let dist = if d.item == Item::Id(magic::MANA_STAR) && !wants_stars { f32::INFINITY } else { dist };
+            if dist < PICKUP && d.item == Item::Id(magic::MANA_STAR) {
+                stars += 1;
+                sfx.push(Sfx::Grab);
+                return false;
+            }
             if dist < PICKUP && d.item == Item::Id(pots::HEART) {
                 hearts += 1;
                 sfx.push(Sfx::Grab);
@@ -720,6 +762,12 @@ impl Game {
         // `PickupItem`: a heart is 20 life, never an item.
         for _ in 0..hearts {
             self.heal(20);
+        }
+        // A mana star is 100 mana.
+        for _ in 0..stars {
+            self.mana.star();
+            let b = self.player.body;
+            self.text_at([b.x, b.y, b.w, b.h], combat_text::HEAL_MANA, 100, false);
         }
     }
 
@@ -870,6 +918,8 @@ impl Game {
             if held && self.item_animation == 0 && self.release_use {
                 if id == magic::AMETHYST_STAFF {
                     self.cast(target.unwrap());
+                } else if id == magic::MANA_CRYSTAL {
+                    self.use_crystal();
                 } else if self.drink(id) {
                     self.inventory.consume();
                 }
@@ -1032,6 +1082,93 @@ impl Game {
         let vel = if l == 0.0 { [dir * speed, 0.0] } else { [dx * speed / l, dy * speed / l] };
         self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
         self.bolts.push(Bolt::new([cx, cy], vel, s.damage as i32, s.knock_back));
+    }
+
+    /// `ItemCheck_UseManaCrystal`: a star more, shown in blue.
+    fn use_crystal(&mut self) {
+        if !self.mana.crystal() {
+            return;
+        }
+        if let Some(s) = item_ids::stats(magic::MANA_CRYSTAL) {
+            self.item_animation = s.use_animation as i32;
+        }
+        self.sfx.push(Sfx::Crystal);
+        let b = self.player.body;
+        self.text_at([b.x, b.y, b.w, b.h], combat_text::HEAL_MANA, 20, false);
+        self.inventory.consume();
+    }
+
+    /// `WorldGen.UpdateWorld`'s starfall at night: now and then a spawner
+    /// high in the sky (one in 15 near a player above ground), which drops a
+    /// star three seconds later. Stars hit monsters for 1000 and leave a
+    /// fallen star where they land; daybreak takes the ones still falling.
+    fn update_stars(&mut self) {
+        if self.time < DAYTIME {
+            self.stars.clear();
+            return;
+        }
+        let w = self.world.width as i64;
+        let chance = 10.0 * w as f64 / 4200.0;
+        if !self.client && ((self.random() % 8000) as f64) < chance {
+            let mut x = ((self.random() % (w - 50).max(1) as u64) as i64 + 100) as f32 * 16.0;
+            let y = (self.random() % ((self.world.height as f64 * 0.05) as u64).max(1)) as f32 * 16.0;
+            let near = self.random().is_multiple_of(15) && self.player.y < self.env.world_surface as f32 * 16.0;
+            if near {
+                let r = 1 + self.random() % 639;
+                x = self.player.x + (self.random() % (2 * r + 1)) as f32 - r as f32;
+            }
+            if !magic::solid_in(&self.world, [x, y], 16.0) {
+                let vx = (self.random() % 201) as f32 - 100.0;
+                let vy = (self.random() % 200) as f32 + 100.0;
+                let k = 12.0 / (vx * vx + vy * vy).sqrt();
+                let mut vel = [vx * k, vy * k];
+                if near {
+                    // Turned toward the player it came for.
+                    vel[0] = (vel[0] * 0.35).abs() * if x + 8.0 < self.player.center().0 { 1.0 } else { -1.0 };
+                }
+                self.stars.push(Star::new([x, y], vel));
+            }
+        }
+        let mut i = 0;
+        while i < self.stars.len() {
+            if self.stars[i].wait > 0 {
+                self.stars[i].wait -= 1;
+                i += 1;
+                continue;
+            }
+            if self.stars[i].sound_delay == 0 {
+                self.stars[i].sound_delay = 20 + (self.random() % 40) as i32;
+                self.sfx.push(Sfx::StarFall);
+            }
+            self.stars[i].sound_delay -= 1;
+            let flying = self.stars[i].advance(&self.world);
+            let [x, y] = self.stars[i].pos;
+            let size = magic::STAR_SIZE;
+            let dir = if self.stars[i].vel[0] < 0.0 { -1.0 } else { 1.0 };
+            let hit = self.mobs.iter().position(|m| {
+                let b = &m.body;
+                !m.kind.friendly()
+                    && m.melee_cooldown == 0
+                    && x < b.x + b.w
+                    && b.x < x + size
+                    && y < b.y + b.h
+                    && b.y < y + size
+            });
+            if let Some(m) = hit {
+                self.mobs[m].melee_cooldown = 10;
+                let damage = self.damage_var(1000);
+                self.hit_mob(m, damage, 10.0, dir, false, false);
+            }
+            if flying {
+                i += 1;
+                continue;
+            }
+            // `Kill`: a fallen star where it stopped.
+            let star = self.stars.swap_remove(i);
+            self.sfx.push(Sfx::StarHit);
+            let [cx, cy] = star.center();
+            self.toss(cx, cy, Item::Id(magic::FALLEN_STAR), 1);
+        }
     }
 
     /// `Projectile.Update` for each bolt: dust, homing, moving, hitting, running out.
@@ -1948,12 +2085,51 @@ impl Game {
                 out.extend([s; 4]);
             }
         }
+        self.star_sprites(out);
         let Some(sheet) = self.sheet("Dust") else { return };
         for d in &self.dust {
             let half = 4.0 * d.scale;
             let mut s = Sprite::sheet([d.pos[0] - half, d.pos[1] - half], sheet, d.frame(), 0);
             (s.size, s.pivot, s.rot) = ([8.0 * d.scale; 2], [half, half], d.rot);
             s.color = [1.0, 1.0, 1.0, 0.0];
+            out.push(s);
+        }
+    }
+
+    /// Falling stars as `DrawProj` draws projectile 12: three faint blue
+    /// streaks circling ahead of it, a white pulse behind, the spinning star.
+    fn star_sprites(&self, out: &mut Vec<Sprite>) {
+        use std::f32::consts::{PI, TAU};
+        let (Some(glow), Some(star)) = (self.sheet("Extra_91"), self.sheet("Projectile_12")) else { return };
+        let (gw, gh) = (glow.w as f32, glow.h as f32);
+        let streak = |at: [f32; 2], rot: f32, scale: f32, color: [f32; 4]| {
+            let pivot = [gw / 2.0 * scale, 10.0 * scale];
+            let mut s = Sprite::sheet([at[0] - pivot[0], at[1] - pivot[1]], glow, [0, 0, glow.w, glow.h], 0);
+            (s.size, s.pivot, s.rot, s.color) = ([gw * scale, gh * scale], pivot, rot, color);
+            s
+        };
+        for st in self.stars.iter().filter(|s| s.wait == 0) {
+            let t = st.age as f32 / 60.0;
+            let [cx, cy] = st.center();
+            let rot = st.vel[1].atan2(st.vel[0]) + PI / 2.0;
+            let ahead = [cx + st.vel[0], cy + st.vel[1]];
+            let blue = [0.0, 0.0, 0.2, 0.0];
+            for (k, scale) in [1.5, 1.1, 1.3].into_iter().enumerate() {
+                let a = TAU * t + k as f32 * TAU / 3.0;
+                // (0, -10) turned by `a`.
+                let at = [ahead[0] + 10.0 * a.sin(), ahead[1] - 10.0 * a.cos()];
+                out.push(streak(at, rot, scale, blue));
+            }
+            let behind = [cx - st.vel[0] * 0.5, cy - st.vel[1] * 0.5];
+            for k in [0.0, 0.5] {
+                let p = ((t % 0.5) / 0.5 + k) % 1.0;
+                let pulse = if p * 2.0 > 1.0 { 2.0 - p * 2.0 } else { p * 2.0 };
+                out.push(streak(behind, rot, 0.3 + p * 0.5, [0.5 * pulse, 0.5 * pulse, 0.5 * pulse, 0.0]));
+            }
+            let (w, h) = (star.w as f32 * 1.1, star.h as f32 * 1.1);
+            let mut s = Sprite::sheet([cx - w / 2.0, cy - h / 2.0], star, [0, 0, star.w, star.h], 0);
+            (s.size, s.pivot, s.rot) = ([w, h], [w / 2.0, h / 2.0], st.rot);
+            s.color = [0.8; 4];
             out.push(s);
         }
     }
@@ -2257,6 +2433,59 @@ mod tests {
         (g.mana.cur, g.item_animation, g.release_use) = (6, 0, true);
         g.use_item(target);
         assert!(g.bolts.is_empty() && g.item_animation == 0, "not enough mana");
+    }
+
+    #[test]
+    fn stars_fall_into_crystals_and_monsters_drop_mana() {
+        let mut g = game();
+        g.time = 0.8;
+        g.stars.push(Star::new([200.0, 16.0], [0.0, 12.0]));
+        for _ in 0..300 {
+            g.update_stars();
+        }
+        assert!(g.stars.iter().all(|s| s.wait > 0), "the first one landed");
+        assert!(g.drops.iter().any(|d| d.item == Item::Id(magic::FALLEN_STAR)));
+        g.drops.clear();
+        g.inventory.add(Item::Id(magic::FALLEN_STAR), 5);
+        let crystal = RECIPES.iter().position(|r| r.out == Out::Item(Item::Id(magic::MANA_CRYSTAL))).unwrap();
+        assert!(g.craft(crystal), "no station needed");
+        g.inventory.selected =
+            g.inventory.slots.iter().position(|s| s.is_some_and(|s| s.item == Item::Id(magic::MANA_CRYSTAL))).unwrap();
+        g.use_item(Some((0.0, 0.0)));
+        assert_eq!((g.mana.cur, g.mana.max), (40, 40));
+        assert_eq!(g.inventory.count(Item::Id(magic::MANA_CRYSTAL)), 0);
+
+        g.mana.cur = 0;
+        g.drops.push(Drop {
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            item: Item::Id(magic::MANA_STAR),
+            count: 1,
+            grab_delay: 0.0,
+        });
+        pick_up(&mut g);
+        assert_eq!(g.mana.cur, 40, "100 back, up to the max");
+        g.drops.push(Drop {
+            x: 0.0,
+            y: 0.0,
+            vx: 0.0,
+            vy: 0.0,
+            item: Item::Id(magic::MANA_STAR),
+            count: 1,
+            grab_delay: 0.0,
+        });
+        pick_up(&mut g);
+        assert_eq!(g.drops.len(), 1, "left lying while mana is full");
+
+        g.drops.clear();
+        g.mana.cur = 0;
+        for _ in 0..40 {
+            g.drop_life_and_mana(0.0, 0.0);
+        }
+        let stars = g.drops.iter().filter(|d| d.item == Item::Id(magic::MANA_STAR)).count();
+        assert!((10..40).contains(&stars), "{stars}");
     }
 
     #[test]
