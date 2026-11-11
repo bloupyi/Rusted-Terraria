@@ -215,6 +215,11 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(Item::Block(IRON_ORE), 3)],
         station: Some(FURNACE),
     },
+    Recipe { out: Out::Item(Item::Id(703)), count: 1, inputs: &[(Item::Block(166), 3)], station: Some(FURNACE) },
+    Recipe { out: Out::Item(Item::Id(21)), count: 1, inputs: &[(Item::Block(9), 4)], station: Some(FURNACE) },
+    Recipe { out: Out::Item(Item::Id(705)), count: 1, inputs: &[(Item::Block(168), 4)], station: Some(FURNACE) },
+    Recipe { out: Out::Item(Item::Id(19)), count: 1, inputs: &[(Item::Block(8), 4)], station: Some(FURNACE) },
+    Recipe { out: Out::Item(Item::Id(706)), count: 1, inputs: &[(Item::Block(169), 4)], station: Some(FURNACE) },
     Recipe {
         out: Out::Furniture(Furniture::Anvil),
         count: 1,
@@ -249,6 +254,36 @@ pub const RECIPES: &[Recipe] = &[
         out: Out::Item(Item::Id(crate::magic::AMETHYST_STAFF)),
         count: 1,
         inputs: &[(Item::Material(Material::CopperBar), 7), (Item::Id(181), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(740)),
+        count: 1,
+        inputs: &[(Item::Id(703), 7), (Item::Id(180), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(741)),
+        count: 1,
+        inputs: &[(Item::Id(21), 7), (Item::Id(177), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(742)),
+        count: 1,
+        inputs: &[(Item::Id(705), 7), (Item::Id(179), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(743)),
+        count: 1,
+        inputs: &[(Item::Id(19), 7), (Item::Id(178), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(744)),
+        count: 1,
+        inputs: &[(Item::Id(706), 7), (Item::Id(182), 8)],
         station: Some(ANVIL),
     },
     Recipe {

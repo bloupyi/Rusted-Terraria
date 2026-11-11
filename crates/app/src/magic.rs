@@ -1,7 +1,7 @@
-//! Mana and the first magic weapon: `Player.UpdateManaRegen` without buffs or
-//! accessories, the Amethyst Staff and its bolt (projectile 121,
-//! `AI_029_GemStaffs` with the homing it gets from `PackGemStaffFeatures`),
-//! and the dust both leave. Then where mana comes from: falling stars at
+//! Mana and the gem staffs: `Player.UpdateManaRegen` without buffs or
+//! accessories, the six staffs from amethyst to diamond and their bolts
+//! (projectiles 121 to 126, `AI_029_GemStaffs` with the feature each gets
+//! from `PackGemStaffFeatures`), and the dust they leave. Then where mana comes from: falling stars at
 //! night (projectiles 720 and 12), the mana crystal they make, and the mana
 //! stars monsters drop.
 
@@ -9,6 +9,7 @@ use world::collision::{self, V2};
 use world::World;
 
 pub const AMETHYST_STAFF: u16 = 739;
+pub const DIAMOND_STAFF: u16 = 744;
 pub const FALLEN_STAR: u16 = 75;
 pub const MANA_CRYSTAL: u16 = 109;
 pub const MANA_STAR: u16 = 184;
@@ -18,6 +19,16 @@ pub const MANA_CRYSTAL_CAP: i32 = 200;
 /// Sheets the staff, the gems, the bolt and the stars draw with.
 pub const SHEETS: &[&str] = &[
     "Item_739",
+    "Item_740",
+    "Item_741",
+    "Item_742",
+    "Item_743",
+    "Item_744",
+    "Item_703",
+    "Item_21",
+    "Item_705",
+    "Item_19",
+    "Item_706",
     "Item_177",
     "Item_178",
     "Item_179",
@@ -28,6 +39,11 @@ pub const SHEETS: &[&str] = &[
     "Item_109",
     "Item_184",
     "Projectile_121",
+    "Projectile_122",
+    "Projectile_123",
+    "Projectile_124",
+    "Projectile_125",
+    "Projectile_126",
     "Projectile_12",
     "Extra_91",
     "Dust",
@@ -37,13 +53,55 @@ pub const GEM_STONES: std::ops::RangeInclusive<u16> = 63..=68;
 pub const fn gem(tile: u16) -> u16 {
     tile - 63 + 177
 }
-/// Dust of the amethyst bolt: `type - 121 + 86`.
-pub const AMETHYST_DUST: u16 = 86;
+/// The bolt a staff shoots, 121 for amethyst to 126 for diamond.
+pub fn staff_bolt(item: u16) -> Option<u16> {
+    (AMETHYST_STAFF..=DIAMOND_STAFF).contains(&item).then(|| item - AMETHYST_STAFF + 121)
+}
 /// The bolt's box, and `Projectile.oldPos` it keeps for its trail.
 pub const BOLT_SIZE: f32 = 10.0;
 const TRAIL: usize = 30;
 /// `FindTargetWithLineOfSight(500)` for the homing.
 pub const HOMING_RANGE: f32 = 500.0;
+/// `localNPCHitCooldown`: ticks before a bolt can hit the same monster again.
+pub const HIT_COOLDOWN: i32 = 60;
+/// The topaz burst: a 160 px box at 0.35 of the damage and knockback.
+pub const BURST: f32 = 160.0;
+
+/// `PackGemStaffFeatures` without armour: one feature per gem.
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
+pub struct Features {
+    pub homing: bool,
+    pub burst: bool,
+    pub twins: bool,
+    pub fast_then_slow: bool,
+    pub spread: bool,
+    pub bigger: bool,
+}
+
+impl Features {
+    pub fn of(bolt: u16) -> Self {
+        Self {
+            homing: bolt == 121,
+            burst: bolt == 122,
+            twins: bolt == 123,
+            fast_then_slow: bolt == 124,
+            spread: bolt == 125,
+            bigger: bolt == 126,
+        }
+    }
+
+    /// `GetDamageMultiplier`.
+    pub fn damage_multiplier(self) -> f32 {
+        let mut k: f32 = 1.0;
+        if self.twins {
+            k = k.min(0.6);
+        }
+        if self.spread {
+            k = k.min(0.5);
+        }
+        k
+    }
+}
 
 pub struct Mana {
     pub cur: i32,
@@ -182,8 +240,10 @@ pub fn solid_in(world: &World, pos: V2, size: f32) -> bool {
     (x0..=x1).any(|x| (y0..=y1).any(|y| world.solid(x, y)))
 }
 
-/// The amethyst bolt: invisible itself, drawn as a glow and a trail.
+/// A gem bolt: invisible itself, drawn as a glow and a trail.
 pub struct Bolt {
+    /// Projectile 121 to 126.
+    pub kind: u16,
     /// Top-left of its 10x10 box.
     pub pos: V2,
     pub vel: V2,
@@ -194,21 +254,53 @@ pub struct Bolt {
     pub sounded: bool,
     /// Past positions and rotations, newest first (`oldPos`, `oldRot`).
     pub trail: Vec<(V2, f32)>,
+    /// Monsters it can still hit, and `armorPenetration`.
+    pub penetrate: i32,
+    pub armor_pen: i32,
+    /// The sapphire pair: which of the two (`ai[1]`) and its clock (`localAI[0]`).
+    pub twin: Option<f32>,
+    swirl: f32,
+    /// Shrinks once the emerald bolt has stopped.
+    pub scale: f32,
+    /// Ticks lived, for the glow's pulse.
+    pub age: u32,
+    /// Monsters hit lately by index, and the ticks before they can be hit again.
+    pub immune: Vec<(usize, i32)>,
 }
 
 impl Bolt {
-    /// `Projectile.NewProjectile` at `center`.
-    pub fn new(center: V2, vel: V2, damage: i32, knock_back: f32) -> Self {
+    /// `Projectile.NewProjectile` at `center`, then `FinalizeProjectile_GemStaves`:
+    /// emerald lives twice as long and pierces once more, as does diamond; ruby
+    /// ignores 4 defense.
+    pub fn new(kind: u16, center: V2, vel: V2, damage: i32, knock_back: f32, twin: Option<f32>) -> Self {
         let h = BOLT_SIZE / 2.0;
+        let f = Features::of(kind);
         Self {
+            kind,
             pos: [center[0] - h, center[1] - h],
             vel,
             damage,
             knock_back,
-            time_left: 300,
+            time_left: if f.fast_then_slow { 600 } else { 300 },
             sounded: false,
             trail: Vec::new(),
+            penetrate: 1 + (f.fast_then_slow || f.bigger) as i32,
+            armor_pen: if f.spread { 4 } else { 0 },
+            twin,
+            swirl: 0.0,
+            scale: 1.0,
+            age: 0,
+            immune: Vec::new(),
         }
+    }
+
+    pub fn features(&self) -> Features {
+        Features::of(self.kind)
+    }
+
+    /// Its dust: `type - 121 + 86`.
+    pub fn dust(&self) -> u16 {
+        self.kind - 121 + 86
     }
 
     pub fn center(&self) -> V2 {
@@ -221,7 +313,8 @@ impl Bolt {
 
     /// The homing of `AI_029_GemStaffs_ActuallyGemStaffs` toward `target`'s centre.
     pub fn home(&mut self, target: V2) {
-        let (max_speed, grow, push, turn) = (8.0, 1.1, 0.1, 0.1);
+        let max_speed = if self.features().fast_then_slow { 16.0 } else { 8.0 };
+        let (grow, push, turn) = (1.1, 0.1, 0.1);
         let speed = len(self.vel);
         if speed < max_speed {
             let n = norm(self.vel);
@@ -245,29 +338,70 @@ impl Bolt {
         self.vel = [lerp(self.vel[0], to[0] * pull, t), lerp(self.vel[1], to[1] * pull, t)];
     }
 
+    /// The sapphire pair weaving about their line, half a turn apart.
+    pub fn swirl(&mut self) {
+        let Some(twin) = self.twin else { return };
+        use std::f32::consts::{PI, TAU};
+        let wave = |t: f32| (t * TAU * 0.05 + twin * PI).sin();
+        let d = wave(self.swirl + 1.0) - wave(self.swirl);
+        self.swirl += 1.0;
+        let a = self.rotation() + PI / 2.0;
+        self.pos = [self.pos[0] + a.cos() * d * 6.0, self.pos[1] + a.sin() * d * 6.0];
+    }
+
+    /// The emerald bolt slows to a stop, then shrinks away. False once gone.
+    pub fn slow_down(&mut self) -> bool {
+        if !self.features().fast_then_slow {
+            return true;
+        }
+        if len(self.vel) > 0.1 {
+            self.vel = [self.vel[0] * 0.97, self.vel[1] * 0.97];
+        } else {
+            self.scale -= 0.005;
+        }
+        self.scale >= 0.1
+    }
+
     /// `HandleMovement`: a 2x2 box at the centre against the tiles. False when
-    /// it hit one, which kills it.
+    /// it hit one, which kills it, except the emerald bolt, which stops there.
     pub fn advance(&mut self, world: &World) -> bool {
         self.trail.insert(0, (self.pos, self.rotation()));
         self.trail.truncate(TRAIL);
         let c = self.center();
         let b = collision::Box { world, pos: [c[0] - 1.0, c[1] - 1.0], size: [2, 2] };
-        let vel = b.tiles(self.vel, true, true).vel;
-        let hit = vel != self.vel;
+        let last = self.vel;
+        let vel = b.tiles(last, true, true).vel;
         self.vel = vel;
         self.pos = [self.pos[0] + vel[0], self.pos[1] + vel[1]];
-        !hit
+        if vel == last {
+            return true;
+        }
+        if self.features().fast_then_slow {
+            self.pos = [self.pos[0] + vel[0] * 0.99, self.pos[1] + vel[1] * 0.99];
+            let n = norm(last);
+            self.vel = [n[0] * 0.0001, n[1] * 0.0001];
+            return true;
+        }
+        false
     }
 
-    /// `Damage_GetHitbox`: the box grown by 4 on each side for `aiStyle` 29.
-    pub fn hitbox(&self) -> [f32; 4] {
-        [self.pos[0] - 4.0, self.pos[1] - 4.0, BOLT_SIZE + 8.0, BOLT_SIZE + 8.0]
+    /// `Damage_GetHitbox`, grown by 4 on each side for `aiStyle` 29, and by 30
+    /// more for diamond. The emerald bolt also hits from its last five places.
+    pub fn hitboxes(&self) -> Vec<[f32; 4]> {
+        let grow = if self.features().bigger { 34.0 } else { 4.0 };
+        let at = |p: V2| [p[0] - grow, p[1] - grow, BOLT_SIZE + 2.0 * grow, BOLT_SIZE + 2.0 * grow];
+        let mut v = vec![at(self.pos)];
+        if self.features().fast_then_slow {
+            v.extend(self.trail.iter().take(5).map(|t| at(t.0)));
+        }
+        v
     }
 }
 
-/// A speck of dust (`Dust`), without gravity: slows and shrinks away.
+/// A speck of dust (`Dust`): slows and shrinks away, falling unless `noGravity`.
 pub struct Dust {
     pub kind: u16,
+    pub gravity: bool,
     pub pos: V2,
     pub vel: V2,
     pub scale: f32,
@@ -285,17 +419,28 @@ impl Dust {
         let vx = (r(41) - 20) as f32 * 0.1 + speed[0];
         let vy = (r(41) - 20) as f32 * 0.1 + speed[1];
         let variant = r(3) as u32;
-        let s = (1.0 + (r(41) - 20) as f32 * 0.01) * scale;
-        Self { kind, pos: [x, y], vel: [vx, vy], scale: s, rot: 0.0, variant }
+        let mut s = (1.0 + (r(41) - 20) as f32 * 0.01) * scale;
+        let mut vel = [vx, vy];
+        if flame(kind) {
+            vel = [vel[0] * 0.3, (r(16) - 10) as f32 * 0.1];
+            s *= 0.7;
+        }
+        Self { kind, gravity: false, pos: [x, y], vel, scale: s, rot: 0.0, variant }
     }
 
-    /// `UpdateDust` for dust without gravity. False once it is gone.
+    /// `UpdateDust`. False once it is gone.
     pub fn update(&mut self) -> bool {
         self.pos = [self.pos[0] + self.vel[0], self.pos[1] + self.vel[1]];
+        if self.gravity {
+            self.vel[1] += if flame(self.kind) { 0.05 } else { 0.1 };
+        }
         self.vel[0] *= 0.99;
         self.rot += self.vel[0] * 0.5;
-        self.vel = [self.vel[0] * 0.92, self.vel[1] * 0.92];
-        self.scale -= 0.04;
+        self.scale -= 0.01;
+        if !self.gravity {
+            self.vel = [self.vel[0] * 0.92, self.vel[1] * 0.92];
+            self.scale -= 0.04;
+        }
         self.scale >= 0.1
     }
 
@@ -304,6 +449,12 @@ impl Dust {
         let k = self.kind as u32;
         [k % 100 * 10, self.variant * 10 + k / 100 * 30, 8, 8]
     }
+}
+
+/// Torch flames and the like, which `NewDust` starts slow and small and
+/// which fall gently.
+pub fn flame(kind: u16) -> bool {
+    matches!(kind, 6 | 29 | 59..=65 | 75 | 135 | 158 | 169 | 228 | 242 | 269 | 279 | 293..=298 | 302 | 307 | 310)
 }
 
 fn len(v: V2) -> f32 {
@@ -392,7 +543,7 @@ mod tests {
 
     #[test]
     fn bolt_turns_toward_a_target() {
-        let mut b = Bolt::new([0.0, 0.0], [6.0, 0.0], 15, 3.25);
+        let mut b = Bolt::new(121, [0.0, 0.0], [6.0, 0.0], 15, 3.25, None);
         let mut closest = f32::MAX;
         for _ in 0..60 {
             b.home([0.0, 200.0]);
@@ -402,6 +553,48 @@ mod tests {
             assert!(len(b.vel) < 9.0, "grows while under 8: {:?}", b.vel);
         }
         assert!(closest < 16.0, "{closest}");
+    }
+
+    #[test]
+    fn each_gem_has_its_feature() {
+        assert_eq!(staff_bolt(743), Some(125));
+        assert_eq!(staff_bolt(745), None);
+        let ruby = Bolt::new(125, [0.0; 2], [1.0, 0.0], 9, 1.0, None);
+        assert_eq!((ruby.penetrate, ruby.armor_pen, ruby.dust()), (1, 4, 90));
+        assert_eq!(Features::of(125).damage_multiplier(), 0.5);
+        assert_eq!(Features::of(123).damage_multiplier(), 0.6);
+        let diamond = Bolt::new(126, [0.0; 2], [1.0, 0.0], 9, 1.0, None);
+        assert_eq!(diamond.penetrate, 2);
+        assert_eq!(diamond.hitboxes(), [[-39.0, -39.0, 78.0, 78.0]]);
+
+        // Emerald: slows down, then fades out.
+        let mut e = Bolt::new(124, [0.0; 2], [30.0, 0.0], 9, 1.0, None);
+        assert_eq!((e.penetrate, e.time_left), (2, 600));
+        let mut ticks = 0;
+        while e.slow_down() {
+            ticks += 1;
+        }
+        assert!(len(e.vel) <= 0.1 && (300..400).contains(&ticks), "{ticks}");
+
+        // Sapphire: the two weave on either side of the line.
+        let mut a = Bolt::new(123, [0.0; 2], [5.0, 0.0], 9, 1.0, Some(0.0));
+        let mut b = Bolt::new(123, [0.0; 2], [5.0, 0.0], 9, 1.0, Some(1.0));
+        for _ in 0..5 {
+            a.swirl();
+            b.swirl();
+        }
+        let (ya, yb) = (a.pos[1] + 5.0, b.pos[1] + 5.0);
+        assert!(ya > 0.0 && (ya + yb).abs() < 1e-3, "{ya} {yb}");
+    }
+
+    #[test]
+    fn torch_flames_fall_slowly() {
+        let mut d = Dust::new(6, [0.0; 2], 4, 4, [0.0; 2], 1.0, |n| n / 2);
+        assert!((d.scale - 0.7).abs() < 1e-6);
+        d.gravity = true;
+        d.vel = [0.0; 2];
+        d.update();
+        assert!((d.vel[1] - 0.05).abs() < 1e-6);
     }
 
     #[test]
