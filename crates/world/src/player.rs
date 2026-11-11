@@ -41,11 +41,21 @@ pub struct Moves {
     pub no_fall: bool,
     /// `slowFall`: a third of the gravity.
     pub slow_fall: bool,
+    /// `waterWalk`: stands on the top of liquids.
+    pub water_walk: bool,
 }
 
 impl Default for Moves {
     fn default() -> Self {
-        Self { move_speed: 1.0, acc_run: MAX_RUN, jump_boost: false, cloud: false, no_fall: false, slow_fall: false }
+        Self {
+            move_speed: 1.0,
+            acc_run: MAX_RUN,
+            jump_boost: false,
+            cloud: false,
+            no_fall: false,
+            slow_fall: false,
+            water_walk: false,
+        }
     }
 }
 
@@ -76,6 +86,8 @@ pub struct Player {
     cloud_ready: bool,
     /// The last tick jumped off the cloud, for its puff.
     pub cloud_jumped: bool,
+    /// `isPerformingJump_Cloud`: up from the cloud until landing.
+    pub cloud_jumping: bool,
     /// `fallStart`: the row the fall started from.
     fall_start: i32,
     /// Fall damage taken on landing this tick, before defense.
@@ -112,6 +124,7 @@ impl Player {
             moves: Moves::default(),
             cloud_ready: false,
             cloud_jumped: false,
+            cloud_jumping: false,
             fall_start: (y / 16.0) as i32,
             fall_damage: 0,
         }
@@ -181,7 +194,15 @@ impl Player {
 
         let fall_through = input.down;
         let before = [self.vx, self.vy];
-        let hit = self.at_box(world).tiles(before, fall_through, false);
+        let mut hit = self.at_box(world).tiles(before, fall_through, false);
+        if self.moves.water_walk && !fall_through {
+            // `Collision.WaterCollision`: the top of a liquid holds like a platform.
+            let vy = collision::water_top(world, self.pos(), hit.vel, SIZE);
+            if vy != hit.vel[1] {
+                self.fall_start = (self.y / 16.0) as i32;
+            }
+            hit.vel[1] = vy;
+        }
         let mut moved = hit.vel;
         if let Some(kind) = self.wet {
             let k = match kind {
@@ -300,6 +321,7 @@ impl Player {
         if self.vy == 0.0 {
             // `RefreshDoubleJumps`.
             self.cloud_ready = self.moves.cloud;
+            self.cloud_jumping = false;
         }
         if input.jump {
             if self.jump > 0 {
@@ -317,6 +339,7 @@ impl Player {
                 } else {
                     self.cloud_ready = false;
                     self.cloud_jumped = true;
+                    self.cloud_jumping = true;
                     self.jump = (height as f64 * 0.75) as i32;
                 }
             }
@@ -507,5 +530,20 @@ mod tests {
         let mut p = Player::at(100.0, 30.0 * 16.0 - HEIGHT);
         run(&mut p, &w, Input::default(), 2.0);
         assert_eq!(p.fall_damage, 0);
+    }
+
+    #[test]
+    fn water_walking_stands_on_the_surface() {
+        let w = cells(|_, y| match y {
+            30..50 => Tile { tile: NO_TILE, liquid: 255, ..Tile::default() },
+            50.. => Tile { tile: 1, frame_x: 0, frame_y: 0, ..Tile::default() },
+            _ => Tile { tile: NO_TILE, ..Tile::default() },
+        });
+        let mut p = Player::at(100.0, 0.0);
+        p.moves.water_walk = true;
+        run(&mut p, &w, Input::default(), 2.0);
+        assert_eq!((p.y + HEIGHT, p.vy, p.wet), (30.0 * 16.0, 0.0, None));
+        run(&mut p, &w, Input { down: true, ..Input::default() }, 1.0);
+        assert!(p.wet.is_some(), "down sinks in");
     }
 }

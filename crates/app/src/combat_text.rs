@@ -6,6 +6,7 @@ pub const DAMAGED_HOSTILE: [u8; 4] = [255, 160, 80, 255];
 pub const DAMAGED_HOSTILE_CRIT: [u8; 4] = [255, 100, 30, 255];
 pub const HEAL_LIFE: [u8; 4] = [100, 255, 100, 255];
 pub const HEAL_MANA: [u8; 4] = [100, 100, 255, 255];
+pub const LIFE_REGEN: [u8; 4] = [255, 60, 70, 255];
 /// `OthersDamagedHostile`: what another player's hits show, at 40%.
 pub fn others(c: [u8; 4]) -> [u8; 4] {
     c.map(|v| (v as f32 * 0.4) as u8)
@@ -27,6 +28,8 @@ pub struct CombatText {
     pub color: [u8; 4],
     life: i32,
     pub crit: bool,
+    /// Damage over time: falls back down, short and small.
+    dot: bool,
 }
 
 /// `NewText` over `rect` (`x, y, w, h`); `jitter` gives `Main.rand.Next(lo, hi + 1)`.
@@ -55,6 +58,7 @@ pub fn spawn(
         color,
         life: 60,
         crit,
+        dot: false,
     };
     if crit {
         t.life *= 2;
@@ -68,6 +72,21 @@ pub fn spawn(
     texts.push(t);
 }
 
+/// `NewText` with `dot`: damage over time, thrown up at 4 and lasting 40 ticks.
+pub fn spawn_dot(
+    texts: &mut Vec<CombatText>,
+    rect: [f32; 4],
+    color: [u8; 4],
+    amount: i32,
+    jitter: impl FnMut(i32, i32) -> i32,
+) {
+    let n = texts.len();
+    spawn(texts, rect, color, amount, false, jitter);
+    if let Some(t) = texts.get_mut(n) {
+        (t.dot, t.velocity[1], t.life) = (true, -4.0, 40);
+    }
+}
+
 /// `UpdateCombatText`: one tick of every text; gone ones are dropped.
 pub fn update(texts: &mut Vec<CombatText>) {
     texts.retain_mut(|t| {
@@ -78,9 +97,13 @@ pub fn update(texts: &mut Vec<CombatText>) {
         if t.alpha >= 1.0 {
             (t.alpha, t.alpha_up) = (1.0, false);
         }
-        t.velocity[1] *= 0.92;
-        if t.crit {
+        if t.dot {
+            t.velocity[1] += 0.15;
+        } else {
             t.velocity[1] *= 0.92;
+            if t.crit {
+                t.velocity[1] *= 0.92;
+            }
         }
         t.velocity[0] *= 0.93;
         t.center = [t.center[0] + t.velocity[0], t.center[1] + t.velocity[1]];
@@ -99,6 +122,10 @@ pub fn update(texts: &mut Vec<CombatText>) {
         }
         if t.crit {
             t.rotation += if t.velocity[0] < 0.0 { 0.001 } else { -0.001 };
+        }
+        if t.dot {
+            t.scale = (t.scale + 0.5).min(0.8);
+            return true;
         }
         t.scale = (t.scale + 0.1).min(1.0);
         true

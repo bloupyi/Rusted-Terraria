@@ -293,6 +293,18 @@ impl App {
         }
         let life = game.texts.get("LegacyInterface.0").unwrap_or("");
         self.hud.draw_life(&mut p, size.x, game.hp.max(0), game.life_max, life);
+        // `DrawInterface_Resources_Breath`: over the player's head, or under it with the inventory open.
+        let [x, y] = game.player.drawn(game.tick_acc);
+        let mut top = Vec2::new(x + player::WIDTH / 2.0, y + game.player.gfx_off_y);
+        let low = self.inventory_open && size.y < 1000.0;
+        if low {
+            top.y += player::HEIGHT - 20.0;
+        }
+        let mut at = (top - self.camera.center) * z + size * 0.5;
+        if !low {
+            at.y -= 100.0;
+        }
+        self.hud.draw_breath(&mut p, at.into(), game.breath, game::BREATH_MAX);
         let (min, sec) =
             (game.texts.get("Misc.ShortMinutes").unwrap_or("m"), game.texts.get("Misc.ShortSeconds").unwrap_or("s"));
         // `DrawInterface_Resources_Buffs` runs while the inventory is closed.
@@ -579,7 +591,9 @@ impl ApplicationHandler for App {
                         self.right_fresh = down;
                         // `TryRemovingBuff`: a right click on an icon ends the buff.
                         if let Some(i) = self.buff_under_cursor().filter(|_| down) {
-                            self.game.buffs.remove(i);
+                            if !equip::is_debuff(self.game.buffs[i].kind) {
+                                self.game.buffs.remove(i);
+                            }
                             self.right_fresh = false;
                         }
                     }

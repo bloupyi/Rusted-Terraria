@@ -677,6 +677,28 @@ impl Hud {
         }
     }
 
+    /// The bubbles of `DrawInterface_Resources_Breath`: one per 20 breath,
+    /// 26 apart from 125 left of `at`, the last ones fading and shrinking.
+    pub fn draw_breath(&self, p: &mut Painter, at: [f32; 2], breath: i32, max: i32) {
+        if breath >= max {
+            return;
+        }
+        let Some(&SheetRef { h, .. }) = p.sheets.get("Bubble") else { return };
+        let h = h as f32;
+        for i in 1..=max / 20 {
+            let (alpha, scale) = if breath >= i * 20 {
+                (255, 1.0)
+            } else {
+                let part = (breath - (i - 1) * 20) as f32 / 20.0;
+                (((30.0 + 225.0 * part) as i32).max(30), (part / 4.0 + 0.75).max(0.75))
+            };
+            let (dx, dy) = if i > 10 { (-260.0, 26.0) } else { (0.0, 0.0) };
+            let pos = [at[0] + 26.0 * (i - 1) as f32 + dx - 125.0, at[1] + 32.0 + (h - h * scale) / 2.0 + dy];
+            let v = alpha as f32 / 255.0;
+            p.image("Bubble", pos, [0.0; 2], scale, [v; 4]);
+        }
+    }
+
     /// `ClassicPlayerResourcesDisplaySet.DrawMana`: a star per 20 mana under `label` ("Mana").
     pub fn draw_mana(&self, p: &mut Painter, screen_w: f32, mana: i32, mana_max: i32, label: &str) {
         let anchor = screen_w - 800.0;

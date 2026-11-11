@@ -110,11 +110,13 @@ pub struct Mana {
     /// `manaRegenDelay` and `manaRegenCount`.
     delay: f32,
     count: i32,
+    /// `manaRegenBuff`: regenerates as if standing still, at full rate, after a short delay.
+    pub buff: bool,
 }
 
 impl Default for Mana {
     fn default() -> Self {
-        Self { cur: MAX_MANA, max: MAX_MANA, delay: 0.0, count: 0 }
+        Self { cur: MAX_MANA, max: MAX_MANA, delay: 0.0, count: 0, buff: false }
     }
 }
 
@@ -132,11 +134,15 @@ impl Mana {
     pub fn delay_regen(&mut self) {
         let empty = 1.0 - self.cur as f32 / self.max as f32;
         self.delay = ((empty * 60.0 * 4.0 + 45.0) * 0.7) as i32 as f32;
+        if self.buff {
+            self.delay = self.delay.min(20.0);
+        }
     }
 
     /// `UpdateManaRegen`: once the delay runs out, a point every 120 counts,
     /// twice as fast standing still. True when the stars just filled up.
     pub fn regen(&mut self, still: bool) -> bool {
+        let still = still || self.buff;
         if self.delay > 0.0 {
             self.delay -= 1.0;
             if still {
@@ -146,7 +152,7 @@ impl Mana {
         let regen = if self.delay <= 0.0 {
             let base = self.max / 3 + 1;
             let regen = if still { base * 2 } else { base };
-            let k = 0.5 + 0.5 * (self.cur as f32 / self.max as f32);
+            let k = if self.buff { 1.0 } else { 0.5 + 0.5 * (self.cur as f32 / self.max as f32) };
             ((regen as f32 * k) as i32).max(2)
         } else {
             0
@@ -517,7 +523,7 @@ mod tests {
         // ((1 - 6/20) * 240 + 45) * 0.7 = 149
         assert_eq!(m.delay, 149.0);
         let ticks = |still: bool| {
-            let mut m = Mana { cur: 6, max: MAX_MANA, delay: 0.0, count: 0 };
+            let mut m = Mana { cur: 6, max: MAX_MANA, delay: 0.0, count: 0, buff: false };
             m.delay = 149.0;
             let mut t = 0;
             while !m.regen(still) {

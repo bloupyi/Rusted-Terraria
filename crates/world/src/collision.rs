@@ -3,6 +3,7 @@
 
 use crate::tile_sets::{PLATFORMS, SOLID, SOLID_TOP};
 use crate::{flags, World, NO_TILE};
+use formats::wld::Liquid;
 
 pub type V2 = [f32; 2];
 
@@ -498,6 +499,77 @@ pub fn wet(world: &World, pos: V2, size: [i32; 2]) -> Option<u8> {
         }
     }
     None
+}
+
+/// The liquid kind at a cell.
+fn liquid_kind(world: &World, x: i64, y: i64) -> u8 {
+    let (c, k) = world.cell(x as u32, y as u32);
+    c.liquid_kind[k]
+}
+
+/// Whether a box `[x, y, w, h]` overlaps the liquid of cells around `pos`
+/// accepted by `keep`, each liquid's top lowered by how little it holds.
+fn liquid_hit(world: &World, pos: V2, size: [i32; 2], rect: [f32; 4], keep: impl Fn(i64, i64, i64) -> bool) -> bool {
+    let (x0, x1, y0, y1) = Box { world, pos, size }.span();
+    let [rx, ry, rw, rh] = rect;
+    for i in x0..x1 {
+        for j in y0..y1 {
+            let amount = world.liquid(i, j);
+            if amount == 0 || !keep(i, j, y0) {
+                continue;
+            }
+            let gap = (256 - amount as i32) as f32 / 32.0;
+            let (x, y, h) = (i as f32 * 16.0, j as f32 * 16.0 + gap * 2.0, 16 - (gap * 2.0) as i32);
+            if rx + rw > x && rx < x + 16.0 && ry + rh > y && ry < y + h as f32 {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// `Collision.LavaCollision`: lava anywhere over the box.
+pub fn lava(world: &World, pos: V2, size: [i32; 2]) -> bool {
+    let rect = [pos[0], pos[1], size[0] as f32, size[1] as f32];
+    liquid_hit(world, pos, size, rect, |i, j, _| liquid_kind(world, i, j) == Liquid::Lava as u8)
+}
+
+/// `Collision.DrownCollision` the right way up: water or honey over a 10 by
+/// 12 box at the top of the head. A solid block in the first row checked
+/// keeps out what sits in it.
+pub fn drown(world: &World, pos: V2, size: [i32; 2]) -> bool {
+    let (mw, mh) = (10.min(size[0]), 12.min(size[1]));
+    let rect = [pos[0] + (size[0] / 2) as f32 - (mw / 2) as f32, pos[1] - 2.0, mw as f32, mh as f32];
+    liquid_hit(world, pos, size, rect, |i, j, top| {
+        let k = liquid_kind(world, i, j);
+        let c = cell(world, i, j);
+        k != Liquid::Lava as u8
+            && k != Liquid::Shimmer as u8
+            && (j != top || world.tile(i, j) == NO_TILE || !c.solid() || c.solid_top())
+    })
+}
+
+/// `Collision.WaterCollision` with lava walked on too: the fall `vel[1]`
+/// cut short at the top of any liquid under the box's feet.
+pub fn water_top(world: &World, pos: V2, vel: V2, size: [i32; 2]) -> f32 {
+    let (x0, x1, y0, y1) = Box { world, pos, size }.span();
+    let [w, h] = size.map(|k| k as f32);
+    let (nx, ny) = (pos[0] + vel[0], pos[1] + vel[1]);
+    let mut vy = vel[1];
+    for i in x0..x1 {
+        for j in y0..y1 {
+            let amount = world.liquid(i, j);
+            if amount == 0 || j == 0 || world.liquid(i, j - 1) != 0 {
+                continue;
+            }
+            let lh = (amount / 32 * 2 + 2) as f32;
+            let (x, y) = (i as f32 * 16.0, j as f32 * 16.0 + 16.0 - lh);
+            if nx + w > x && nx < x + 16.0 && ny + h > y && ny < y + lh && pos[1] + h <= y {
+                vy = y - (pos[1] + h);
+            }
+        }
+    }
+    vy
 }
 
 /// `WorldGen.SolidTile`: a whole, flat, solid block.

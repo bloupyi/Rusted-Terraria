@@ -70,6 +70,8 @@ const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
+/// `breathMax`.
+pub const BREATH_MAX: i32 = 200;
 /// `statLifeMax` to start with.
 pub const MAX_HP: i32 = 100;
 const MAX_MOBS: usize = 5;
@@ -130,6 +132,7 @@ pub fn sprite_sheets() -> Vec<String> {
             "Inventory_Back14",
             "Heart",
             "Mana",
+            "Bubble",
         ]
         .map(String::from),
     );
@@ -208,6 +211,11 @@ pub struct Game {
     pub effects: Effects,
     /// Ticks without damage after a hit.
     immune: i32,
+    /// `hurtCooldowns[Lava]`: ticks before lava burns again.
+    lava_cd: i32,
+    /// `breath` out of `BREATH_MAX`, and `breathCD`.
+    pub breath: i32,
+    breath_cd: i32,
     /// `lifeRegenTime` and `lifeRegenCount`.
     regen_time: f32,
     regen_count: i32,
@@ -312,6 +320,9 @@ impl Game {
             buffs: Vec::new(),
             effects: equip::effects([], &[]),
             immune: 0,
+            lava_cd: 0,
+            breath: BREATH_MAX,
+            breath_cd: 0,
             regen_time: 0.0,
             regen_count: 0,
             potion_delay: 0,
@@ -426,12 +437,22 @@ impl Game {
             if let Some(input) = input {
                 let facing = self.player.facing_left;
                 self.effects = equip::effects(self.inventory.accessories(), &self.buffs);
+                if self.effects.lava_immune {
+                    self.buffs.retain(|b| b.kind != equip::ON_FIRE);
+                }
                 equip::tick_buffs(&mut self.buffs);
                 self.player.moves = self.effects.moves;
+                self.mana.buff = self.effects.mana_regen;
+                if light::set_night_vision(self.effects.night_vision) {
+                    self.stale.iter_mut().for_each(|s| *s |= STALE_LIGHT);
+                }
                 self.player.tick(&self.world, input);
                 if self.player.fall_damage > 0 {
-                    self.hurt(self.player.fall_damage, 0.0);
+                    self.hurt(self.player.fall_damage, 0.0, false);
                 }
+                self.breathe();
+                self.burn();
+                self.cloud_puff();
                 if self.item_animation > 0 && !self.held_tool().use_turn {
                     self.player.facing_left = facing;
                 }
@@ -491,9 +512,17 @@ impl Game {
     /// Spawns and despawns monsters; spawns only when `fight`.
     fn update_mobs(&mut self, dt: f32, fight: bool) {
         self.spawn_acc += dt;
-        if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
+        // `SpawnNPC`'s `spawnRate` and `maxSpawns` for invisibility and battle.
+        let (mut every, mut max) = (SPAWN_EVERY, MAX_MOBS);
+        if self.effects.invis {
+            (every, max) = (every * 1.2, (max as f32 * 0.8) as usize);
+        }
+        if self.effects.battle {
+            (every, max) = (every * 0.5, max * 2);
+        }
+        if fight && !self.client && self.spawn_acc >= every {
             self.spawn_acc = 0.0;
-            if self.mobs.iter().filter(|m| !m.kind.friendly() && m.kind != Kind::EyeBoss).count() < MAX_MOBS {
+            if self.mobs.iter().filter(|m| !m.kind.friendly() && m.kind != Kind::EyeBoss).count() < max {
                 self.try_spawn();
             }
             if self.mobs.iter().any(|m| m.kind == Kind::Zombie) && self.random().is_multiple_of(4) {
@@ -777,32 +806,116 @@ impl Game {
             return;
         }
         let p = self.player.body;
-        let Some(m) = self.mobs.iter().find(|m| m.kind.damage() > 0 && m.body.touches(&p)) else { return };
+        let Some(i) = self.mobs.iter().position(|m| m.kind.damage() > 0 && m.body.touches(&p)) else { return };
+        let m = &self.mobs[i];
         let dir = if m.body.center().0 < p.center().0 { 1.0 } else { -1.0 };
         let damage = self.damage_var(m.kind.damage());
-        self.hurt(damage, dir);
+        if self.effects.thorns > 0.0 {
+            // Thorns hit back first, before the player's own hurt.
+            let back = ((damage as f32 * self.effects.thorns) as i32).min(1000);
+            self.strike(i, back, 10.0, -dir, 0);
+        }
+        self.hurt(damage, dir, false);
     }
 
     /// `Player.Hurt`: `damage` less half the defense, then 40 ticks without
-    /// damage and, from a side (`dir` not 0), a knockback away from it.
-    fn hurt(&mut self, damage: i32, dir: f32) {
-        if self.immune > 0 {
-            return;
+    /// damage of that kind (`lava`, or any other) and, from a side (`dir` not
+    /// 0), a knockback away from it. The damage taken, 0 while immune.
+    fn hurt(&mut self, damage: i32, dir: f32, lava: bool) -> i32 {
+        if (lava && self.lava_cd > 0) || (!lava && self.immune > 0) {
+            return 0;
         }
         let damage = armor::damage_taken(damage, self.defense());
         self.hp -= damage;
         self.regen_time = 0.0;
         let b = self.player.body;
         self.text_at([b.x, b.y, b.w, b.h], combat_text::DAMAGED_FRIENDLY, damage, false);
-        self.immune = if damage == 1 { 20 } else { 40 };
+        let time = if damage == 1 { 20 } else { 40 };
+        if lava {
+            self.lava_cd = time;
+        } else {
+            self.immune = time;
+        }
         if dir != 0.0 {
             (self.player.vx, self.player.vy) = (4.5 * dir, -3.5);
         }
         self.sfx.push(if self.hp <= 0 { Sfx::PlayerKilled } else { Sfx::PlayerHit });
         if self.hp <= 0 {
-            self.hp = self.life_max;
-            self.respawn();
+            self.die();
         }
+        damage
+    }
+
+    /// `KillMe` and the respawn after: full life and breath, buffs gone.
+    fn die(&mut self) {
+        self.hp = self.life_max;
+        self.breath = BREATH_MAX;
+        self.buffs.clear();
+        self.respawn();
+    }
+
+    /// `CheckDrowning`: under water without gills a breath goes every 7
+    /// ticks, then 2 life a time; out of it breath comes back 3 a tick.
+    fn breathe(&mut self) {
+        let b = self.player.body;
+        let under = !self.effects.gills && world::collision::drown(&self.world, [b.x, b.y], [b.w as i32, b.h as i32]);
+        if !under {
+            self.breath = (self.breath + 3).min(BREATH_MAX);
+            self.breath_cd = 0;
+            return;
+        }
+        self.breath_cd += 1;
+        if self.breath_cd < 7 {
+            return;
+        }
+        self.breath_cd = 0;
+        self.breath -= 1;
+        if self.breath == 0 {
+            self.sfx.push(Sfx::Drown);
+        }
+        if self.breath <= 0 {
+            self.regen_time = 0.0;
+            self.breath = 0;
+            self.hp -= 2;
+            if self.hp <= 0 {
+                self.sfx.push(Sfx::PlayerKilled);
+                self.die();
+            }
+        }
+    }
+
+    /// Lava without `lavaImmune`: 80 damage a hit and 7 seconds on fire.
+    fn burn(&mut self) {
+        self.lava_cd = (self.lava_cd - 1).max(0);
+        let b = self.player.body;
+        let h = b.h as i32 - if self.effects.moves.water_walk { 6 } else { 0 };
+        if self.effects.lava_immune || !world::collision::lava(&self.world, [b.x, b.y], [b.w as i32, h]) {
+            return;
+        }
+        if self.hurt(80, 0.0, true) > 0 {
+            equip::add_buff(&mut self.buffs, equip::ON_FIRE, 420);
+        }
+    }
+
+    /// The cloud in a bottle's puff (`JumpMovement`) and its trail while rising (`UpdateJumpHeight`'s after-effects).
+    fn cloud_puff(&mut self) {
+        let p = self.player;
+        if p.cloud_jumped {
+            self.sfx.push(Sfx::DoubleJump);
+            for _ in 0..10 {
+                self.cloud_dust([p.x - 34.0, p.y + p.h - 16.0], 102, 32);
+            }
+        } else if p.cloud_jumping && p.vy < 0.0 {
+            self.cloud_dust([p.x - 4.0, p.y + p.h], p.w as i32 + 8, 4);
+        }
+    }
+
+    /// `Dust.NewDust` of type 16 thrown back from the player's motion.
+    fn cloud_dust(&mut self, at: [f32; 2], w: i32, h: i32) {
+        let (vx, vy) = (self.player.vx, self.player.vy);
+        let mut d = Dust::new(16, at, w, h, [-vx * 0.5, vy * 0.5], 1.5, |n| (self.random() % n.max(1) as u64) as i32);
+        d.vel = [d.vel[0] * 0.5 - vx * 0.1, d.vel[1] * 0.5 - vy * 0.3];
+        self.dust.push(d);
     }
 
     /// `Player.Spawn`: back at the spawn point.
@@ -838,10 +951,32 @@ impl Game {
         }
         regen *= self.life_max as f32 / 400.0 * 0.85 + 0.15;
         // `Math.Round` rounds halves to even.
-        self.regen_count += self.effects.life_regen + regen.round_ties_even() as i32;
+        let mut life_regen = self.effects.life_regen;
+        if self.effects.on_fire {
+            life_regen = life_regen.min(0) - 8;
+            self.regen_time = 0.0;
+            regen = 0.0;
+        }
+        self.regen_count += life_regen + regen.round_ties_even() as i32;
         while self.regen_count >= 120 {
             self.regen_count -= 120;
             self.hp = (self.hp + 1).min(self.life_max);
+        }
+        // `HurtLifeRegen`: a loss of up to 4 at a time, shown as it falls.
+        while self.regen_count <= -120 {
+            let n = (self.regen_count / -120).min(4);
+            self.regen_count += 120 * n;
+            self.hp -= n;
+            let b = self.player.body;
+            let mut texts = std::mem::take(&mut self.combat_text);
+            combat_text::spawn_dot(&mut texts, [b.x, b.y, b.w, b.h], combat_text::LIFE_REGEN, n, |lo, hi| {
+                lo + (self.random() % (hi - lo + 1) as u64) as i32
+            });
+            self.combat_text = texts;
+            if self.hp <= 0 {
+                self.sfx.push(Sfx::PlayerKilled);
+                self.die();
+            }
         }
     }
 
@@ -1539,7 +1674,9 @@ impl Game {
             let a = (self.random() % 10_000) as f32 / 10_000.0 * std::f32::consts::TAU;
             at = [at[0] + a.cos() * 12.0, at[1] + a.sin() * 12.0];
         }
-        let damage = (s.damage as f32 * f.damage_multiplier()) as i32;
+        // `GetWeaponDamage` with `magicDamage`, then the staff's own cut.
+        let weapon = (s.damage as f32 * self.effects.magic_damage + 5e-6) as i32;
+        let damage = (weapon as f32 * f.damage_multiplier()) as i32;
         let twins: &[Option<f32>] = if f.twins { &[Some(0.0), Some(1.0)] } else { &[None] };
         for &twin in twins {
             self.bolts.push(Bolt::new(kind, at, vel, damage, s.knock_back, twin));
@@ -1565,9 +1702,14 @@ impl Game {
         let dir = if self.player.facing_left { -1.0 } else { 1.0 };
         let (dx, dy) = (wx - cx, wy - cy);
         let l = (dx * dx + dy * dy).sqrt();
-        let speed = bow.shoot_speed + arrow.shoot_speed;
+        let mut speed = bow.shoot_speed + arrow.shoot_speed;
+        if self.effects.archery && speed < 20.0 {
+            speed = (speed * 1.2).min(20.0);
+        }
         let vel = if l == 0.0 { [dir * speed, 0.0] } else { [dx * speed / l, dy * speed / l] };
-        let damage = bow.damage as i32 + arrow.damage as i32;
+        // `GetWeaponDamage` and `PickAmmo`, both with `arrowDamage`.
+        let k = self.effects.arrow_damage;
+        let damage = (bow.damage as f32 * k + 5e-6) as i32 + (arrow.damage as f32 * k) as i32;
         self.arrows.push(Arrow::new([cx, cy], vel, damage, bow.knock_back + arrow.knock_back));
         self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
     }
@@ -3156,10 +3298,10 @@ impl Game {
         // Moving lights: relight around where they were and where they are.
         let glows = self.glows();
         if glows != self.glows {
-            let (cw, ch) = (self.world.chunks_x, self.world.chunks_y);
+            let (cw, ch, reach) = (self.world.chunks_x, self.world.chunks_y, light::reach());
             for &(x, y, _) in self.glows.iter().chain(&glows) {
-                let (x0, y0) = (x.saturating_sub(light::REACH) / CHUNK, y.saturating_sub(light::REACH) / CHUNK);
-                let (x1, y1) = (((x + light::REACH) / CHUNK + 1).min(cw), ((y + light::REACH) / CHUNK + 1).min(ch));
+                let (x0, y0) = (x.saturating_sub(reach) / CHUNK, y.saturating_sub(reach) / CHUNK);
+                let (x1, y1) = (((x + reach) / CHUNK + 1).min(cw), ((y + reach) / CHUNK + 1).min(ch));
                 for cy in y0..y1 {
                     for cx in x0..x1 {
                         self.stale[(cy * cw + cx) as usize] |= STALE_LIGHT;
@@ -3627,6 +3769,77 @@ mod tests {
         // 30 rows down less the player's height: 2 rows past the safe 25.
         assert_eq!(fall(None), 20);
         assert_eq!(fall(Some(158)), 0);
+    }
+
+    fn flood(g: &mut Game, kind: Liquid) {
+        for x in 10..25 {
+            for y in 5..20 {
+                g.world.set_liquid(x, y, 255, kind as u8);
+            }
+        }
+    }
+
+    #[test]
+    fn breath_runs_out_under_water_unless_gills() {
+        let mut g = game();
+        flood(&mut g, Liquid::Water);
+        for _ in 0..7 * 10 {
+            g.breathe();
+        }
+        assert_eq!((g.breath, g.hp), (BREATH_MAX - 10, MAX_HP));
+        g.breath = 1;
+        for _ in 0..7 * 3 {
+            g.breathe();
+        }
+        assert_eq!((g.breath, g.hp), (0, MAX_HP - 6), "2 life each time from the last breath");
+        assert!(g.sfx.contains(&Sfx::Drown));
+        g.effects.gills = true;
+        g.breathe();
+        assert_eq!(g.breath, 3, "gills breathe");
+        g.effects.gills = false;
+        flood(&mut g, Liquid::Lava);
+        for _ in 0..100 {
+            g.breathe();
+        }
+        assert_eq!(g.breath, BREATH_MAX, "lava does not drown");
+    }
+
+    #[test]
+    fn lava_burns_and_sets_on_fire_unless_obsidian_skin() {
+        let mut g = game();
+        flood(&mut g, Liquid::Lava);
+        g.burn();
+        assert_eq!(g.hp, MAX_HP - 80);
+        assert_eq!(g.buffs, [Buff { kind: equip::ON_FIRE, time: 420 }]);
+        g.burn();
+        assert_eq!(g.hp, MAX_HP - 80, "a cooldown of its own");
+        g.hp = MAX_HP;
+        g.effects = equip::effects([], &g.buffs);
+        assert!(g.effects.on_fire);
+        g.regen_count = 0;
+        for _ in 0..60 {
+            g.life_regen();
+        }
+        assert_eq!(g.hp, MAX_HP - 4, "8 a tick of 120: 4 life a second");
+        assert!(g.combat_text.iter().any(|t| t.color == combat_text::LIFE_REGEN));
+        let mut g = game();
+        flood(&mut g, Liquid::Lava);
+        g.effects = equip::effects([], &[Buff { kind: 1, time: 10 }]);
+        g.burn();
+        assert_eq!((g.hp, g.buffs.len()), (MAX_HP, 0));
+    }
+
+    #[test]
+    fn thorns_hit_back() {
+        let mut g = game();
+        let (x, y) = (g.player.center().0, g.player.y + player::HEIGHT);
+        g.mobs.push(Mob::new(Kind::Zombie, x, y));
+        let i = g.mobs.len() - 1;
+        let before = g.mobs[i].hp;
+        g.effects.thorns = 1.0;
+        g.contact_damage();
+        assert!(g.hp < MAX_HP);
+        assert!(g.mobs.iter().all(|m| m.kind != Kind::Zombie) || g.mobs[i].hp < before);
     }
 
     #[test]

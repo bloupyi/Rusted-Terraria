@@ -44,6 +44,8 @@ pub enum Sfx {
     MenuClose,
     LifeCrystal,
     Mirror,
+    Drown,
+    DoubleJump,
 }
 
 impl Sfx {
@@ -79,6 +81,8 @@ impl Sfx {
             Sfx::Bow => ("Item_5", 1),
             Sfx::LifeCrystal => ("Item_4", 1),
             Sfx::Mirror => ("Item_6", 1),
+            Sfx::Drown => ("Drown", 1),
+            Sfx::DoubleJump => ("Double_Jump", 1),
         }
     }
 }
