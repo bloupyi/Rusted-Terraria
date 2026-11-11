@@ -16,7 +16,7 @@ use formats::wld::Env;
 use world::light::{self, Glow, Rect};
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::mining::{self, HitTiles, Place, Target};
-use world::mob::{Kind, Mob};
+use world::mob::{Kind, Mob, Sky};
 use world::player::{self, Input, Player};
 use world::{Liquid, World, CHUNK, NO_TILE};
 
@@ -319,6 +319,9 @@ impl Game {
                     self.sfx.push(Sfx::MaxMana);
                 }
             }
+            if !self.client {
+                self.tick_mobs();
+            }
             self.update_bolts();
             self.update_arrows();
             self.update_stars();
@@ -361,7 +364,7 @@ impl Game {
         self.rng
     }
 
-    /// Spawns, moves and despawns monsters; contact hurts the player when `fight`.
+    /// Spawns and despawns monsters; spawns only when `fight`.
     fn update_mobs(&mut self, dt: f32, fight: bool) {
         self.spawn_acc += dt;
         if fight && !self.client && self.spawn_acc >= SPAWN_EVERY {
@@ -377,10 +380,6 @@ impl Game {
             let players: Vec<(f32, f32)> =
                 std::iter::once(self.player.center()).chain(self.others.iter().map(|(_, p)| p.center())).collect();
             let dist = |m: &Mob, p: &(f32, f32)| (m.body.center().0 - p.0).abs();
-            for m in &mut self.mobs {
-                let near = *players.iter().min_by(|a, b| dist(m, a).total_cmp(&dist(m, b))).unwrap();
-                m.update(&self.world, near, dt);
-            }
             let height = self.world.height as f32 * 16.0;
             // The boss leaves at dawn; the guide never leaves.
             let day = self.time < DAYTIME;
@@ -390,6 +389,20 @@ impl Game {
                         && m.body.y < height
                         && !(day && m.kind == Kind::EyeBoss))
             });
+        }
+    }
+
+    /// One tick of every monster, each after the player nearest to it.
+    fn tick_mobs(&mut self) {
+        let players: Vec<[f32; 4]> = std::iter::once(&self.player)
+            .chain(self.others.iter().map(|(_, p)| p))
+            .map(|p| [p.x, p.y, p.w, p.h])
+            .collect();
+        let sky = Sky { day: self.time < DAYTIME, surface: self.env.world_surface as f32 };
+        let dist = |m: &Mob, p: &[f32; 4]| (m.body.center().0 - (p[0] + p[2] / 2.0)).abs();
+        for m in &mut self.mobs {
+            let near = *players.iter().min_by(|a, b| dist(m, a).total_cmp(&dist(m, b))).unwrap();
+            m.tick(&self.world, near, sky);
         }
     }
 
@@ -705,11 +718,17 @@ impl Game {
                     .map(|s| {
                         let kind = Kind::from_u8(s.kind).unwrap_or(Kind::Slime);
                         let mut m = Mob::new(kind, 0.0, 0.0);
-                        // Grounded while the snapshot keeps it at the same height.
-                        let old = self.mobs.iter().find(|o| o.kind == kind && (o.body.x - s.x).abs() < 16.0);
-                        m.body.on_ground = old.is_some_and(|o| o.body.y == s.y);
-                        m.timer = old.map_or(0.0, |o| o.timer + 1.0 / 60.0);
-                        (m.body.x, m.body.y, m.facing_left) = (s.x, s.y, s.facing_left);
+                        // Animated from how far it moved since the last snapshot.
+                        if let Some(o) = self.mobs.iter().find(|o| o.kind == kind && (o.body.x - s.x).abs() < 16.0) {
+                            m = *o;
+                            (m.body.vx, m.body.vy) = (s.x - o.body.x, s.y - o.body.y);
+                            m.direction = if s.facing_left { -1 } else { 1 };
+                        }
+                        m.timer += 1.0 / 60.0;
+                        (m.body.x, m.body.y) = (s.x, s.y);
+                        m.body.on_ground = m.body.vy == 0.0;
+                        m.find_frame();
+                        m.facing_left = s.facing_left;
                         m.stun = if s.hurt { 0.1 } else { 0.0 };
                         m.hp = s.hp;
                         m
@@ -2149,20 +2168,14 @@ impl Game {
     fn mob_sprites(&self, out: &mut Vec<Sprite>) {
         for m in &self.mobs {
             let b = &m.body;
-            let (cx, bottom) = (b.x + b.w / 2.0, b.y + b.h);
+            let (cx, bottom) = (b.x + b.w / 2.0, b.y + b.h + m.gfx_off_y);
             let hurt = m.stun > 0.0;
             // Monster sheets face left.
             let flags = SPRITE_LIT | if m.facing_left { 0 } else { SPRITE_FLIP };
             let (sheet, w, h, frame, color) = match m.kind {
-                Kind::Slime => {
-                    let frame = if b.on_ground { (m.timer * 4.0) as u32 % 2 } else { 1 };
-                    ("NPC_1", 32, 26, frame, [0.45, 0.95, 0.45, 1.0])
-                }
-                Kind::Zombie => {
-                    let frame = if b.on_ground { (m.timer * 8.0) as u32 % 3 } else { 2 };
-                    ("NPC_3", 38, 48, frame, [1.0; 4])
-                }
-                Kind::DemonEye => ("NPC_2", 38, 24, (m.timer * 6.0) as u32 % 2, [1.0; 4]),
+                Kind::Slime => ("NPC_1", 32, 26, m.frame, [0.45, 0.95, 0.45, 1.0]),
+                Kind::Zombie => ("NPC_3", 38, 48, m.frame, [1.0; 4]),
+                Kind::DemonEye => ("NPC_2", 38, 24, m.frame, [1.0; 4]),
                 Kind::Guide => {
                     let frame = if !b.on_ground {
                         1
@@ -2185,6 +2198,9 @@ impl Game {
                     let top = if m.kind.flies() { b.y + b.h / 2.0 - h as f32 / 2.0 } else { bottom - h as f32 + 2.0 };
                     let mut sp = Sprite::sheet([cx - w as f32 / 2.0, top], s, [0, frame * h, w, h], flags);
                     sp.color = color;
+                    if m.kind == Kind::DemonEye {
+                        (sp.rot, sp.pivot) = (m.rotation, [w as f32 / 2.0, h as f32 / 2.0]);
+                    }
                     out.push(sp);
                 }
                 None => out.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([b.x, b.y], [b.w, b.h], color) }),
