@@ -8,6 +8,7 @@ use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
 use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
+use crate::magic::{self, Bolt, Dust};
 use crate::net::{MobState, Msg};
 use crate::{backdrop, cave, item_ids, pots};
 use formats::wld::Env;
@@ -52,8 +53,6 @@ const MAX_OBJECT: usize = 64;
 /// Tiles under the ground line where the underground music starts.
 const UNDERGROUND_DEPTH: u32 = 30;
 pub const MAX_HP: i32 = 100;
-/// `statManaMax`: one star; nothing spends mana yet.
-pub const MAX_MANA: i32 = 20;
 const MAX_MOBS: usize = 5;
 const SPAWN_EVERY: f32 = 2.0;
 /// Monsters appear this many tiles to the side, and vanish past `DESPAWN`.
@@ -96,6 +95,7 @@ pub fn sprite_sheets() -> Vec<String> {
     );
     v.extend(items::sheets());
     v.extend(pots::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(magic::SHEETS.iter().map(|s| s.to_string()));
     v
 }
 
@@ -156,6 +156,12 @@ pub struct Game {
     regen_count: i32,
     /// `potionDelay`: ticks of potion sickness left.
     pub potion_delay: i32,
+    pub mana: magic::Mana,
+    /// Bolts in flight and dust in the air.
+    pub bolts: Vec<Bolt>,
+    pub dust: Vec<Dust>,
+    /// `itemRotation` while a staff is held out.
+    item_rotation: f32,
     /// Ticks before the swing can hit another monster.
     attack_cd: i32,
     /// World point the held item is used at this frame.
@@ -236,6 +242,10 @@ impl Game {
             regen_time: 0.0,
             regen_count: 0,
             potion_delay: 0,
+            mana: Default::default(),
+            bolts: Vec::new(),
+            dust: Vec::new(),
+            item_rotation: 0.0,
             attack_cd: 0,
             use_target: None,
             release_use: true,
@@ -283,7 +293,13 @@ impl Game {
                 self.contact_damage();
                 self.life_regen();
                 self.potion_delay = (self.potion_delay - 1).max(0);
+                let still = self.player.vx.abs() < 0.05 && self.player.vy.abs() < 0.05;
+                if self.mana.regen(still) {
+                    self.sfx.push(Sfx::MaxMana);
+                }
             }
+            self.update_bolts();
+            self.dust.retain_mut(|d| d.update());
             for (_, p) in &mut self.others {
                 p.animate();
             }
@@ -851,8 +867,15 @@ impl Game {
         let s = self.held_tool();
         let held = target.is_some();
         if let Some(Stack { item: Item::Id(id), .. }) = self.inventory.selected() {
-            if held && self.item_animation == 0 && self.release_use && self.drink(id) {
-                self.inventory.consume();
+            if held && self.item_animation == 0 && self.release_use {
+                if id == magic::AMETHYST_STAFF {
+                    self.cast(target.unwrap());
+                } else if self.drink(id) {
+                    self.inventory.consume();
+                }
+            }
+            if id == magic::AMETHYST_STAFF && self.item_animation > 0 {
+                self.mana.delay_regen();
             }
         }
         if held && self.item_animation == 0 && s.use_animation > 0 && (self.release_use || s.auto_reuse) {
@@ -965,24 +988,139 @@ impl Game {
             if m.kind.friendly() || m.melee_cooldown > 0 || self.attack_cd > 0 || !inside {
                 continue;
             }
-            let damage = self.damage_var(s.damage);
-            let crit = self.random() % 100 < CRIT_CHANCE;
             self.mobs[i].melee_cooldown = self.item_animation;
             self.attack_cd = ((s.use_animation as f64 * 0.33) as i32).max(1);
-            if self.client {
-                // The host applies it; the number shows here as `StrikeNPC` would work it out.
-                let def = self.mobs[i].kind.defense() as f64 * 0.5;
-                let taken = ((damage as f64 - def).max(1.0) * if crit { 2.0 } else { 1.0 }) as i32;
-                self.mob_text(i, taken.max(1), crit, false);
-                let damage = if crit { damage * 2 } else { damage };
-                self.sfx.push(Sfx::MobHit);
-                self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
-            } else {
-                self.hit_mob(i, damage, s.knock_back, dir, crit, false);
-            }
+            self.strike(i, s.damage, s.knock_back, dir);
             // A kill shifts the list; the cooldown stops more hits this tick anyway.
             break;
         }
+    }
+
+    /// The player's hit on monster `i`: varied damage, maybe a crit; on a
+    /// client the host applies it.
+    fn strike(&mut self, i: usize, damage: i32, knock_back: f32, dir: f32) {
+        let damage = self.damage_var(damage);
+        let crit = self.random() % 100 < CRIT_CHANCE;
+        if self.client {
+            // The number shows here as `StrikeNPC` would work it out.
+            let def = self.mobs[i].kind.defense() as f64 * 0.5;
+            let taken = ((damage as f64 - def).max(1.0) * if crit { 2.0 } else { 1.0 }) as i32;
+            self.mob_text(i, taken.max(1), crit, false);
+            let damage = if crit { damage * 2 } else { damage };
+            self.sfx.push(Sfx::MobHit);
+            self.outbox.push(Msg::Hit { index: i as u16, damage: damage as u16 });
+        } else {
+            self.hit_mob(i, damage, knock_back, dir, crit, false);
+        }
+    }
+
+    /// `ItemCheck_TryStartUse` and `ItemCheck_Shoot` for the Amethyst Staff:
+    /// pays the mana, faces the cursor and sends a bolt at it.
+    fn cast(&mut self, (wx, wy): (f32, f32)) {
+        let Some(s) = item_ids::stats(magic::AMETHYST_STAFF) else { return };
+        if !self.mana.pay(s.mana as i32) {
+            return;
+        }
+        self.item_animation = s.use_animation as i32;
+        self.sfx.push(Sfx::Staff);
+        let (cx, cy) = self.player.center();
+        let (dx, dy) = (wx - cx, wy - cy);
+        self.player.facing_left = dx <= 0.0;
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        let l = (dx * dx + dy * dy).sqrt();
+        let speed = s.shoot_speed;
+        let vel = if l == 0.0 { [dir * speed, 0.0] } else { [dx * speed / l, dy * speed / l] };
+        self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
+        self.bolts.push(Bolt::new([cx, cy], vel, s.damage as i32, s.knock_back));
+    }
+
+    /// `Projectile.Update` for each bolt: dust, homing, moving, hitting, running out.
+    fn update_bolts(&mut self) {
+        let mut i = 0;
+        while i < self.bolts.len() {
+            if self.bolt_tick(i) {
+                i += 1;
+            } else {
+                let b = self.bolts.swap_remove(i);
+                self.bolt_killed(&b);
+            }
+        }
+    }
+
+    fn bolt_tick(&mut self, i: usize) -> bool {
+        let (pos, vel) = (self.bolts[i].pos, self.bolts[i].vel);
+        for _ in 0..2 {
+            if self.random().is_multiple_of(5) {
+                let mut d = self.new_dust(pos, vel, 1.2);
+                d.vel = [d.vel[0] * 0.3, d.vel[1] * 0.3];
+                self.dust.push(d);
+            }
+        }
+        if !self.bolts[i].sounded {
+            self.bolts[i].sounded = true;
+            self.sfx.push(Sfx::GemBolt);
+        }
+        let size = [magic::BOLT_SIZE as i32; 2];
+        let c = self.bolts[i].center();
+        let target = self
+            .mobs
+            .iter()
+            .filter(|m| !m.kind.friendly())
+            .map(|m| (m.body.center(), m))
+            .map(|((x, y), m)| (((x - c[0]).powi(2) + (y - c[1]).powi(2)).sqrt(), [x, y], m))
+            .filter(|&(d, _, m)| {
+                let b = &m.body;
+                d < magic::HOMING_RANGE
+                    && world::collision::can_hit(&self.world, pos, size, [b.x, b.y], [b.w as i32, b.h as i32])
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0))
+            .map(|t| t.1);
+        if let Some(t) = target {
+            self.bolts[i].home(t);
+        }
+        if !self.bolts[i].advance(&self.world) {
+            return false;
+        }
+        let b = &self.bolts[i];
+        let [x, y, w, h] = b.hitbox();
+        let c = b.center();
+        let hit = self.mobs.iter().position(|m| {
+            let mb = &m.body;
+            !m.kind.friendly()
+                && x < mb.x + mb.w
+                && mb.x < x + w
+                && y < mb.y + mb.h
+                && mb.y < y + h
+                && world::collision::can_hit(&self.world, c, [0, 0], [mb.center().0, mb.center().1], [0, 0])
+        });
+        if let Some(m) = hit {
+            let (damage, kb) = (b.damage, b.knock_back);
+            let dir = if b.vel[0] > 0.0 { 1.0 } else { -1.0 };
+            self.strike(m, damage, kb, dir);
+            return false;
+        }
+        self.bolts[i].time_left -= 1;
+        self.bolts[i].time_left > 0
+    }
+
+    /// `Projectile.Kill` of a bolt: a puff of amethyst dust.
+    fn bolt_killed(&mut self, b: &Bolt) {
+        self.sfx.push(Sfx::Dig);
+        let l = (b.vel[0] * b.vel[0] + b.vel[1] * b.vel[1]).sqrt();
+        let n = if l < 1.0 { [0.0, 0.0] } else { [b.vel[0] / l, b.vel[1] / l] };
+        for _ in 0..15 {
+            let mut d = self.new_dust(b.pos, n, 1.2);
+            let k = (self.random() % 1000) as f32 / 1000.0;
+            d.scale *= 1.25;
+            d.vel = [(d.vel[0] * 2.2 + n[0] * 1.5) * k, (d.vel[1] * 2.2 + n[1] * 1.5) * k];
+            self.dust.push(d);
+        }
+    }
+
+    /// Amethyst dust in the bolt's box.
+    fn new_dust(&mut self, pos: [f32; 2], speed: [f32; 2], scale: f32) -> Dust {
+        let size = magic::BOLT_SIZE as i32;
+        Dust::new(magic::AMETHYST_DUST, pos, size, size, speed, scale, |n| (self.random() % n.max(1) as u64) as i32)
     }
 
     /// `IsInTileInteractionRange`: a box of tiles around the player's.
@@ -1112,6 +1250,8 @@ impl Game {
             let cells = self.object_cells(tx, ty);
             let item = (!PLANTS.contains(&t)).then(|| (Item::Object(self.template(t, &cells)), 1));
             (cells, item)
+        } else if magic::GEM_STONES.contains(&t) {
+            (vec![(tx, ty)], Some((Item::Id(magic::gem(t)), 1)))
         } else {
             (vec![(tx, ty)], Some((Item::Block(t), 1)))
         };
@@ -1555,6 +1695,7 @@ impl Game {
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
         }
+        self.magic_sprites(&mut over);
         self.crack_sprites(&mut over);
         let tool = self.held_tool();
         let reach = |x, y| {
@@ -1730,6 +1871,10 @@ impl Game {
     /// The item in the player's hand during a swing, turning about its grip
     /// (`useStyle` 1 in `DrawPlayer`).
     fn held_item_sprite(&self, out: &mut Vec<Sprite>) {
+        if self.inventory.selected().map(|s| s.item) == Some(Item::Id(magic::AMETHYST_STAFF)) {
+            self.held_staff_sprite(out);
+            return;
+        }
         let Some(Item::Tool(t)) = self.inventory.selected().map(|s| s.item) else { return };
         let s = t.stats();
         let Some(sheet) = self.sheet(t.sheet()).filter(|_| self.item_animation > 0) else { return };
@@ -1745,6 +1890,72 @@ impl Game {
         sprite.size = [w, h];
         (sprite.rot, sprite.pivot) = (rot, grip);
         out.push(sprite);
+    }
+
+    /// A staff held out toward the cursor (`useStyle` 5 with `Item.staff`):
+    /// its butt at `itemLocation`, turned 45 degrees past `itemRotation`.
+    fn held_staff_sprite(&self, out: &mut Vec<Sprite>) {
+        let Some(sheet) = self.sheet("Item_739").filter(|_| self.item_animation > 0) else { return };
+        let left = self.player.facing_left;
+        let dir = if left { -1.0 } else { 1.0 };
+        let [dx, dy] = self.player.drawn(self.tick_acc);
+        let (cx, cy) = (dx + player::WIDTH / 2.0, dy + player::HEIGHT / 2.0 + self.player.gfx_off_y);
+        let r = self.item_rotation;
+        let (x, y) = ((cx + (r.cos() * 6.0 * dir).floor()).floor(), (cy + (r.sin() * 6.0 * dir).floor()).floor());
+        let (w, h) = (sheet.w as f32, sheet.h as f32);
+        let grip = [if left { w } else { 0.0 }, h];
+        let flags = SPRITE_LIT | if left { SPRITE_FLIP } else { 0 };
+        let mut sprite = Sprite::sheet([x - grip[0], y - grip[1]], sheet, [0, 0, sheet.w, sheet.h], flags);
+        (sprite.rot, sprite.pivot) = (r + 0.785 * dir, grip);
+        out.push(sprite);
+    }
+
+    /// Bolts and dust, added to what is under them (`Color` with no alpha).
+    /// The bolt is its picture glowing over a trail, which the game draws
+    /// with a shader and here is plain strips fading from white to violet.
+    fn magic_sprites(&self, out: &mut Vec<Sprite>) {
+        let violet = [238.0, 130.0, 238.0].map(|c: f32| c / 255.0);
+        let purple = [128.0, 0.0, 128.0].map(|c: f32| c / 255.0);
+        for b in &self.bolts {
+            let n = b.trail.len();
+            let h = magic::BOLT_SIZE / 2.0;
+            for (k, w) in b.trail.windows(2).enumerate() {
+                let (a, z) = ([w[0].0[0] + h, w[0].0[1] + h], [w[1].0[0] + h, w[1].0[1] + h]);
+                let p = k as f32 / (n - 1).max(1) as f32;
+                let toward = ((p + 0.2) / 0.7).clamp(0.0, 1.0);
+                let fade = (1.0 - p / 0.98).max(0.0) * 0.5;
+                let c: Vec<f32> = (0..3)
+                    .map(|i| {
+                        let mid = violet[i] + (purple[i] - violet[i]) * p;
+                        (1.0 + (mid - 1.0) * toward) * fade
+                    })
+                    .collect();
+                let (vx, vy) = (z[0] - a[0], z[1] - a[1]);
+                let len = (vx * vx + vy * vy).sqrt();
+                let mut s = Sprite::flat([a[0], a[1] - 8.0], [len, 16.0], [c[0], c[1], c[2], 0.0]);
+                (s.rot, s.pivot) = (vy.atan2(vx), [0.0, 8.0]);
+                out.push(s);
+            }
+            if let Some(sheet) = self.sheet("Projectile_121") {
+                let t = (300 - b.time_left) as f32 / 60.0;
+                let k = 0.6 * (1.0 + (t * std::f32::consts::TAU).cos() * 0.2);
+                let size = [sheet.w as f32 * 1.25 * k, sheet.h as f32 * k];
+                let [cx, cy] = b.center();
+                let mut s = Sprite::sheet([cx - size[0] / 2.0, cy - size[1] / 2.0], sheet, [0, 0, sheet.w, sheet.h], 0);
+                (s.size, s.pivot, s.rot) = (size, [size[0] / 2.0, size[1] / 2.0], b.rotation());
+                s.color = [80.0 / 255.0, 80.0 / 255.0, 80.0 / 255.0, 0.0];
+                // Four copies on top of each other.
+                out.extend([s; 4]);
+            }
+        }
+        let Some(sheet) = self.sheet("Dust") else { return };
+        for d in &self.dust {
+            let half = 4.0 * d.scale;
+            let mut s = Sprite::sheet([d.pos[0] - half, d.pos[1] - half], sheet, d.frame(), 0);
+            (s.size, s.pivot, s.rot) = ([8.0 * d.scale; 2], [half, half], d.rot);
+            s.color = [1.0, 1.0, 1.0, 0.0];
+            out.push(s);
+        }
     }
 
     /// Layered body sheets, tinted, with the walk cycle on the legs.
@@ -2023,6 +2234,37 @@ mod tests {
         pick_up(&mut g);
         assert_eq!(g.hp, 100, "a heart is 20 life");
         assert_eq!(g.inventory.count(Item::Id(pots::HEART)), 0);
+    }
+
+    #[test]
+    fn staff_spends_mana_and_its_bolt_hits() {
+        let mut g = game();
+        g.inventory.slots[9] = Some(Stack { item: Item::Id(magic::AMETHYST_STAFF), count: 1 });
+        g.inventory.selected = 9;
+        let (px, py) = g.player.center();
+        g.mobs = vec![Mob::new(Kind::Slime, px + 100.0, 320.0)];
+        let target = Some((px + 100.0, py));
+        g.use_item(target);
+        assert_eq!((g.mana.cur, g.bolts.len()), (13, 1));
+        assert!(!g.player.facing_left);
+        for _ in 0..60 {
+            g.update_bolts();
+        }
+        assert!(g.bolts.is_empty());
+        assert!(g.mobs.is_empty() || g.mobs[0].hp < Kind::Slime.max_hp(), "hit");
+        assert!(!g.dust.is_empty(), "a puff of amethyst");
+
+        (g.mana.cur, g.item_animation, g.release_use) = (6, 0, true);
+        g.use_item(target);
+        assert!(g.bolts.is_empty() && g.item_animation == 0, "not enough mana");
+    }
+
+    #[test]
+    fn gem_stones_drop_gems() {
+        let mut g = game();
+        g.world.set_tile(16, 19, 67, -1, -1);
+        g.break_tile(16, 19, true);
+        assert_eq!(g.drops.last().map(|d| d.item), Some(Item::Id(181)));
     }
 
     #[test]

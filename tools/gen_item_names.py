@@ -101,7 +101,8 @@ def stats(f, material):
             f"knock_back: {kb!r}, use_style: {int(num(f, 'useStyle'))}, use_animation: {int(num(f, 'useAnimation'))}, "
             f"pick: {int(num(f, 'pick'))}, axe: {int(num(f, 'axe'))}, hammer: {int(num(f, 'hammer'))}, "
             f"tile_boost: {int(num(f, 'tileBoost'))}, defense: {int(num(f, 'defense'))}, "
-            f"heal_life: {int(num(f, 'healLife'))}, max_stack: {int(num(f, 'maxStack', 9999))}, flags: {bits}")
+            f"heal_life: {int(num(f, 'healLife'))}, mana: {int(num(f, 'mana'))}, "
+            f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {int(num(f, 'maxStack', 9999))}, flags: {bits}")
 
 
 def placing_items(item_cs):
@@ -173,6 +174,8 @@ def main():
         "    pub tile_boost: i8,",
         "    pub defense: i16,",
         "    pub heal_life: i16,",
+        "    pub mana: i16,",
+        "    pub shoot_speed: f32,",
         "    pub max_stack: u16,",
         "    pub flags: u16,",
         "}",

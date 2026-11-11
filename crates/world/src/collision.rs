@@ -430,6 +430,42 @@ impl Box<'_> {
     }
 }
 
+/// `Collision.CanHit`: a walk of tiles from the middle of one box to the
+/// other's, blocked by a solid tile or a gap between two full blocks.
+pub fn can_hit(world: &World, a: V2, a_size: [i32; 2], b: V2, b_size: [i32; 2]) -> bool {
+    let (w, h) = (world.width as i64, world.height as i64);
+    let tile = |p: V2, s: [i32; 2]| {
+        let x = (p[0] as i64 + (s[0] / 2) as i64) / 16;
+        let y = (p[1] as i64 + (s[1] / 2) as i64) / 16;
+        (x.clamp(1, w - 1), y.clamp(1, h - 40))
+    };
+    let full = |x: i64, y: i64| {
+        let c = cell(world, x, y);
+        c.active && c.solid() && !c.solid_top() && c.slope == 0 && !c.half
+    };
+    let ((mut x, mut y), (x2, y2)) = (tile(a, a_size), tile(b, b_size));
+    loop {
+        if x == x2 && y == y2 {
+            return true;
+        }
+        if (x - x2).abs() > (y - y2).abs() {
+            x += if x >= x2 { -1 } else { 1 };
+            if full(x, y - 1) && full(x, y + 1) {
+                return false;
+            }
+        } else {
+            y += if y >= y2 { -1 } else { 1 };
+            if full(x - 1, y) && full(x + 1, y) {
+                return false;
+            }
+        }
+        let c = cell(world, x, y);
+        if c.active && c.solid() && !c.solid_top() {
+            return false;
+        }
+    }
+}
+
 /// `Collision.WetCollision`: the liquid kind touching the middle of the box, if any.
 pub fn wet(world: &World, pos: V2, size: [i32; 2]) -> Option<u8> {
     let [w, h] = size;

@@ -30,6 +30,9 @@ pub enum Sfx {
     Shatter,
     Grass,
     Drink,
+    Staff,
+    GemBolt,
+    MaxMana,
 }
 
 impl Sfx {
@@ -51,6 +54,9 @@ impl Sfx {
             Sfx::Shatter => ("Shatter", 1),
             Sfx::Grass => ("Grass", 1),
             Sfx::Drink => ("Item_3", 1),
+            Sfx::Staff => ("Item_43", 1),
+            Sfx::GemBolt => ("Item_205", 1),
+            Sfx::MaxMana => ("MaxMana", 1),
         }
     }
 }

@@ -88,6 +88,9 @@ pub fn lines(texts: &Texts, id: u16, name: &str, key: &str, s: &Stats, stack: u1
         add(common("RestoresLife").replace("{0}", &s.heal_life.to_string()));
         add(common("Healing"));
     }
+    if s.mana > 0 {
+        add(common("UsesMana").replace("{0}", &s.mana.to_string()));
+    }
     if has(PLACES) {
         if has(CONSUMABLE) {
             add(tip(33));
