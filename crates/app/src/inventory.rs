@@ -32,6 +32,14 @@ impl Item {
     }
 }
 
+/// The armour slot an item goes in.
+pub fn armor_slot(item: Item) -> Option<usize> {
+    match item {
+        Item::Id(id) => crate::armor::slot_of(id),
+        _ => None,
+    }
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Stack {
     pub item: Item,
@@ -43,11 +51,13 @@ pub struct Inventory {
     pub selected: usize,
     /// What the cursor carries (`Main.mouseItem`).
     pub mouse: Option<Stack>,
+    /// Worn head, body and legs (`Player.armor[0..3]`).
+    pub armor: [Option<Stack>; 3],
 }
 
 impl Inventory {
     pub fn new(items: &[Item]) -> Self {
-        let mut inv = Self { slots: [None; SLOTS], selected: 0, mouse: None };
+        let mut inv = Self { slots: [None; SLOTS], selected: 0, mouse: None, armor: [None; 3] };
         for &item in items {
             inv.add(item, 1);
         }
@@ -159,6 +169,34 @@ impl Inventory {
         true
     }
 
+    /// `ItemSlot.LeftClick` on armour slot `k`: swaps it with the mouse when the
+    /// mouse is empty or holds a piece for that slot. True when anything moved.
+    pub fn armor_click(&mut self, k: usize) -> bool {
+        let fits = self.mouse.is_none_or(|m| armor_slot(m.item) == Some(k));
+        if !fits || (self.mouse.is_none() && self.armor[k].is_none()) {
+            return false;
+        }
+        std::mem::swap(&mut self.armor[k], &mut self.mouse);
+        true
+    }
+
+    /// `ItemSlot.SwapEquip` on slot `i`: a single armour piece goes on, the one
+    /// it replaces takes its place. True when it did.
+    pub fn equip(&mut self, i: usize) -> bool {
+        let Some(s) = self.slots[i].filter(|s| s.count == 1) else { return false };
+        let Some(k) = armor_slot(s.item) else { return false };
+        std::mem::swap(&mut self.slots[i], &mut self.armor[k]);
+        true
+    }
+
+    /// The ids of the worn pieces.
+    pub fn worn(&self) -> [Option<u16>; 3] {
+        self.armor.map(|a| match a?.item {
+            Item::Id(id) => Some(id),
+            _ => None,
+        })
+    }
+
     /// Puts the mouse item back into the slots; what does not fit stays on the mouse.
     pub fn return_mouse(&mut self) {
         if let Some(m) = self.mouse.take() {
@@ -235,6 +273,20 @@ mod tests {
         inv.remove(Item::Block(1), 300);
         assert_eq!(inv.count(Item::Block(1)), 900);
         assert_eq!(inv.slots[1], None, "the second stack went first");
+    }
+
+    #[test]
+    fn armour_goes_on_its_slot() {
+        let mut inv = Inventory::new(&[Item::Id(89), Item::Id(90), Item::Block(1)]);
+        assert!(inv.equip(0));
+        assert_eq!((inv.slots[0], inv.worn()), (None, [Some(89), None, None]));
+        assert!(inv.equip(1), "iron swaps the copper helmet out");
+        assert_eq!((inv.slots[1].map(|s| s.item), inv.worn()[0]), (Some(Item::Id(89)), Some(90)));
+        assert!(!inv.equip(2), "not armour");
+        inv.mouse = Some(Stack { item: Item::Id(89), count: 1 });
+        assert!(!inv.armor_click(1), "a helmet is not a shirt");
+        assert!(inv.armor_click(0));
+        assert_eq!((inv.mouse.map(|m| m.item), inv.worn()[0]), (Some(Item::Id(90)), Some(89)));
     }
 
     #[test]

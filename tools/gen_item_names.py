@@ -102,7 +102,9 @@ def stats(f, material):
             f"pick: {int(num(f, 'pick'))}, axe: {int(num(f, 'axe'))}, hammer: {int(num(f, 'hammer'))}, "
             f"tile_boost: {int(num(f, 'tileBoost'))}, defense: {int(num(f, 'defense'))}, "
             f"heal_life: {int(num(f, 'healLife'))}, mana: {int(num(f, 'mana'))}, "
-            f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {int(num(f, 'maxStack', 9999))}, flags: {bits}")
+            f"shoot_speed: {float(num(f, 'shootSpeed'))!r}, max_stack: {int(num(f, 'maxStack', 9999))}, "
+            f"head_slot: {int(num(f, 'headSlot'))}, body_slot: {int(num(f, 'bodySlot'))}, "
+            f"leg_slot: {int(num(f, 'legSlot'))}, flags: {bits}")
 
 
 def placing_items(item_cs):
@@ -177,6 +179,10 @@ def main():
         "    pub mana: i16,",
         "    pub shoot_speed: f32,",
         "    pub max_stack: u16,",
+        "    /// `headSlot`, `bodySlot`, `legSlot`: the armour picture it is drawn with, 0 for none.",
+        "    pub head_slot: i16,",
+        "    pub body_slot: i16,",
+        "    pub leg_slot: i16,",
         "    pub flags: u16,",
         "}",
         "",
