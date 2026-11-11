@@ -18,6 +18,7 @@ pub const AXE: TileSet = TileSet::of(&[5, 72, 80, 323, 488, 583, 584, 585, 586, 
 pub const HAMMER: TileSet = TileSet::of(&[26, 31, 695, 696]);
 pub const DUNGEON: TileSet = TileSet::of(&[41, 43, 44, 677, 678, 679]);
 pub const ROPE: TileSet = TileSet::of(&[213, 214, 353, 365, 366, 449, 450, 451, 504]);
+pub const CUT: TileSet = TileSet::of(&[3, 24, 28, 32, 51, 52, 61, 62, 69, 71, 73, 74, 82, 83, 84, 110, 113, 115, 184, 201, 205, 231, 236, 254, 352, 382, 444, 454, 484, 485, 518, 519, 528, 529, 549, 636, 637, 638, 654, 655, 711]);
 pub const LARGE_FRAMES_1: TileSet = TileSet::of(&[273, 274, 284, 325, 357, 618, 736]);
 pub const LARGE_FRAMES_2: TileSet = TileSet::of(&[409, 669, 670, 671, 672, 673, 674, 675, 676, 735, 737, 741, 742, 743, 745, 746, 749]);
 pub const WALL_LARGE_FRAMES_1: TileSet = TileSet::of(&[146, 147, 167, 179, 354]);
@@ -30,6 +31,7 @@ pub const ORE: TileSet = TileSet::of(&[6, 7, 8, 9, 22, 37, 58, 107, 108, 111, 16
 pub const TRUNCATES_WALLS: TileSet = TileSet::of(&[54, 328, 459, 748]);
 pub const CRACKED_BRICKS: TileSet = TileSet::of(&[481, 482, 483]);
 pub const CLOUDS: TileSet = TileSet::of(&[189, 196, 460, 717, 718, 719]);
+pub const DRIP: TileSet = TileSet::of(&[373, 374, 375, 461, 709]);
 pub const GRASS: TileSet = TileSet::of(&[2, 23, 109, 199, 477, 492]);
 pub const DIRT_SPECIAL: TileSet = TileSet::of(&[2, 23, 109, 199, 477, 492]);
 

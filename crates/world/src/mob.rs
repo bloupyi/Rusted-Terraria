@@ -4,6 +4,7 @@
 
 use crate::body::{Body, GRAVITY, MAX_FALL};
 use crate::collision::{self, V2};
+use crate::door;
 use crate::World;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -61,6 +62,17 @@ impl Kind {
         self.stats().5
     }
 
+    /// `value`: what its coins are worth, in copper.
+    pub fn value(self) -> f32 {
+        match self {
+            Kind::Slime => 25.0,
+            Kind::Zombie => 60.0,
+            Kind::DemonEye => 75.0,
+            Kind::Guide => 0.0,
+            Kind::EyeBoss => 30000.0,
+        }
+    }
+
     pub fn friendly(self) -> bool {
         self == Kind::Guide
     }
@@ -91,6 +103,16 @@ pub struct Sky {
     pub day: bool,
     /// `Main.worldSurface`, in tiles.
     pub surface: f32,
+    pub blood_moon: bool,
+}
+
+/// A zombie hitting the door cell `(x, y)` (`KillTile` with `fail`); `open`:
+/// it should swing open now (`OpenDoor` toward the zombie's direction).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Knock {
+    pub x: i64,
+    pub y: i64,
+    pub open: bool,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -128,6 +150,8 @@ pub struct Mob {
     pub frame: u32,
     frame_counter: f32,
     pub rotation: f32,
+    /// A door hit this tick, for the game to act on.
+    pub knock: Option<Knock>,
 }
 
 impl Mob {
@@ -161,6 +185,7 @@ impl Mob {
             frame: 0,
             frame_counter: 0.0,
             rotation: 0.0,
+            knock: None,
         }
     }
 
@@ -460,7 +485,6 @@ impl Mob {
 
     /// `AI_003_Fighters` for the zombie: walks at the target, steps up single
     /// blocks and jumps higher walls; wanders off when stuck or by day.
-    /// Doors are not handled.
     fn fighter(&mut self, world: &World, target: [f32; 4], sky: Sky) {
         let [tx, ty, tw, th] = target;
         let b = self.body;
@@ -584,7 +608,24 @@ impl Mob {
             let col = ((b.x + (w as i32 / 2) as f32 + (15 * self.direction) as f32) / 16.0) as i64;
             let row = ((b.y + h - 15.0) / 16.0) as i64;
             let wall = |y: i64| collision::solid_no_platforms(world, col, y);
-            if (b.vx < 0.0 && self.sprite_dir == -1) || (b.vx > 0.0 && self.sprite_dir == 1) {
+            if collision::shape(world, col, row - 1).0 && world.tile(col, row - 1) == door::CLOSED {
+                // Knocks every second; on a blood moon the second knock opens it.
+                self.ai[2] += 1.0;
+                self.ai[3] = 0.0;
+                if self.ai[2] >= 60.0 {
+                    if !sky.blood_moon {
+                        self.ai[1] = 0.0;
+                    }
+                    b.vx = 0.5 * -self.direction as f32;
+                    self.ai[1] += 5.0;
+                    self.ai[2] = 0.0;
+                    let open = self.ai[1] >= 10.0;
+                    if open {
+                        self.ai[1] = 10.0;
+                    }
+                    self.knock = Some(Knock { x: col, y: row - 1, open });
+                }
+            } else if (b.vx < 0.0 && self.sprite_dir == -1) || (b.vx > 0.0 && self.sprite_dir == 1) {
                 if h >= 32.0 && wall(row - 2) {
                     b.vy = if wall(row - 3) { -8.0 } else { -7.0 };
                 } else if wall(row - 1) {
@@ -800,7 +841,7 @@ mod tests {
     use crate::NO_TILE;
     use formats::wld::Tile;
 
-    const NIGHT: Sky = Sky { day: false, surface: 200.0 };
+    const NIGHT: Sky = Sky { day: false, surface: 200.0, blood_moon: false };
 
     /// Floor at y = 100, a two-tile wall at x = 30, a step at x = 40.
     fn world() -> World {
@@ -854,6 +895,25 @@ mod tests {
         assert!(m.body.on_ground);
         assert!(!m.facing_left);
         assert!(m.body.vx > 0.9 && m.body.vx <= 1.0, "walks at 1: {}", m.body.vx);
+    }
+
+    #[test]
+    fn zombie_knocks_on_doors() {
+        let mut w = world();
+        w.set_tile(20, 96, 1, -1, -1);
+        door::place(&mut w, 20, 97, [0, 0, 0]);
+        for blood_moon in [false, true] {
+            let mut m = Mob::new(Kind::Zombie, 15.0 * 16.0, 100.0 * 16.0);
+            let mut knocks = Vec::new();
+            for _ in 0..480 {
+                m.tick(&w, at(28.0 * 16.0, 99.0 * 16.0), Sky { blood_moon, ..NIGHT });
+                knocks.extend(m.knock.take());
+            }
+            assert!(knocks.len() >= 3, "{knocks:?}");
+            assert!(knocks.iter().all(|k| (k.x, k.y) == (20, 98)));
+            assert_eq!(knocks[1].open, blood_moon, "a blood moon opens it at the second knock");
+            assert!(m.body.x + m.body.w <= 20.0 * 16.0, "stays behind it");
+        }
     }
 
     #[test]

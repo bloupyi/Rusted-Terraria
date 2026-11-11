@@ -2,6 +2,7 @@ mod armor;
 mod audio;
 mod backdrop;
 mod cave;
+mod coins;
 mod combat_text;
 mod game;
 mod glow;
@@ -168,7 +169,7 @@ impl App {
                     if self.right_fresh {
                         self.game.throw_held(false);
                     }
-                } else {
+                } else if !(self.right_fresh && self.game.interact(tx, ty, self.free)) {
                     self.game.place(tx, ty, self.free);
                 }
             }
