@@ -11,8 +11,9 @@ use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
 use crate::ranged::{self, Arrow};
-use crate::{armor, backdrop, cave, glow, item_ids, pots};
+use crate::{armor, backdrop, cave, coins, glow, item_ids, pots};
 use formats::wld::Env;
+use world::door;
 use world::light::{self, Glow, Rect};
 use world::liquid::{LiquidSim, OBSIDIAN};
 use world::mining::{self, HitTiles, Place, Target};
@@ -39,7 +40,8 @@ const LOD_BUDGET: usize = 256;
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
 /// Obsidian from liquids, wood from trees, and the craftable furniture.
-pub const EXTRA_TILES: [u16; 6] = [OBSIDIAN, WOOD, 4, items::WORK_BENCH, items::FURNACE, items::ANVIL];
+pub const EXTRA_TILES: [u16; 8] =
+    [OBSIDIAN, WOOD, 4, items::WORK_BENCH, items::FURNACE, items::ANVIL, door::CLOSED, door::OPEN];
 pub const TREE: u16 = 5;
 pub const WOOD: u16 = 30;
 const TORCH: u16 = 4;
@@ -100,6 +102,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(glow::TORCH_ITEMS.iter().map(|id| format!("Item_{id}")));
     v.extend(armor::SHEETS.iter().map(|s| s.to_string()));
     v.extend(ranged::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(coins::SHEETS.iter().map(|s| s.to_string()));
     v.extend(armor::picture_sheets());
     v
 }
@@ -206,6 +209,8 @@ pub struct Game {
     pub wind: world::draw::Wind,
     /// Part of a 60 Hz tick not yet run.
     pub tick_acc: f32,
+    /// Ticks run, for animations.
+    ticks: u32,
     /// Pulse of glowing items on the ground.
     ess: glow::Ess,
     /// Moving lights in the light map now, relit away when they change.
@@ -285,6 +290,7 @@ impl Game {
             bg_tick: None,
             wind: Default::default(),
             tick_acc: 0.0,
+            ticks: 0,
             ess: Default::default(),
             glows: Vec::new(),
         };
@@ -301,6 +307,7 @@ impl Game {
         let target = self.use_target.take();
         while self.tick_acc >= 1.0 {
             self.tick_acc -= 1.0;
+            self.ticks = self.ticks.wrapping_add(1);
             self.wind.tick(self.env.wind);
             self.ess.tick();
             self.use_item(target);
@@ -398,11 +405,84 @@ impl Game {
             .chain(self.others.iter().map(|(_, p)| p))
             .map(|p| [p.x, p.y, p.w, p.h])
             .collect();
-        let sky = Sky { day: self.time < DAYTIME, surface: self.env.world_surface as f32 };
+        let day = self.time < DAYTIME;
+        let sky = Sky { day, surface: self.env.world_surface as f32, blood_moon: self.env.blood_moon && !day };
         let dist = |m: &Mob, p: &[f32; 4]| (m.body.center().0 - (p[0] + p[2] / 2.0)).abs();
-        for m in &mut self.mobs {
+        let mut knocks = Vec::new();
+        for (i, m) in self.mobs.iter_mut().enumerate() {
             let near = *players.iter().min_by(|a, b| dist(m, a).total_cmp(&dist(m, b))).unwrap();
             m.tick(&self.world, near, sky);
+            knocks.extend(m.knock.take().map(|k| (i, k)));
+        }
+        for (i, k) in knocks {
+            self.sfx.push(Sfx::Dig);
+            if k.open && !self.open_door(k.x, k.y, self.mobs[i].direction) {
+                self.mobs[i].ai[3] = 60.0;
+            }
+        }
+    }
+
+    /// Right click on a tile (`TileInteractionsUse`): opens a closed door,
+    /// toward where the player faces or else the other way, or closes an open
+    /// one. False when there is nothing there to use.
+    pub fn interact(&mut self, tx: i64, ty: i64, free: bool) -> bool {
+        if !self.in_reach(tx, ty, free) {
+            return false;
+        }
+        match self.world.tile(tx, ty) {
+            door::CLOSED => {
+                let dir = if self.player.facing_left { -1 } else { 1 };
+                if !self.open_door(tx, ty, dir) {
+                    self.open_door(tx, ty, -dir);
+                }
+                true
+            }
+            door::OPEN => {
+                self.close_door(tx, ty);
+                true
+            }
+            _ => false,
+        }
+    }
+
+    /// `OpenDoor`: breaks plants where it swings, then opens toward `dir`.
+    fn open_door(&mut self, x: i64, y: i64, dir: i32) -> bool {
+        let Some(s) = door::swing(&self.world, x, y, dir) else { return false };
+        for row in s.top..s.top + 3 {
+            if self.world.tile(s.column, row) != NO_TILE {
+                self.break_tile(s.column, row, true);
+            }
+        }
+        door::open(&mut self.world, &s);
+        self.send_cells(s.left, s.top, 2, 3);
+        self.sfx.push(Sfx::DoorOpen);
+        true
+    }
+
+    /// `CloseDoor`: shuts unless a player or a monster stands in the doorway.
+    fn close_door(&mut self, x: i64, y: i64) -> bool {
+        let rects: Vec<[i32; 4]> = std::iter::once(&self.player.body)
+            .chain(self.others.iter().map(|(_, p)| &p.body))
+            .chain(self.mobs.iter().map(|m| &m.body))
+            .map(|b| [b.x as i32, b.y as i32, b.w as i32, b.h as i32])
+            .collect();
+        let occupied = |cx: i64, cy: i64| {
+            let (x, y) = (cx as i32 * 16, cy as i32 * 16);
+            rects.iter().any(|r| x < r[0] + r[2] && r[0] < x + 16 && y < r[1] + r[3] && r[1] < y + 16)
+        };
+        let variant = (self.random() % 3) as i16;
+        let Some((left, top)) = door::close(&mut self.world, x, y, variant, occupied) else { return false };
+        self.send_cells(left, top, 2, 3);
+        self.sfx.push(Sfx::DoorClose);
+        true
+    }
+
+    fn send_cells(&mut self, x0: i64, y0: i64, w: i64, h: i64) {
+        for x in x0..x0 + w {
+            for y in y0..y0 + h {
+                self.send_tile(x as u32, y as u32);
+                self.sim.wake(&self.world, x as u32, y as u32);
+            }
         }
     }
 
@@ -631,6 +711,12 @@ impl Game {
             self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count, grab_delay: 0.0 });
         }
         if !m.kind.friendly() {
+            let blood_moon = self.env.blood_moon && self.time >= DAYTIME;
+            let coins =
+                coins::money(m.kind.value(), blood_moon, |lo, hi| lo + (self.random() % (hi - lo) as u64) as i32);
+            for (id, n) in coins {
+                self.toss(x, y, Item::Id(id), n);
+            }
             self.drop_life_and_mana(x, y);
         }
     }
@@ -783,7 +869,8 @@ impl Game {
                 let before = d.count;
                 d.count = inventory.add(d.item, d.count);
                 if d.count < before {
-                    sfx.push(Sfx::Grab);
+                    let coin = matches!(d.item, Item::Id(id) if coins::is_coin(id));
+                    sfx.push(if coin { Sfx::Coin } else { Sfx::Grab });
                 }
                 return d.count > 0;
             }
@@ -1585,6 +1672,15 @@ impl Game {
                 self.shatter_pot(x0, y0, ty);
             }
             (cells, None)
+        } else if t == door::CLOSED || t == door::OPEN {
+            let ((left, top), w) = if t == door::CLOSED {
+                ((tx, door::top(&self.world, tx, ty)), 1)
+            } else {
+                (door::open_cells(&self.world, tx, ty), 2)
+            };
+            let world = &self.world;
+            let cells = (left..left + w).flat_map(|x| (top..top + 3).map(move |y| (x, y)));
+            (cells.filter(|&(x, y)| world.tile(x, y) == t).collect(), Some((Item::Id(coins::DOOR), 1)))
         } else if self.important(t) {
             let cells = self.object_cells(tx, ty);
             let item = (!PLANTS.contains(&t)).then(|| (Item::Object(self.template(t, &cells)), 1));
@@ -1620,7 +1716,7 @@ impl Game {
                 }
                 let rests = match dy {
                     -1 => n == TREE || (self.important(n) && !HANGING.contains(&n)),
-                    1 => HANGING.contains(&n),
+                    1 => HANGING.contains(&n) || n == door::CLOSED || n == door::OPEN,
                     _ => n == TORCH,
                 };
                 if rests && !(n == TORCH && self.torch_held(nx, ny)) {
@@ -1777,6 +1873,15 @@ impl Game {
                 self.summon_boss();
                 return;
             }
+            Item::Id(coins::DOOR) => {
+                let Some(top) = door::place_top(&self.world, tx, ty) else { return };
+                if self.world.tile(tx, ty) != NO_TILE || (top..top + 3).any(|y| self.player.overlaps(tx, y)) {
+                    return;
+                }
+                let variants = [0; 3].map(|_| (self.random() % 3) as i16);
+                door::place(&mut self.world, tx, top, variants);
+                self.send_cells(tx, top, 1, 3);
+            }
             Item::Tool(_) | Item::Material(_) | Item::Id(_) => return,
             Item::Block(t) => {
                 let anchored = [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
@@ -1848,7 +1953,7 @@ impl Game {
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
         }
-        if matches!(stack.item, Item::Block(_) | Item::Object(_)) {
+        if matches!(stack.item, Item::Block(_) | Item::Object(_) | Item::Id(coins::DOOR)) {
             self.sfx.push(Sfx::Dig);
             if !free {
                 self.inventory.consume();
@@ -2035,7 +2140,20 @@ impl Game {
             self.held_item_sprite(&mut over);
         }
         for d in &self.drops {
-            over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
+            let coin = match d.item {
+                Item::Id(id) if coins::is_coin(id) => self.sheet(&format!("Coin_{}", id - coins::COPPER)),
+                _ => None,
+            };
+            match coin {
+                // `_coinOnWorldAnimation`: 8 frames of 6 ticks.
+                Some(s) => {
+                    let h = s.h / 8;
+                    let src = [0, self.ticks / 6 % 8 * h, s.w, h];
+                    let pos = [d.x + (DROP_SIZE - s.w as f32) / 2.0, d.y + DROP_SIZE - h as f32];
+                    over.push(Sprite::sheet(pos, s, src, SPRITE_LIT));
+                }
+                _ => over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT)),
+            }
         }
         self.arrow_sprites(&mut over);
         self.magic_sprites(&mut over);
@@ -2699,6 +2817,8 @@ mod tests {
         important[BENCH as usize] = true;
         important[TORCH as usize] = true;
         important[POT as usize] = true;
+        important[door::CLOSED as usize] = true;
+        important[door::OPEN as usize] = true;
         let world = World::parse(&formats::synth::write_world("g", 64, 64, &important, |x, y| {
             let (tile, fx) = match (x, y) {
                 (_, 20..) => (1, 0),
@@ -3132,6 +3252,59 @@ mod tests {
         assert_eq!(g.music(), "Music_3");
         g.player.y += 60.0 * 16.0;
         assert_eq!(g.music(), "Music_4");
+    }
+
+    #[test]
+    fn doors_are_placed_opened_closed_and_broken() {
+        let mut g = game();
+        g.world.set_tile(18, 16, 1, -1, -1);
+        g.inventory.slots[0] = Some(Stack { item: Item::Id(coins::DOOR), count: 2 });
+        g.inventory.selected = 0;
+        g.place(19, 19, false);
+        assert_eq!(g.world.tile(19, 19), NO_TILE, "nothing to hang from");
+        g.place(18, 19, false);
+        assert_eq!((17..20).map(|y| g.world.tile(18, y)).collect::<Vec<_>>(), [door::CLOSED; 3]);
+        assert_eq!(g.inventory.slots[0].unwrap().count, 1);
+
+        g.player.facing_left = false;
+        assert!(g.interact(18, 18, false));
+        assert_eq!(
+            (g.world.tile(18, 17), g.world.tile(19, 19)),
+            (door::OPEN, door::OPEN),
+            "swung away from the player"
+        );
+        assert!(g.interact(19, 17, false));
+        assert_eq!((g.world.tile(18, 17), g.world.tile(19, 17)), (door::CLOSED, NO_TILE));
+        assert!(!g.interact(5, 19, false), "nothing to use there");
+
+        g.break_tile(18, 18, true);
+        assert!((17..20).all(|y| g.world.tile(18, y) == NO_TILE));
+        assert!(g.drops.iter().any(|d| d.item == Item::Id(coins::DOOR)));
+    }
+
+    #[test]
+    fn monsters_drop_coins_that_add_up() {
+        let mut g = game();
+        g.mobs = vec![Mob::new(Kind::EyeBoss, 200.0, 200.0)];
+        g.hit_mob(0, 99999, 0.0, 1.0, false, false);
+        let worth: u32 = g
+            .drops
+            .iter()
+            .filter_map(|d| match d.item {
+                Item::Id(id) if coins::is_coin(id) => Some(100u32.pow((id - coins::COPPER) as u32) * d.count as u32),
+                _ => None,
+            })
+            .sum();
+        // 30000 copper, between -20 % and the rolls' most.
+        assert!((24_000..=200_000).contains(&worth), "{worth}");
+
+        let mut inv = Inventory::new(&[]);
+        inv.add(Item::Id(coins::COPPER), 99);
+        inv.add(Item::Id(coins::COPPER + 1), 99);
+        inv.add(Item::Id(coins::COPPER), 3);
+        assert_eq!(inv.count(Item::Id(coins::COPPER)), 2);
+        assert_eq!(inv.count(Item::Id(coins::COPPER + 1)), 0, "100 silver became a gold");
+        assert_eq!(inv.count(Item::Id(coins::COPPER + 2)), 1);
     }
 
     #[test]

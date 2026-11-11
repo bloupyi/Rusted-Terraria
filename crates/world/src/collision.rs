@@ -500,6 +500,12 @@ pub fn wet(world: &World, pos: V2, size: [i32; 2]) -> Option<u8> {
     None
 }
 
+/// `WorldGen.SolidTile`: a whole, flat, solid block.
+pub fn solid_tile(world: &World, x: i64, y: i64) -> bool {
+    let c = cell(world, x, y);
+    c.active && c.solid() && !c.solid_top() && !c.half && c.slope == 0
+}
+
 /// `WorldGen.SolidTileNoPlatforms`: solid or solid on top, but not a platform.
 /// Outside the world counts as solid.
 pub fn solid_no_platforms(world: &World, x: i64, y: i64) -> bool {

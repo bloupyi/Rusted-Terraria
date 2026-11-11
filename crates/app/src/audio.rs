@@ -37,6 +37,9 @@ pub enum Sfx {
     StarFall,
     StarHit,
     Bow,
+    Coin,
+    DoorOpen,
+    DoorClose,
 }
 
 impl Sfx {
@@ -46,6 +49,9 @@ impl Sfx {
             Sfx::Dig => ("Dig", 3),
             Sfx::Tink => ("Tink", 3),
             Sfx::Grab => ("Grab", 1),
+            Sfx::Coin => ("Coin", 5),
+            Sfx::DoorOpen => ("Door_Opened", 1),
+            Sfx::DoorClose => ("Door_Closed", 1),
             Sfx::Splash => ("Splash", 2),
             Sfx::Swing => ("Item_1", 1),
             Sfx::PlayerHit => ("Player_Hit", 3),

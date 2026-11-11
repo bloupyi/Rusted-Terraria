@@ -80,7 +80,33 @@ impl Inventory {
             *slot = Some(Stack { item, count: n });
             count -= n;
         }
+        if matches!(item, Item::Id(id) if crate::coins::is_coin(id)) {
+            for i in 0..SLOTS {
+                self.do_coins(i);
+            }
+        }
         count
+    }
+
+    /// `DoCoins`: 100 copper, silver or gold coins in a slot become one of the
+    /// next coin, joined onto a stack of those if there is one with room.
+    fn do_coins(&mut self, i: usize) {
+        let Some(Stack { item: Item::Id(id), count: 100 }) = self.slots[i] else { return };
+        if !(crate::coins::COPPER..crate::coins::PLATINUM).contains(&id) {
+            return;
+        }
+        let up = Item::Id(id + 1);
+        self.slots[i] = Some(Stack { item: up, count: 1 });
+        for j in 0..SLOTS {
+            if j != i {
+                if let Some(s) = self.slots[j].as_mut().filter(|s| s.item == up && s.count < up.max_stack()) {
+                    s.count += 1;
+                    self.slots[i] = None;
+                    self.do_coins(j);
+                    return;
+                }
+            }
+        }
     }
 
     pub fn count(&self, item: Item) -> u32 {

@@ -236,6 +236,7 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[wood(7)],
         station: Some(WORK_BENCH),
     },
+    Recipe { out: Out::Item(Item::Id(crate::coins::DOOR)), count: 1, inputs: &[wood(6)], station: Some(WORK_BENCH) },
     Recipe {
         out: Out::Item(Item::Tool(Tool::Hammer(Tier::Wood))),
         count: 1,

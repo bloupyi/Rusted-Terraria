@@ -26,6 +26,7 @@ FLAGS = {
     "tileHammer": "HAMMER",
     "tileDungeon": "DUNGEON",
     "tileRope": "ROPE",
+    "tileCut": "CUT",
 }
 # Integer arrays split into one set per value.
 LEVELS = {"tileLargeFrames": "LARGE_FRAMES", "wallLargeFrames": "WALL_LARGE_FRAMES"}
@@ -38,6 +39,7 @@ SETS = {
     "TruncatesWalls": "TRUNCATES_WALLS",
     "CrackedBricks": "CRACKED_BRICKS",
     "Clouds": "CLOUDS",
+    "IsADripTile": "DRIP",
 }
 CONVERSION = {"Grass": "GRASS", "MergesWithDirtInASpecialWay": "DIRT_SPECIAL"}
 
