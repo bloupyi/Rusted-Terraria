@@ -7,7 +7,31 @@ use crate::inventory::Item;
 pub enum Tier {
     Wood,
     Copper,
+    Tin,
     Iron,
+    Lead,
+    Silver,
+    Tungsten,
+    Gold,
+    Platinum,
+}
+
+impl Tier {
+    /// Game ids of the pickaxe, axe, hammer and broadsword (the wooden ones the
+    /// game lacks are drawn as iron).
+    fn ids(self) -> [u16; 4] {
+        match self {
+            Tier::Wood => [1, 10, 196, 24],
+            Tier::Copper => [3509, 3506, 3505, 3508],
+            Tier::Tin => [3503, 3500, 3499, 3502],
+            Tier::Iron => [1, 10, 7, 4],
+            Tier::Lead => [3497, 3494, 3493, 3496],
+            Tier::Silver => [3515, 3512, 3511, 3514],
+            Tier::Tungsten => [3491, 3488, 3487, 3490],
+            Tier::Gold => [3521, 3518, 3517, 3520],
+            Tier::Platinum => [3485, 3482, 3481, 3484],
+        }
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -95,41 +119,68 @@ impl Tool {
             auto_reuse: true,
             use_turn: true,
         };
-        let sword = |use_animation, damage, knock_back| ToolStats {
-            use_time: 20,
+        let sword = |use_time, use_animation, damage, knock_back| ToolStats {
+            use_time,
             use_animation,
             damage,
             knock_back,
             scale: 1.0,
             ..ToolStats::default()
         };
+        let pick = |pick, use_time, use_animation, tile_boost, damage, scale| ToolStats {
+            scale,
+            ..tool(pick, 0, 0, use_time, use_animation, tile_boost, damage, 2.0)
+        };
         match self {
-            Tool::Pickaxe(Tier::Iron) => tool(40, 0, 0, 13, 20, 0, 5, 2.0),
-            Tool::Pickaxe(_) => ToolStats { scale: 0.9, ..tool(35, 0, 0, 15, 23, -1, 4, 2.0) },
+            Tool::Pickaxe(Tier::Wood | Tier::Copper) => pick(35, 15, 23, -1, 4, 0.9),
+            Tool::Pickaxe(Tier::Tin) => pick(35, 14, 21, 0, 5, 0.95),
+            Tool::Pickaxe(Tier::Iron) => pick(40, 13, 20, 0, 5, 1.0),
+            Tool::Pickaxe(Tier::Lead) => pick(43, 12, 19, 0, 6, 1.025),
+            Tool::Pickaxe(Tier::Silver) => pick(45, 11, 19, 0, 6, 1.05),
+            Tool::Pickaxe(Tier::Tungsten) => pick(50, 19, 21, 0, 6, 1.05),
+            Tool::Pickaxe(Tier::Gold) => pick(55, 17, 20, 0, 6, 1.05),
+            Tool::Pickaxe(Tier::Platinum) => pick(59, 15, 19, 0, 7, 1.05),
+            Tool::Axe(Tier::Wood | Tier::Copper) => tool(0, 7, 0, 21, 30, -1, 3, 4.5),
+            Tool::Axe(Tier::Tin) => tool(0, 8, 0, 20, 28, 0, 4, 4.5),
             Tool::Axe(Tier::Iron) => tool(0, 9, 0, 19, 27, 0, 5, 4.5),
-            Tool::Axe(_) => tool(0, 7, 0, 21, 30, -1, 3, 4.5),
+            Tool::Axe(Tier::Lead) => tool(0, 10, 0, 19, 28, 0, 6, 4.5),
+            Tool::Axe(Tier::Silver) => tool(0, 10, 0, 18, 26, 0, 6, 4.5),
+            Tool::Axe(Tier::Tungsten) => tool(0, 11, 0, 18, 26, 0, 7, 4.5),
+            Tool::Axe(Tier::Gold) => tool(0, 11, 0, 18, 26, 0, 7, 4.5),
+            Tool::Axe(Tier::Platinum) => tool(0, 12, 0, 17, 25, 0, 8, 4.5),
             Tool::Hammer(Tier::Wood) => tool(0, 0, 25, 25, 37, -1, 2, 5.5),
             Tool::Hammer(Tier::Copper) => tool(0, 0, 35, 23, 33, -1, 4, 5.5),
+            Tool::Hammer(Tier::Tin) => tool(0, 0, 38, 21, 31, 0, 6, 5.5),
             Tool::Hammer(Tier::Iron) => tool(0, 0, 40, 20, 30, 0, 7, 5.5),
-            Tool::Sword(Tier::Wood) => sword(20, 7, 5.0),
-            Tool::Sword(Tier::Copper) => sword(21, 9, 5.5),
-            Tool::Sword(Tier::Iron) => sword(20, 12, 5.5),
+            Tool::Hammer(Tier::Lead) => tool(0, 0, 43, 19, 29, 0, 8, 5.5),
+            Tool::Hammer(Tier::Silver) => tool(0, 0, 45, 19, 29, 0, 9, 5.5),
+            Tool::Hammer(Tier::Tungsten) => tool(0, 0, 50, 25, 28, 0, 9, 5.5),
+            Tool::Hammer(Tier::Gold) => tool(0, 0, 55, 23, 28, 0, 9, 5.5),
+            Tool::Hammer(Tier::Platinum) => tool(0, 0, 59, 21, 27, 0, 10, 5.5),
+            Tool::Sword(Tier::Wood) => sword(20, 20, 7, 5.0),
+            Tool::Sword(Tier::Copper) => sword(20, 21, 9, 5.5),
+            Tool::Sword(Tier::Tin) => sword(20, 20, 10, 5.5),
+            Tool::Sword(Tier::Iron) => sword(20, 20, 12, 5.5),
+            Tool::Sword(Tier::Lead) => sword(20, 20, 13, 5.5),
+            Tool::Sword(Tier::Silver) => sword(20, 20, 14, 6.0),
+            Tool::Sword(Tier::Tungsten) => sword(19, 19, 14, 6.0),
+            Tool::Sword(Tier::Gold) => sword(18, 18, 15, 6.5),
+            Tool::Sword(Tier::Platinum) => sword(17, 17, 16, 6.5),
         }
     }
 
-    pub fn sheet(self) -> &'static str {
+    /// The game's id of the item.
+    pub fn id(self) -> u16 {
         match self {
-            Tool::Pickaxe(Tier::Copper) => "Item_3509",
-            Tool::Pickaxe(_) => "Item_1",
-            Tool::Axe(Tier::Copper) => "Item_3506",
-            Tool::Axe(_) => "Item_10",
-            Tool::Hammer(Tier::Wood) => "Item_196",
-            Tool::Hammer(Tier::Copper) => "Item_3505",
-            Tool::Hammer(Tier::Iron) => "Item_7",
-            Tool::Sword(Tier::Wood) => "Item_24",
-            Tool::Sword(Tier::Copper) => "Item_3508",
-            Tool::Sword(Tier::Iron) => "Item_4",
+            Tool::Pickaxe(t) => t.ids()[0],
+            Tool::Axe(t) => t.ids()[1],
+            Tool::Hammer(t) => t.ids()[2],
+            Tool::Sword(t) => t.ids()[3],
         }
+    }
+
+    pub fn sheet(self) -> String {
+        format!("Item_{}", self.id())
     }
 }
 
@@ -227,30 +278,6 @@ pub const RECIPES: &[Recipe] = &[
         station: Some(WORK_BENCH),
     },
     Recipe {
-        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Copper))),
-        count: 1,
-        inputs: &[(Item::Material(Material::CopperBar), 12), wood(4)],
-        station: Some(ANVIL),
-    },
-    Recipe {
-        out: Out::Item(Item::Tool(Tool::Axe(Tier::Copper))),
-        count: 1,
-        inputs: &[(Item::Material(Material::CopperBar), 9), wood(3)],
-        station: Some(ANVIL),
-    },
-    Recipe {
-        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Copper))),
-        count: 1,
-        inputs: &[(Item::Material(Material::CopperBar), 10), wood(3)],
-        station: Some(ANVIL),
-    },
-    Recipe {
-        out: Out::Item(Item::Tool(Tool::Sword(Tier::Copper))),
-        count: 1,
-        inputs: &[(Item::Material(Material::CopperBar), 8)],
-        station: Some(ANVIL),
-    },
-    Recipe {
         out: Out::Item(Item::Id(crate::magic::AMETHYST_STAFF)),
         count: 1,
         inputs: &[(Item::Material(Material::CopperBar), 7), (Item::Id(181), 8)],
@@ -286,22 +313,71 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(Item::Id(706), 7), (Item::Id(182), 8)],
         station: Some(ANVIL),
     },
+    // Pickaxe, axe, hammer and broadsword of each metal.
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Copper))),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 8), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Copper))),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 6), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Copper))),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Copper))),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 6)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Tin))),
+        count: 1,
+        inputs: &[(Item::Id(703), 8), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Tin))),
+        count: 1,
+        inputs: &[(Item::Id(703), 6), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Tin))),
+        count: 1,
+        inputs: &[(Item::Id(703), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Tin))),
+        count: 1,
+        inputs: &[(Item::Id(703), 6)],
+        station: Some(ANVIL),
+    },
     Recipe {
         out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Iron))),
         count: 1,
-        inputs: &[(Item::Material(Material::IronBar), 12), wood(4)],
+        inputs: &[(Item::Material(Material::IronBar), 10), wood(3)],
         station: Some(ANVIL),
     },
     Recipe {
         out: Out::Item(Item::Tool(Tool::Axe(Tier::Iron))),
         count: 1,
-        inputs: &[(Item::Material(Material::IronBar), 9), wood(3)],
+        inputs: &[(Item::Material(Material::IronBar), 8), wood(3)],
         station: Some(ANVIL),
     },
     Recipe {
         out: Out::Item(Item::Tool(Tool::Hammer(Tier::Iron))),
         count: 1,
-        inputs: &[(Item::Material(Material::IronBar), 10), wood(3)],
+        inputs: &[(Item::Material(Material::IronBar), 8), wood(3)],
         station: Some(ANVIL),
     },
     Recipe {
@@ -310,6 +386,152 @@ pub const RECIPES: &[Recipe] = &[
         inputs: &[(Item::Material(Material::IronBar), 8)],
         station: Some(ANVIL),
     },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Lead))),
+        count: 1,
+        inputs: &[(Item::Id(704), 10), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Lead))),
+        count: 1,
+        inputs: &[(Item::Id(704), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Lead))),
+        count: 1,
+        inputs: &[(Item::Id(704), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Lead))),
+        count: 1,
+        inputs: &[(Item::Id(704), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Silver))),
+        count: 1,
+        inputs: &[(Item::Id(21), 10), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Silver))),
+        count: 1,
+        inputs: &[(Item::Id(21), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Silver))),
+        count: 1,
+        inputs: &[(Item::Id(21), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Silver))),
+        count: 1,
+        inputs: &[(Item::Id(21), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Tungsten))),
+        count: 1,
+        inputs: &[(Item::Id(705), 10), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Tungsten))),
+        count: 1,
+        inputs: &[(Item::Id(705), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Tungsten))),
+        count: 1,
+        inputs: &[(Item::Id(705), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Tungsten))),
+        count: 1,
+        inputs: &[(Item::Id(705), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Gold))),
+        count: 1,
+        inputs: &[(Item::Id(19), 10), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Gold))),
+        count: 1,
+        inputs: &[(Item::Id(19), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Gold))),
+        count: 1,
+        inputs: &[(Item::Id(19), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Gold))),
+        count: 1,
+        inputs: &[(Item::Id(19), 8)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Pickaxe(Tier::Platinum))),
+        count: 1,
+        inputs: &[(Item::Id(706), 10), wood(4)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Axe(Tier::Platinum))),
+        count: 1,
+        inputs: &[(Item::Id(706), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Hammer(Tier::Platinum))),
+        count: 1,
+        inputs: &[(Item::Id(706), 8), wood(3)],
+        station: Some(ANVIL),
+    },
+    Recipe {
+        out: Out::Item(Item::Tool(Tool::Sword(Tier::Platinum))),
+        count: 1,
+        inputs: &[(Item::Id(706), 8)],
+        station: Some(ANVIL),
+    },
+    // Bows and wooden arrows.
+    Recipe { out: Out::Item(Item::Id(39)), count: 1, inputs: &[wood(10)], station: Some(WORK_BENCH) },
+    Recipe {
+        out: Out::Item(Item::Id(40)),
+        count: 25,
+        inputs: &[wood(1), (Item::Block(STONE), 1)],
+        station: Some(WORK_BENCH),
+    },
+    Recipe {
+        out: Out::Item(Item::Id(3504)),
+        count: 1,
+        inputs: &[(Item::Material(Material::CopperBar), 7)],
+        station: Some(ANVIL),
+    },
+    Recipe { out: Out::Item(Item::Id(3498)), count: 1, inputs: &[(Item::Id(703), 7)], station: Some(ANVIL) },
+    Recipe {
+        out: Out::Item(Item::Id(99)),
+        count: 1,
+        inputs: &[(Item::Material(Material::IronBar), 7)],
+        station: Some(ANVIL),
+    },
+    Recipe { out: Out::Item(Item::Id(3492)), count: 1, inputs: &[(Item::Id(704), 7)], station: Some(ANVIL) },
+    Recipe { out: Out::Item(Item::Id(3510)), count: 1, inputs: &[(Item::Id(21), 7)], station: Some(ANVIL) },
+    Recipe { out: Out::Item(Item::Id(3486)), count: 1, inputs: &[(Item::Id(705), 7)], station: Some(ANVIL) },
+    Recipe { out: Out::Item(Item::Id(3516)), count: 1, inputs: &[(Item::Id(19), 7)], station: Some(ANVIL) },
+    Recipe { out: Out::Item(Item::Id(3480)), count: 1, inputs: &[(Item::Id(706), 7)], station: Some(ANVIL) },
     // Armour: head, body, legs of each set.
     Recipe { out: Out::Item(Item::Id(704)), count: 1, inputs: &[(Item::Block(167), 3)], station: Some(FURNACE) },
     Recipe { out: Out::Item(Item::Id(727)), count: 1, inputs: &[wood(20)], station: Some(WORK_BENCH) },
@@ -371,6 +593,44 @@ pub const RECIPES: &[Recipe] = &[
     Recipe { out: Out::Item(Item::Id(698)), count: 1, inputs: &[(Item::Id(706), 25)], station: Some(ANVIL) },
 ];
 
+/// The pictures of every tier's tools, as `Tier::ids` lists them.
+const TOOL_SHEETS: &[&str] = &[
+    "Item_1",
+    "Item_10",
+    "Item_196",
+    "Item_24",
+    "Item_3509",
+    "Item_3506",
+    "Item_3505",
+    "Item_3508",
+    "Item_3503",
+    "Item_3500",
+    "Item_3499",
+    "Item_3502",
+    "Item_7",
+    "Item_4",
+    "Item_3497",
+    "Item_3494",
+    "Item_3493",
+    "Item_3496",
+    "Item_3515",
+    "Item_3512",
+    "Item_3511",
+    "Item_3514",
+    "Item_3491",
+    "Item_3488",
+    "Item_3487",
+    "Item_3490",
+    "Item_3521",
+    "Item_3518",
+    "Item_3517",
+    "Item_3520",
+    "Item_3485",
+    "Item_3482",
+    "Item_3481",
+    "Item_3484",
+];
+
 /// Every sheet the items above draw with.
 pub fn sheets() -> Vec<String> {
     let mut v: Vec<String> =
@@ -378,11 +638,7 @@ pub fn sheets() -> Vec<String> {
             .iter()
             .map(|m| m.sheet().to_string())
             .collect();
-    for t in [Tier::Wood, Tier::Copper, Tier::Iron] {
-        for tool in [Tool::Pickaxe(t), Tool::Axe(t), Tool::Hammer(t), Tool::Sword(t)] {
-            v.push(tool.sheet().to_string());
-        }
-    }
+    v.extend(TOOL_SHEETS.iter().map(|s| s.to_string()));
     v.push("Item_9".to_string());
     v.sort();
     v.dedup();

@@ -10,6 +10,7 @@ use crate::inventory::{Inventory, Item, Stack};
 use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
+use crate::ranged::{self, Arrow};
 use crate::{armor, backdrop, cave, glow, item_ids, pots};
 use formats::wld::Env;
 use world::light::{self, Glow, Rect};
@@ -98,6 +99,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(magic::SHEETS.iter().map(|s| s.to_string()));
     v.extend(glow::TORCH_ITEMS.iter().map(|id| format!("Item_{id}")));
     v.extend(armor::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(ranged::SHEETS.iter().map(|s| s.to_string()));
     v.extend(armor::picture_sheets());
     v
 }
@@ -162,6 +164,7 @@ pub struct Game {
     pub mana: magic::Mana,
     /// Bolts in flight and dust in the air.
     pub bolts: Vec<Bolt>,
+    pub arrows: Vec<Arrow>,
     /// Falling stars and their spawners.
     pub stars: Vec<Star>,
     pub dust: Vec<Dust>,
@@ -255,6 +258,7 @@ impl Game {
             potion_delay: 0,
             mana: Default::default(),
             bolts: Vec::new(),
+            arrows: Vec::new(),
             stars: Vec::new(),
             dust: Vec::new(),
             item_rotation: 0.0,
@@ -316,6 +320,7 @@ impl Game {
                 }
             }
             self.update_bolts();
+            self.update_arrows();
             self.update_stars();
             self.dust.retain_mut(|d| d.update());
             for (_, p) in &mut self.others {
@@ -943,6 +948,8 @@ impl Game {
             if held && self.item_animation == 0 && self.release_use {
                 if magic::staff_bolt(id).is_some() {
                     self.cast(id, target.unwrap());
+                } else if ranged::is_bow(id) {
+                    self.fire(id, target.unwrap());
                 } else if id == magic::MANA_CRYSTAL {
                     self.use_crystal();
                 } else if self.drink(id) {
@@ -995,7 +1002,7 @@ impl Game {
     /// Size of the held item's picture, which the swing's reach follows.
     fn held_frame(&self) -> (f32, f32) {
         let sheet = match self.inventory.selected().map(|s| s.item) {
-            Some(Item::Tool(t)) => self.sheet(t.sheet()),
+            Some(Item::Tool(t)) => self.sheet(&t.sheet()),
             _ => None,
         };
         sheet.map_or((32.0, 32.0), |s| (s.w as f32, s.h as f32))
@@ -1139,6 +1146,32 @@ impl Game {
         }
     }
 
+    /// `ItemCheck_Shoot` for a bow with `PickAmmo`: takes the first wooden arrow
+    /// of the inventory and looses it at the cursor, the bow's damage, speed and
+    /// knockback added to the arrow's.
+    fn fire(&mut self, id: u16, (wx, wy): (f32, f32)) {
+        let (Some(bow), Some(arrow)) = (item_ids::stats(id), item_ids::stats(ranged::WOODEN_ARROW)) else { return };
+        let ammo = Item::Id(ranged::WOODEN_ARROW);
+        let Some(slot) = self.inventory.slots.iter_mut().find(|s| s.is_some_and(|s| s.item == ammo)) else { return };
+        let stack = slot.as_mut().unwrap();
+        stack.count -= 1;
+        if stack.count == 0 {
+            *slot = None;
+        }
+        self.item_animation = bow.use_animation as i32;
+        self.sfx.push(Sfx::Bow);
+        let (cx, cy) = self.player.center();
+        self.player.facing_left = wx - cx <= 0.0;
+        let dir = if self.player.facing_left { -1.0 } else { 1.0 };
+        let (dx, dy) = (wx - cx, wy - cy);
+        let l = (dx * dx + dy * dy).sqrt();
+        let speed = bow.shoot_speed + arrow.shoot_speed;
+        let vel = if l == 0.0 { [dir * speed, 0.0] } else { [dx * speed / l, dy * speed / l] };
+        let damage = bow.damage as i32 + arrow.damage as i32;
+        self.arrows.push(Arrow::new([cx, cy], vel, damage, bow.knock_back + arrow.knock_back));
+        self.item_rotation = (vel[1] * dir).atan2(vel[0] * dir);
+    }
+
     /// `ItemCheck_UseManaCrystal`: a star more, shown in blue.
     fn use_crystal(&mut self) {
         if !self.mana.crystal() {
@@ -1223,6 +1256,43 @@ impl Game {
             self.sfx.push(Sfx::StarHit);
             let [cx, cy] = star.center();
             self.toss(cx, cy, Item::Id(magic::FALLEN_STAR), 1);
+        }
+    }
+
+    /// `Projectile.Update` for each arrow: flying, then the first monster it
+    /// touches takes the hit; `Kill` thuds and leaves wood dust.
+    fn update_arrows(&mut self) {
+        let mut i = 0;
+        while i < self.arrows.len() {
+            let mut alive = self.arrows[i].advance(&self.world);
+            if alive {
+                let a = &self.arrows[i];
+                let s = ranged::SIZE;
+                let hit = self.mobs.iter().position(|m| {
+                    let b = &m.body;
+                    !m.kind.friendly()
+                        && a.pos[0] < b.x + b.w
+                        && b.x < a.pos[0] + s
+                        && a.pos[1] < b.y + b.h
+                        && b.y < a.pos[1] + s
+                });
+                if let Some(m) = hit {
+                    let dir = if a.vel[0] > 0.0 { 1.0 } else { -1.0 };
+                    let (damage, kb) = (a.damage, a.knock_back);
+                    self.strike(m, damage, kb, dir, 0);
+                    alive = false;
+                }
+            }
+            if alive {
+                i += 1;
+                continue;
+            }
+            let a = self.arrows.swap_remove(i);
+            self.sfx.push(Sfx::Dig);
+            for _ in 0..10 {
+                let d = self.new_dust(7, a.pos, [0.0, 0.0], 1.0);
+                self.dust.push(d);
+            }
         }
     }
 
@@ -1813,7 +1883,7 @@ impl Game {
         match item {
             Item::Block(t) => placing(t),
             Item::Object(id) => placing(self.templates[id as usize].tile),
-            Item::Tool(t) => sheet(t.sheet()),
+            Item::Tool(t) => sheet(&t.sheet()),
             Item::Material(m) => sheet(m.sheet()),
             Item::Bucket(None) => Some(205),
             Item::Bucket(Some(Liquid::Water)) => Some(206),
@@ -1841,7 +1911,7 @@ impl Game {
         let sheet = |name: &str| self.sheet(name).map_or(16.0, |s| s.w.max(s.h) as f32);
         match item {
             Item::Block(_) => 16.0,
-            Item::Tool(t) => sheet(t.sheet()),
+            Item::Tool(t) => sheet(&t.sheet()),
             Item::Material(m) => sheet(m.sheet()),
             Item::Bucket(_) => sheet("Item_205"),
             Item::Id(id) => sheet(&format!("Item_{id}")),
@@ -1871,7 +1941,7 @@ impl Game {
                 Some(s) if !s.fallback => fit(&s, [18, 18, 16, 16]),
                 _ => flat(atlas.tile_color.get(t as usize).copied().unwrap_or([255; 4])),
             },
-            Item::Tool(t) => match self.sheet(t.sheet()) {
+            Item::Tool(t) => match self.sheet(&t.sheet()) {
                 Some(s) => fit(s, [0, 0, s.w, s.h]),
                 None => flat([180, 180, 190, 255]),
             },
@@ -1948,6 +2018,7 @@ impl Game {
         for d in &self.drops {
             over.extend(self.item_icon(d.item, [d.x - 2.0, d.y - 4.0], DROP_SIZE + 4.0, SPRITE_LIT));
         }
+        self.arrow_sprites(&mut over);
         self.magic_sprites(&mut over);
         self.crack_sprites(&mut over);
         let tool = self.held_tool();
@@ -2214,10 +2285,14 @@ impl Game {
                 self.held_staff_sprite(id, out);
                 return;
             }
+            if ranged::is_bow(id) {
+                self.held_bow_sprite(id, out);
+                return;
+            }
         }
         let Some(Item::Tool(t)) = self.inventory.selected().map(|s| s.item) else { return };
         let s = t.stats();
-        let Some(sheet) = self.sheet(t.sheet()).filter(|_| self.item_animation > 0) else { return };
+        let Some(sheet) = self.sheet(&t.sheet()).filter(|_| self.item_animation > 0) else { return };
         let ([x, y], rot) = self.swing_pose(s);
         // Drawn where the player is drawn, between ticks and after a step.
         let [dx, dy] = self.player.drawn(self.tick_acc);
@@ -2230,6 +2305,36 @@ impl Game {
         sprite.size = [w, h];
         (sprite.rot, sprite.pivot) = (rot, grip);
         out.push(sprite);
+    }
+
+    /// A bow held out toward the cursor (`useStyle` 5): turned by
+    /// `itemRotation` about a point 10 px behind its middle, which sits 2 px
+    /// back from the player's centre (`DrawPlayerItemPos`).
+    fn held_bow_sprite(&self, id: u16, out: &mut Vec<Sprite>) {
+        let Some(sheet) = self.sheet(&format!("Item_{id}")) else { return };
+        let left = self.player.facing_left;
+        let dir = if left { -1.0 } else { 1.0 };
+        let [dx, dy] = self.player.drawn(self.tick_acc);
+        let (cx, cy) = (dx + player::WIDTH / 2.0, dy + player::HEIGHT / 2.0 + self.player.gfx_off_y);
+        let (w, h) = (sheet.w as f32, sheet.h as f32);
+        let (x, y) = ((cx - 2.0 * dir).floor(), cy.floor());
+        let origin = [if left { w + 10.0 } else { -10.0 }, (h / 2.0).floor()];
+        let flags = SPRITE_LIT | if left { SPRITE_FLIP } else { 0 };
+        let mut sprite = Sprite::sheet([x - origin[0], y - origin[1]], sheet, [0, 0, sheet.w, sheet.h], flags);
+        (sprite.rot, sprite.pivot) = (self.item_rotation, origin);
+        out.push(sprite);
+    }
+
+    /// Flying arrows, lit like the world.
+    fn arrow_sprites(&self, out: &mut Vec<Sprite>) {
+        let Some(sheet) = self.sheet("Projectile_1") else { return };
+        for a in &self.arrows {
+            let (w, h) = (sheet.w as f32, sheet.h as f32);
+            let [cx, cy] = a.center();
+            let mut s = Sprite::sheet([cx - w / 2.0, cy - h / 2.0], sheet, [0, 0, sheet.w, sheet.h], SPRITE_LIT);
+            (s.rot, s.pivot) = (a.rotation(), [w / 2.0, h / 2.0]);
+            out.push(s);
+        }
     }
 
     /// A staff held out toward the cursor (`useStyle` 5 with `Item.staff`):
@@ -2762,6 +2867,72 @@ mod tests {
         assert_eq!(out(706).inputs, [(Item::Block(169), 4)]);
         assert_eq!(out(744).inputs, [(Item::Id(706), 7), (Item::Id(182), 8)]);
         assert_eq!(out(744).station, Some(items::ANVIL));
+    }
+
+    #[test]
+    fn every_metal_has_its_tools_as_the_game_sets_them() {
+        let tiers =
+            [Tier::Copper, Tier::Tin, Tier::Iron, Tier::Lead, Tier::Silver, Tier::Tungsten, Tier::Gold, Tier::Platinum];
+        for t in tiers {
+            for tool in [Tool::Pickaxe(t), Tool::Axe(t), Tool::Hammer(t), Tool::Sword(t)] {
+                let (s, g) = (tool.stats(), item_ids::stats(tool.id()).unwrap());
+                assert_eq!(
+                    (s.pick, s.axe, s.hammer, s.damage, s.use_animation, s.tile_boost, s.knock_back),
+                    (
+                        g.pick as i32,
+                        g.axe as i32,
+                        g.hammer as i32,
+                        g.damage as i32,
+                        g.use_animation as i32,
+                        g.tile_boost as i32,
+                        g.knock_back
+                    ),
+                    "{tool:?}"
+                );
+                let r = RECIPES.iter().find(|r| r.out == Out::Item(Item::Tool(tool))).unwrap();
+                assert_eq!(r.station, Some(items::ANVIL));
+            }
+        }
+        let out = |t: Tool| RECIPES.iter().find(|r| r.out == Out::Item(Item::Tool(t))).unwrap().inputs;
+        assert_eq!(
+            out(Tool::Pickaxe(Tier::Copper)),
+            [(Item::Material(Material::CopperBar), 8), (Item::Block(WOOD), 4)]
+        );
+        assert_eq!(out(Tool::Sword(Tier::Platinum)), [(Item::Id(706), 8)]);
+        assert_eq!(Tool::Pickaxe(Tier::Platinum).stats().pick, 59);
+    }
+
+    #[test]
+    fn bows_loose_arrows_that_drop_and_hit() {
+        let mut g = game();
+        g.mobs.clear();
+        g.inventory.slots[0] = Some(Stack { item: Item::Id(3480), count: 1 });
+        g.inventory.slots[1] = Some(Stack { item: Item::Id(ranged::WOODEN_ARROW), count: 2 });
+        g.inventory.selected = 0;
+        let (cx, cy) = g.player.center();
+        g.use_item(Some((cx + 100.0, cy)));
+        assert_eq!(g.arrows.len(), 1);
+        let a = &g.arrows[0];
+        assert_eq!((a.damage, a.knock_back, a.vel), (13 + 5, 2.0, [9.6, 0.0]), "platinum bow and wooden arrow");
+        assert_eq!(g.inventory.count(Item::Id(ranged::WOODEN_ARROW)), 1);
+        // Straight for 15 ticks, then falling.
+        let mut a = Arrow::new([cx, cy - 200.0], [5.0, 0.0], 18, 2.0);
+        for _ in 0..14 {
+            a.advance(&g.world);
+        }
+        assert_eq!(a.vel[1], 0.0);
+        a.advance(&g.world);
+        assert!((a.vel[1] - 0.1).abs() < 1e-6);
+
+        g.arrows.clear();
+        g.mobs.push(Mob::new(Kind::Slime, cx + 60.0, cy + 21.0));
+        let (hp, my) = (g.mobs[0].hp, g.mobs[0].body.center().1);
+        g.arrows.push(Arrow::new([cx + 20.0, my], [9.6, 0.0], 18, 2.0));
+        for _ in 0..10 {
+            g.update_arrows();
+        }
+        assert!(g.arrows.is_empty(), "spent on the slime");
+        assert!(g.mobs.is_empty() || g.mobs[0].hp < hp);
     }
 
     #[test]
