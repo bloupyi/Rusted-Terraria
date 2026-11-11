@@ -499,3 +499,53 @@ pub fn wet(world: &World, pos: V2, size: [i32; 2]) -> Option<u8> {
     }
     None
 }
+
+/// `WorldGen.SolidTileNoPlatforms`: solid or solid on top, but not a platform.
+/// Outside the world counts as solid.
+pub fn solid_no_platforms(world: &World, x: i64, y: i64) -> bool {
+    if !world.in_bounds(x, y) {
+        return true;
+    }
+    let c = cell(world, x, y);
+    c.active && !c.platform() && (c.solid() || c.solid_top())
+}
+
+/// `WorldGen.SolidTileAllowBottomSlope`: something to stand on that is not
+/// sloped on top nor half a block.
+pub fn solid_allow_bottom_slope(world: &World, x: i64, y: i64) -> bool {
+    if !world.in_bounds(x, y) {
+        return true;
+    }
+    let c = cell(world, x, y);
+    c.active && (c.solid() || c.solid_top()) && !matches!(c.slope, 1 | 2) && !c.half
+}
+
+/// The tile queries of the fighters' step-up: present, `tileSolid`,
+/// `tileSolidTop`, half block, sloped on top.
+pub fn shape(world: &World, x: i64, y: i64) -> (bool, bool, bool, bool, bool) {
+    let c = cell(world, x, y);
+    (c.active, c.solid(), c.solid_top(), c.half, matches!(c.slope, 1 | 2))
+}
+
+impl Box<'_> {
+    /// `Collision.SolidCollision`: a solid block, not one solid only on top, overlaps the box.
+    pub fn solid_collision(&self) -> bool {
+        let (x0, x1, y0, y1) = self.span();
+        let [px, py] = self.pos;
+        let [w, h] = self.size.map(|k| k as f32);
+        (x0..x1).any(|i| {
+            (y0..y1).any(|j| {
+                let c = cell(self.world, i, j);
+                if !c.active || !c.solid() || c.solid_top() {
+                    return false;
+                }
+                let (tx, ty, th) = (
+                    i as f32 * 16.0,
+                    j as f32 * 16.0 + if c.half { 8.0 } else { 0.0 },
+                    if c.half { 8.0 } else { 16.0 },
+                );
+                px + w > tx && px < tx + 16.0 && py + h > ty && py < ty + th
+            })
+        })
+    }
+}
