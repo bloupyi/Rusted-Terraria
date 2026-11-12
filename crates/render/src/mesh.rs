@@ -11,8 +11,9 @@ use crate::atlas::{Atlas, SheetRef};
 
 pub const LOD_PAGE: u32 = 2048;
 const WALL_BIT: u32 = 1 << 30;
+const SPELUNK_BIT: u32 = 1 << 31;
 
-/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30.
+/// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30 | treasure (`Main.IsTileSpelunkable`) << 31.
 /// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29.
 /// `c`: 0 for a plain 16 px cell, else the game's draw of the cell: width (7) |
 /// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22 | sways << 23.
@@ -226,7 +227,10 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
                 let shape =
                     if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
                 let sway = !is_block(t) && world::draw::sways(world, xi, yi, t, fx as i32);
-                if let Some(inst) = instance(s, x, y, fx, fy, draw, false, shape as u32 | (sway as u32) << 3) {
+                if let Some(mut inst) = instance(s, x, y, fx, fy, draw, false, shape as u32 | (sway as u32) << 3) {
+                    if world::draw::spelunkable(t, c.frame_x[i], c.frame_y[i]) {
+                        inst.a |= SPELUNK_BIT;
+                    }
                     tiles.push(inst);
                 }
             }

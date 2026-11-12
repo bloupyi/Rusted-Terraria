@@ -27,7 +27,7 @@ use std::time::{Duration, Instant};
 use game::Game;
 use glam::Vec2;
 use inventory::{Item, HOTBAR, SLOTS};
-use render::{Camera, Renderer, Scene, Sprite};
+use render::{Camera, Renderer, Scene, Sprite, SPRITE_SCREEN};
 use winit::application::ApplicationHandler;
 use winit::event::{ElementState, MouseButton, MouseScrollDelta, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
@@ -117,8 +117,13 @@ struct App {
 }
 
 impl App {
+    /// `Main.MouseWorld`: upside down with the camera.
     fn screen_to_world(&self, p: Vec2, size: Vec2) -> Vec2 {
-        self.camera.center + (p - size * 0.5) / self.camera.zoom
+        let mut d = (p - size * 0.5) / self.camera.zoom;
+        if self.camera.flip {
+            d.y = -d.y;
+        }
+        self.camera.center + d
     }
 
     fn cursor_tile(&self, size: Vec2) -> (i64, i64) {
@@ -168,7 +173,9 @@ impl App {
             self.camera.center = (self.camera.center + dir * speed * dt).clamp(Vec2::ZERO, self.world_px);
             self.game.update(None, dt, time_scale);
         } else {
-            let input = Input { left: k.left, right: k.right, jump: k.jump || k.up, down: k.down };
+            // Up jumps too, unless it flips gravity.
+            let up_jumps = k.up && !self.game.player.moves.grav_control;
+            let input = Input { left: k.left, right: k.right, jump: k.jump || up_jumps, down: k.down, up: k.up };
             self.game.update(Some(input), dt, time_scale);
             let [x, y] = self.game.player.drawn(self.game.tick_acc);
             let y = y + self.game.player.gfx_off_y;
@@ -214,6 +221,8 @@ impl App {
         self.camera.water_style = self.game.water_style(self.camera.center.y / 16.0);
         self.camera.surface = self.game.env.world_surface as f32 * 16.0;
         self.camera.wind = [self.game.wind.grass.fract() as f32, self.game.env.wind];
+        self.camera.spelunker = self.game.effects.spelunker;
+        self.camera.flip = !self.free && self.game.player.grav_dir == -1.0;
         self.camera.time += dt;
     }
 
@@ -226,7 +235,7 @@ impl App {
         let mut p = ui::Painter {
             sheets: &game.scene.mesher.atlas.named,
             fonts: &self.fonts,
-            origin: self.screen_to_world(Vec2::ZERO, size).into(),
+            origin: (self.camera.center - size * 0.5 / z).into(),
             unit: 1.0 / z,
             out: Vec::new(),
         };
@@ -244,7 +253,11 @@ impl App {
                 (0.0, 1.0, [r * 0.3, g * 0.3, b * 0.3, a]),
                 (0.0, 0.0, [r, g, b, a]),
             ] {
-                let at = [t.center[0] + dx, t.center[1] + dy];
+                let mut at = [t.center[0] + dx, t.center[1] + dy];
+                // `DrawCombatText` mirrors the place, not the text, upside down.
+                if self.camera.flip {
+                    at[1] = 2.0 * self.camera.center.y - at[1];
+                }
                 world.string(font, &t.text, at, [w / 2.0, h / 2.0], t.scale, t.rotation, c);
             }
         }
@@ -621,7 +634,7 @@ impl ApplicationHandler for App {
                 self.update(dt.as_secs_f32().min(0.1), size);
                 let view = self.view(size);
                 let cursor = self.cursor_tile(size);
-                let hud = self.hud(size);
+                let mut hud = self.hud(size);
                 let Some(renderer) = &mut self.renderer else { return };
                 let t1 = Instant::now();
                 self.game.sync(renderer, view);
@@ -629,7 +642,11 @@ impl ApplicationHandler for App {
                 let (mut under, mut over) = self.game.sprites(view, Some(cursor), self.free);
                 let ticks = (self.camera.time * 60.0) as u32;
                 let center = self.camera.center.to_array();
-                under.splice(0..0, self.game.backdrop(center, self.camera.zoom, (size.x as u32, size.y as u32), ticks));
+                let mut back = self.game.backdrop(center, self.camera.zoom, (size.x as u32, size.y as u32), ticks);
+                for s in back.iter_mut().chain(&mut hud) {
+                    s.flags |= SPRITE_SCREEN;
+                }
+                under.splice(0..0, back);
                 over.extend(hud);
                 let t3 = Instant::now();
                 let stats = renderer.render(&self.camera, &under, &over);
@@ -811,6 +828,8 @@ fn main() {
             water_style: 0,
             surface: 0.0,
             wind: [0.0; 2],
+            spelunker: false,
+            flip: false,
         },
         free,
         keys: Keys::default(),

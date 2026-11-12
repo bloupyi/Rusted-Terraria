@@ -30,6 +30,8 @@ struct VOut {
     // Top-left texel of the frame, and the block shape (0 full, 1 half, 2..5 slopes).
     @location(4) @interpolate(flat) base: vec2<u32>,
     @location(5) @interpolate(flat) shape: u32,
+    // Treasure, shown brighter under the spelunker potion.
+    @location(6) @interpolate(flat) spelunk: u32,
 }
 
 fn corner(vi: u32) -> vec2<f32> {
@@ -37,6 +39,13 @@ fn corner(vi: u32) -> vec2<f32> {
 }
 
 // `p` turned clockwise (y down) by `rot` radians about `about`.
+// World pixels to clip space, upside down when the camera flips and `flips`.
+fn clip(p: vec2<f32>, flips: bool) -> vec4<f32> {
+    let c = p * cam.scale + cam.offset;
+    let down = flips && (cam.lighting & 4u) != 0u;
+    return vec4<f32>(c.x, select(c.y, -c.y, down), 0.0, 1.0);
+}
+
 fn turn(p: vec2<f32>, about: vec2<f32>, rot: f32) -> vec2<f32> {
     let d = p - about;
     let s = sin(rot);
@@ -68,11 +77,12 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
         let shift = vec2<f32>(k, abs(k));
         p = turn(p + shift, tile * 16.0 + vec2<f32>(8.0, 16.0) + shift, k * 0.1);
     }
-    out.pos = vec4<f32>(p * cam.scale + cam.offset, 0.0, 1.0);
+    out.pos = clip(p, true);
     out.base = vec2<u32>(b & 0xfffu, (b >> 12u) & 0xfffu);
     out.texel = vec2<f32>(out.base) + vec2<f32>(u, c.y) * size;
     out.layer = (b >> 24u) & 31u;
     out.shape = b >> 29u;
+    out.spelunk = a >> 31u;
     out.tile = tile + (pad + c * size) / 16.0;
     return out;
 }
@@ -92,7 +102,12 @@ fn fs_tile(in: VOut) -> @location(0) vec4<f32> {
     if c.a == 0.0 {
         discard;
     }
-    return c * vec4<f32>(smooth_light(in.tile), 1.0);
+    var l = smooth_light(in.tile);
+    if in.spelunk != 0u && (cam.lighting & 2u) != 0u {
+        // `TileDrawing`'s `findTreasure`: at least (200, 170) red and green.
+        l = vec3<f32>(max(l.r, 200.0 / 255.0), max(l.g, 170.0 / 255.0), l.b);
+    }
+    return c * vec4<f32>(l, 1.0);
 }
 
 // Sheet row shown at `local` (pixels in the tile) for a half block or slope,
@@ -133,7 +148,7 @@ fn combine(l: vec4<f32>) -> vec3<f32> {
 
 // Bilinear between tile centres.
 fn smooth_light(tile: vec2<f32>) -> vec3<f32> {
-    if cam.lighting == 0u {
+    if (cam.lighting & 1u) == 0u {
         return vec3<f32>(1.0);
     }
     let q = tile - 0.5;
@@ -149,7 +164,7 @@ fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) page: u32) ->
     let c = corner(vi);
     let origin = vec2<f32>(f32(page % cam.lod_pages_x), f32(page / cam.lod_pages_x)) * PAGE;
     var out: VOut;
-    out.pos = vec4<f32>((origin + c * PAGE) * 16.0 * cam.scale + cam.offset, 0.0, 1.0);
+    out.pos = clip((origin + c * PAGE) * 16.0, true);
     out.texel = c * PAGE;
     out.layer = page;
     out.tile = vec2<f32>(0.0);
@@ -162,7 +177,7 @@ fn vs_lod(@builtin(vertex_index) vi: u32, @builtin(instance_index) page: u32) ->
 fn fs_lod(in: VOut) -> @location(0) vec4<f32> {
     let p = min(vec2<i32>(floor(in.texel)), vec2<i32>(2047));
     let c = textureLoad(lod, p, i32(in.layer), 0);
-    if cam.lighting == 0u {
+    if (cam.lighting & 1u) == 0u {
         return c;
     }
     return c * vec4<f32>(combine(textureLoad(light, p, i32(in.layer), 0)), 1.0);
@@ -191,7 +206,7 @@ fn vs_rect(
     let c = corner(vi);
     var out: RectOut;
     let world = turn(pos + c * size, pos + pivot, rot);
-    out.pos = vec4<f32>(world * cam.scale + cam.offset, 0.0, 1.0);
+    out.pos = clip(world, (flags & 4096u) == 0u);
     out.color = color;
     let u = select(c.x, 1.0 - c.x, (flags & 512u) != 0u);
     out.texel = uv.xy + vec2<f32>(u, c.y) * uv.zw;
@@ -213,7 +228,15 @@ fn fs_rect(in: RectOut) -> @location(0) vec4<f32> {
         c = t * in.color;
     }
     if (in.flags & 256u) != 0u {
-        c = vec4<f32>(c.rgb * smooth_light(in.tile), c.a);
+        var l = smooth_light(in.tile);
+        // Hunter potion: hostile monsters at least (255, 50, 50), friendly (50, 255, 50).
+        if (in.flags & 1024u) != 0u {
+            l = max(l, vec3<f32>(1.0, 50.0 / 255.0, 50.0 / 255.0));
+        }
+        if (in.flags & 2048u) != 0u {
+            l = max(l, vec3<f32>(50.0 / 255.0, 1.0, 50.0 / 255.0));
+        }
+        c = vec4<f32>(c.rgb * l, c.a);
     }
     return c;
 }
@@ -244,7 +267,7 @@ fn vs_liquid(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b
     let size = vec2<f32>(f32(((b >> 12u) & 15u) + 1u), f32(((b >> 16u) & 15u) + 1u));
     let off = vec2<f32>(f32((b >> 20u) & 15u), f32((b >> 24u) & 15u));
     let px = vec2<f32>(cell) * 16.0 + off + c * size;
-    out.pos = vec4<f32>(px * cam.scale + cam.offset, 0.0, 1.0);
+    out.pos = clip(px, true);
     out.texel = vec2<f32>(src) + c * size;
     out.tile = px / 16.0;
     out.cell = cell;

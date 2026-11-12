@@ -2,7 +2,7 @@
 //! keeping the GPU copies (meshes, light, map) in step with edits.
 
 use render::atlas::SheetRef;
-use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_LIT};
+use render::{Renderer, Scene, Sprite, SPRITE_FLIP, SPRITE_HUNTER_FOE, SPRITE_HUNTER_FRIEND, SPRITE_LIT};
 
 use crate::audio::Sfx;
 use crate::combat_text::{self, CombatText};
@@ -552,12 +552,23 @@ impl Game {
             .map(|p| [p.x, p.y, p.w, p.h])
             .collect();
         let day = self.time < DAYTIME;
-        let sky = Sky { day, surface: self.env.world_surface as f32, blood_moon: self.env.blood_moon && !day };
-        let dist = |m: &Mob, p: &[f32; 4]| (m.body.center().0 - (p[0] + p[2] / 2.0)).abs();
+        let sky =
+            Sky { day, surface: self.env.world_surface as f32, blood_moon: self.env.blood_moon && !day, hidden: false };
+        // `UpdateEquips`: invisible, `aggro` is -750 idle and -250 using an item, taken off the distance.
+        let aggro = match (self.effects.invis, self.item_animation) {
+            (false, _) => 0.0,
+            (true, 0) => -750.0,
+            _ => -250.0,
+        };
+        let dist = |m: &Mob, i: usize, p: &[f32; 4]| {
+            (m.body.center().0 - (p[0] + p[2] / 2.0)).abs() - if i == 0 { aggro } else { 0.0 }
+        };
         let mut knocks = Vec::new();
         for (i, m) in self.mobs.iter_mut().enumerate() {
-            let near = *players.iter().min_by(|a, b| dist(m, a).total_cmp(&dist(m, b))).unwrap();
-            m.tick(&self.world, near, sky);
+            let (n, &near) =
+                players.iter().enumerate().min_by(|a, b| dist(m, a.0, a.1).total_cmp(&dist(m, b.0, b.1))).unwrap();
+            let hidden = n == 0 && aggro < 0.0 && self.item_animation == 0;
+            m.tick(&self.world, near, Sky { hidden, ..sky });
             knocks.extend(m.knock.take().map(|k| (i, k)));
         }
         for (i, k) in knocks {
@@ -900,6 +911,9 @@ impl Game {
     /// The cloud in a bottle's puff (`JumpMovement`) and its trail while rising (`UpdateJumpHeight`'s after-effects).
     fn cloud_puff(&mut self) {
         let p = self.player;
+        if p.flipped {
+            self.sfx.push(Sfx::Gravity);
+        }
         if p.cloud_jumped {
             self.sfx.push(Sfx::DoubleJump);
             for _ in 0..10 {
@@ -2688,14 +2702,19 @@ impl Game {
         let mut over = Vec::new();
         self.mob_sprites(&mut over);
         for (_, p) in &self.others {
+            let start = over.len();
             self.player_sprites(p, [0; 3], false, 2, &mut over);
+            self.upside_down(p, &mut over[start..]);
         }
-        if !free {
+        // `ShouldNotDraw`: invisible and not using an item.
+        if !free && !(self.effects.invis && self.item_animation == 0) {
             // `holdStyle` 1 raises the arm: body frame 3, front arm frame 5.
             let torch = self.inventory.selected().and_then(|s| self.torch(s.item)).is_some();
             let arm = if torch && self.player.wet.is_none() && self.item_animation == 0 { 5 } else { 2 };
+            let start = over.len();
             self.player_sprites(&self.player, self.worn_pictures(), self.immune > 0, arm, &mut over);
             self.held_item_sprite(&mut over);
+            self.upside_down(&self.player, &mut over[start..]);
         }
         for d in &self.drops {
             let coin = match d.item {
@@ -2841,13 +2860,22 @@ impl Game {
         }
     }
 
+    /// `GetNPCColorTintedByBuffs` with the hunter potion (`detectCreature`).
+    fn hunter_flag(&self, kind: Kind) -> u32 {
+        match (self.effects.hunter, kind.friendly()) {
+            (false, _) => 0,
+            (true, true) => SPRITE_HUNTER_FRIEND,
+            (true, false) => SPRITE_HUNTER_FOE,
+        }
+    }
+
     fn mob_sprites(&self, out: &mut Vec<Sprite>) {
         for m in &self.mobs {
             let b = &m.body;
             let (cx, bottom) = (b.x + b.w / 2.0, b.y + b.h + m.gfx_off_y);
             let hurt = m.stun > 0.0;
             // Monster sheets face left.
-            let flags = SPRITE_LIT | if m.facing_left { 0 } else { SPRITE_FLIP };
+            let flags = SPRITE_LIT | if m.facing_left { 0 } else { SPRITE_FLIP } | self.hunter_flag(m.kind);
             // The slimes' grey sheet takes their colour.
             let tint = m.kind.color().map_or([1.0; 4], |c| {
                 let k = |v: u8| 0.3 + 0.7 * v as f32 / 255.0;
@@ -2896,7 +2924,7 @@ impl Game {
                     }
                     out.push(sp);
                 }
-                None => out.push(Sprite { flags: SPRITE_LIT, ..Sprite::flat([b.x, b.y], [b.w, b.h], color) }),
+                None => out.push(Sprite { flags: flags & !SPRITE_FLIP, ..Sprite::flat([b.x, b.y], [b.w, b.h], color) }),
             }
         }
     }
@@ -3186,6 +3214,29 @@ impl Game {
     /// `PlayerDrawLayers` for the composite body: skin and clothes, with the worn
     /// armour (`head`, `body`, `legs` picture numbers, 0 for none) in place of
     /// the hair, the shirt and the pants and shoes.
+    /// `SpriteEffects.FlipVertically` for a player with `gravDir` -1: the
+    /// sprites mirror about the middle of its hitbox.
+    fn upside_down(&self, p: &Player, sprites: &mut [Sprite]) {
+        if p.grav_dir != -1.0 {
+            return;
+        }
+        let mid = p.drawn(self.tick_acc)[1] + p.gfx_off_y + player::HEIGHT / 2.0;
+        let turn = |[x, y]: [f32; 2], a: f32| [x * a.cos() - y * a.sin(), x * a.sin() + y * a.cos()];
+        for s in sprites {
+            // The mirror of a turn by `rot` is a turn by `-rot`; the mirrored
+            // picture is the rectangle's mirror, flipped across and half turned.
+            let pivot = [s.pos[0] + s.pivot[0], 2.0 * mid - (s.pos[1] + s.pivot[1])];
+            let pos = [s.pos[0], 2.0 * mid - s.pos[1] - s.size[1]];
+            let c = [pos[0] + s.size[0] / 2.0, pos[1] + s.size[1] / 2.0];
+            let r = turn([c[0] - pivot[0], c[1] - pivot[1]], -s.rot);
+            let t = [pivot[0] + r[0] - c[0], pivot[1] + r[1] - c[1]];
+            s.pos = [pos[0] + t[0], pos[1] + t[1]];
+            s.pivot = [s.size[0] / 2.0, s.size[1] / 2.0];
+            s.rot = std::f32::consts::PI - s.rot;
+            s.flags ^= SPRITE_FLIP;
+        }
+    }
+
     fn player_sprites(&self, p: &Player, worn: [i16; 3], dim: bool, arm: u32, out: &mut Vec<Sprite>) {
         let [x, y] = p.drawn(self.tick_acc);
         let (x, y) = (x, y + p.gfx_off_y);

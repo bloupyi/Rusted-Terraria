@@ -27,6 +27,7 @@ FLAGS = {
     "tileDungeon": "DUNGEON",
     "tileRope": "ROPE",
     "tileCut": "CUT",
+    "tileSpelunker": "SPELUNKER",
 }
 # Integer arrays split into one set per value.
 LEVELS = {"tileLargeFrames": "LARGE_FRAMES", "wallLargeFrames": "WALL_LARGE_FRAMES"}
