@@ -65,7 +65,7 @@ fn vs_tile(@builtin(vertex_index) vi: u32, @location(0) a: u32, @location(1) b: 
     if d != 0u {
         // The game's draw of the cell: centred sideways, shifted down by `top`.
         size = vec2<f32>(f32(d & 127u), f32((d >> 7u) & 127u));
-        pad = vec2<f32>((16.0 - size.x) / 2.0, f32((d >> 14u) & 127u) - 64.0);
+        pad = vec2<f32>((16.0 - size.x) / 2.0 + f32((d >> 24u) & 127u) - 64.0, f32((d >> 14u) & 127u) - 64.0);
         u = select(c.x, 1.0 - c.x, ((d >> 21u) & 1u) != 0u);
     }
     var p = tile * 16.0 + pad + c * size;

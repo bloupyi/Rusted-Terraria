@@ -16,7 +16,8 @@ const SPELUNK_BIT: u32 = 1 << 31;
 /// `a`: tile x (15 bits) | tile y (15 bits) << 15 | wall << 30 | treasure (`Main.IsTileSpelunkable`) << 31.
 /// `b`: atlas u (12) | atlas v (12) << 12 | layer (5) << 24 | block shape (3) << 29.
 /// `c`: 0 for a plain 16 px cell, else the game's draw of the cell: width (7) |
-/// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22 | sways << 23.
+/// height (7) << 7 | top + 64 (7) << 14 | mirrored << 21 | 1 << 22 | sways << 23 |
+/// left + 64 (7) << 24.
 /// Liquids have their own layout, see [`crate::liquid::chunk`].
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -215,7 +216,10 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
             let t = c.tile[i];
             let shown = world::draw::drawn_type(t, c.frame_x[i]);
             if let Some(Some(s)) = atlas.tiles.get(shown as usize).filter(|_| t != NO_TILE) {
-                let (mut fx, fy, draw) = if is_block(t) {
+                let (mut fx, mut fy, mut draw) = if t == world::draw::CACTUS {
+                    let (fx, fy) = world::draw::cactus_frame(world, xi, yi);
+                    (fx, fy, world::draw::cell(t, x, fx as i32, fy as i32))
+                } else if is_block(t) {
                     let (fx, fy) = world::frame::block(world, xi, yi, variant(x, y) as usize);
                     (fx, fy, Draw::CELL)
                 } else {
@@ -225,8 +229,21 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
                 if t == 5 {
                     fx += 176 * (world::draw::tree_biome(world, xi, yi, fx as i32, fy as i32) + 1) as u32;
                 }
-                let shape =
-                    if is_block(t) { (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT } else { 0 };
+                if t == world::draw::PALM {
+                    // Tops are drawn with the leaves; the trunk leans by its
+                    // `frameY` and takes its sand's row.
+                    let biome = world::draw::palm_biome(world, xi, yi);
+                    if (88..=132).contains(&fx) || biome < 0 {
+                        continue;
+                    }
+                    draw.left = c.frame_y[i] as i32;
+                    fy = 22 * biome as u32;
+                }
+                let shape = if is_block(t) && t != world::draw::CACTUS {
+                    (c.flags[i] & world::flags::SHAPE_MASK) >> world::flags::SHAPE_SHIFT
+                } else {
+                    0
+                };
                 let sway = !is_block(t) && world::draw::sways(world, xi, yi, t, fx as i32);
                 if let Some(mut inst) = instance(s, x, y, fx, fy, draw, false, shape as u32 | (sway as u32) << 3) {
                     if world::draw::spelunkable(t, c.frame_x[i], c.frame_y[i]) {
@@ -253,7 +270,13 @@ fn instance(s: &SheetRef, x: u32, y: u32, fx: u32, fy: u32, draw: Draw, wall: bo
     let c = if wall || (draw == Draw::CELL && sway == 0) {
         0
     } else {
-        draw.w | draw.h << 7 | ((draw.top + 64) as u32) << 14 | (draw.flip as u32) << 21 | 1 << 22 | sway << 23
+        draw.w
+            | draw.h << 7
+            | ((draw.top + 64) as u32) << 14
+            | (draw.flip as u32) << 21
+            | 1 << 22
+            | sway << 23
+            | ((draw.left + 64) as u32 & 127) << 24
     };
     Some(Instance {
         a: x | (y << 15) | if wall { WALL_BIT } else { 0 },

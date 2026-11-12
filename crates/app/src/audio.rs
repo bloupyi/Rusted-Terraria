@@ -48,6 +48,7 @@ pub enum Sfx {
     DoubleJump,
     /// `SoundID.Item8`: gravity flipped.
     Gravity,
+    Thunder,
 }
 
 impl Sfx {
@@ -86,6 +87,7 @@ impl Sfx {
             Sfx::Drown => ("Drown", 1),
             Sfx::DoubleJump => ("Double_Jump", 1),
             Sfx::Gravity => ("Item_8", 1),
+            Sfx::Thunder => ("Thunder", 6),
         }
     }
 }

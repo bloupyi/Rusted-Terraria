@@ -295,6 +295,143 @@ pub fn grass_growth(world: &World, x: i64, y: i64, surface: f64, mut roll: impl 
     (plant, spread)
 }
 
+/// A plant to place, and the cells taken over with the grass they turn to.
+pub type Infecting = (Option<(i64, i64, u16, i16)>, Vec<(i64, i64, u16)>);
+
+/// Grasses that spread over other ground: corruption, crimson and hallow,
+/// with their jungle forms.
+pub const SPREADING: [u16; 5] = [23, 199, 109, 661, 662];
+
+/// `UpdateWorld_GrassGrowth` above ground for corrupt, crimson or hallowed
+/// grass at `(x, y)`: the plant it grows above (`PlaceTile` for 24, 201 or
+/// 110, without the thorns), and each neighbour it takes over with its new
+/// type: dirt, mud and the other grasses, the evil ones under the surface too.
+pub fn infection_growth(
+    world: &World,
+    x: i64,
+    y: i64,
+    surface: f64,
+    mut roll: impl FnMut(u64) -> u64,
+) -> Infecting {
+    let t = world.tile(x, y);
+    let mut plant = None;
+    let (liquid, _) = liquid_at(world, x, y - 1);
+    let (kind, grass, jungle) = match t {
+        23 | 661 => (24, 23, Some(661)),
+        199 | 662 => (201, 199, Some(662)),
+        _ => (110, 109, None),
+    };
+    if world.tile(x, y - 1) == world::NO_TILE && liquid == 0 && roll(10) == 0 {
+        let below = world.tile(x, y);
+        let ground_ok = world::frame::shape(world, x, y) == 0
+            && match kind {
+                24 => matches!(below, 23 | 661),
+                201 => matches!(below, 199 | 662),
+                _ => matches!(below, 109 | 492),
+            };
+        let thorns = kind != 110 && roll(13) == 0;
+        let walls_ok = [world.wall(x, y - 1), world.wall(x, y)].iter().all(|w| PLANT_WALLS.contains(w));
+        if ground_ok && !thorns && walls_ok {
+            let fx = if roll(50) == 0 || (kind != 110 && roll(40) == 0) {
+                if kind == 201 {
+                    270
+                } else {
+                    144
+                }
+            } else if roll(35) == 0 || (63..=70).contains(&world.wall(x, y - 1)) {
+                const RARE: [i16; 14] = [6, 7, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+                const RARE_CRIMSON: [i16; 16] = [6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 20, 21, 22];
+                let list: &[i16] = if kind == 201 { &RARE_CRIMSON } else { &RARE };
+                list[roll(list.len() as u64) as usize] * 18
+            } else {
+                roll(6) as i16 * 18
+            };
+            plant = Some((x, y - 1, kind, fx));
+        }
+    }
+    let evil = t != 109;
+    let mut spread = Vec::new();
+    for i in x - 1..x + 2 {
+        for j in y - 1..y + 2 {
+            let n = world.tile(i, j);
+            let to = match (n, evil) {
+                (DIRT, _) => Some(grass),
+                (59, true) => jungle,
+                (2 | 109 | 477 | 492, true) => Some(grass),
+                (60, true) => jungle,
+                (2 | 23 | 199, false) => Some(grass),
+                (477, false) => Some(492),
+                _ => None,
+            };
+            let Some(to) = to else { continue };
+            if (i, j) == (x, y) || to == n || world.tile(i, j - 1) == 27 {
+                continue;
+            }
+            // Plain dirt only greens above the surface; the evil grasses go anywhere.
+            let deep = if evil { f64::INFINITY } else { surface };
+            if takes_grass(world, i, j, n, deep) {
+                spread.push((i, j, to));
+            }
+        }
+    }
+    (plant, spread)
+}
+
+/// `PlantCheck`: the plant `kind` (frame `fx`) on new ground `down` becomes
+/// that ground's plant, or dies (`None`).
+pub fn replant(kind: u16, fx: i16, down: u16) -> Option<(u16, i16)> {
+    let fits = match kind {
+        3 | 73 => matches!(down, 2 | 477 | 78 | 380 | 579),
+        24 => matches!(down, 23 | 661),
+        61 | 74 => matches!(down, 60 | 226),
+        71 => down == 70,
+        110 | 113 => matches!(down, 109 | 492),
+        201 => matches!(down, 199 | 662),
+        _ => true,
+    };
+    if fits {
+        return Some((kind, fx));
+    }
+    let mushroom = (matches!(kind, 3 | 61 | 110 | 24) && fx == 144) || (kind == 201 && fx == 270);
+    let mut fx = fx;
+    if matches!(kind, 3 | 73) && down != 2 && down != 477 && fx >= 162 {
+        fx = 126;
+    }
+    let to = match down {
+        23 | 661 => {
+            if fx >= 162 {
+                fx = 126;
+            }
+            24
+        }
+        199 | 662 => 201,
+        2 | 477 if kind == 113 => 73,
+        2 | 477 => 3,
+        109 | 492 if kind == 73 => 113,
+        109 | 492 => 110,
+        60 | 226 => {
+            while fx > 126 {
+                fx -= 126;
+            }
+            61
+        }
+        70 => {
+            while fx > 72 {
+                fx -= 72;
+            }
+            71
+        }
+        _ => kind,
+    };
+    if to == kind {
+        return None;
+    }
+    if mushroom {
+        fx = if to == 201 { 270 } else { 144 };
+    }
+    Some((to, fx))
+}
+
 /// `WallID.Sets.AllowsPlantsToGrow`.
 pub const PLANT_WALLS: [u16; 27] = [
     0, 150, 138, 145, 107, 152, 140, 139, 141, 106, 245, 315, 317, 63, 64, 65, 66, 67, 68, 69, 81, 70, 264, 268, 265,

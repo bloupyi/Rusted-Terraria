@@ -42,8 +42,14 @@ const LOD_BUDGET: usize = 256;
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
 /// Obsidian from liquids, wood from trees, and the craftable furniture.
-pub const EXTRA_TILES: [u16; 19] = [
+pub const EXTRA_TILES: [u16; 25] = [
     3,
+    24,
+    110,
+    201,
+    world::draw::CACTUS,
+    trees::PALM,
+    322,
     trees::SAPLING,
     71,
     alchemy::SAPLING,
@@ -154,6 +160,8 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(equip::SHEETS.iter().map(|s| s.to_string()));
     v.extend(alchemy::SHEETS.iter().map(|s| s.to_string()));
     v.push(weather::SHEET.to_string());
+    v.extend(trees::SHEETS.iter().map(|s| s.to_string()));
+    v.push("Tree_Tops_21".to_string());
     v.extend(equip::buff_sheets());
     v.extend(armor::picture_sheets());
     v
@@ -285,6 +293,9 @@ pub struct Game {
     pub weather: weather::Weather,
     /// What the window shows, `[x, y, w, h]` in world pixels: where rain falls.
     pub view_px: [f32; 4],
+    /// Trees shaken today, by the cell under them (`treeShakeX/Y`).
+    shaken: Vec<(i64, i64)>,
+    was_day: bool,
 }
 
 impl Game {
@@ -373,6 +384,8 @@ impl Game {
             glows: Vec::new(),
             weather: Default::default(),
             view_px: [0.0; 4],
+            shaken: Vec::new(),
+            was_day: false,
         };
         g.weather = weather::Weather::new(&g.env);
         // The guide lives at the spawn point.
@@ -540,7 +553,18 @@ impl Game {
         let mut rng = std::mem::take(&mut self.rng);
         let mut roll = |n: i32| (xorshift(&mut rng) % n.max(1) as u64) as i32;
         let style = self.water_style(self.player.y / 16.0) as u8;
+        let (day, time) = self.ticks();
+        if day && !self.was_day {
+            // `UpdateTime_StartDay`: trees can be shaken again.
+            self.shaken.clear();
+        }
+        self.was_day = day;
+        let open_sky = (((self.view_px[1] + self.view_px[3] / 2.0) / 16.0) as f64) < self.env.rock_layer;
         let w = &mut self.weather;
+        w.update_state(day, time);
+        if w.update_lightning(open_sky, &mut roll) {
+            self.sfx.push(Sfx::Thunder);
+        }
         if !self.client {
             let strong = self.life_max >= 120;
             let day_rate = time_scale.round().max(1.0) as i32;
@@ -626,12 +650,13 @@ impl Game {
             if !self.random().is_multiple_of(20) {
                 return;
             }
+            let kind = if self.world.frame(x, y).0 / 54 >= 6 { trees::PALM } else { TREE };
             let mut rng = std::mem::take(&mut self.rng);
             let grown =
                 trees::grow(&self.world, x, y, underground, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
             self.rng = rng;
             for (cx, cy, fx, fy) in grown.into_iter().flatten() {
-                self.world.set_tile(cx as u32, cy as u32, TREE, fx, fy);
+                self.world.set_tile(cx as u32, cy as u32, kind, fx, fy);
                 self.send_tile(cx as u32, cy as u32);
             }
             return;
@@ -639,8 +664,48 @@ impl Game {
         if self.world.liquid(x, y) > 32 {
             return;
         }
+        // `GrowCactus`: a cactus now and then, and on open desert sand away
+        // from the beaches, rarely, a new one.
+        let w = self.world.width as i64;
+        let desert = !underground
+            && [53, 112, 116, 234].contains(&t)
+            && self.world.tile(x, y - 1) == NO_TILE
+            && (400..w - 400).contains(&x);
+        if (t == world::draw::CACTUS && self.random().is_multiple_of(15))
+            || (desert && self.random().is_multiple_of(300))
+        {
+            let mut rng = std::mem::take(&mut self.rng);
+            let cell = trees::grow_cactus(&self.world, x, y, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
+            self.rng = rng;
+            if let Some((cx, cy)) = cell {
+                self.world.set_tile(cx as u32, cy as u32, world::draw::CACTUS, -1, -1);
+                self.send_cells(cx - 1, cy - 1, 3, 3);
+            }
+            return;
+        }
         let mut rng = std::mem::take(&mut self.rng);
         let mut roll = |n: u64| xorshift(&mut rng) % n;
+        if alchemy::SPREADING.contains(&t) {
+            let (plant, spread) = alchemy::infection_growth(&self.world, x, y, surface, &mut roll);
+            self.rng = rng;
+            if let Some((px, py, tile, fx)) = plant {
+                self.world.set_tile(px as u32, py as u32, tile, fx, 0);
+                self.send_tile(px as u32, py as u32);
+            }
+            for (sx, sy, to) in spread {
+                self.world.set_tile(sx as u32, sy as u32, to, -1, -1);
+                self.send_tile(sx as u32, sy as u32);
+                // `PlantCheck` on the plant above: it turns with the ground or dies.
+                let above = self.world.tile(sx, sy - 1);
+                if [3, 24, 61, 71, 73, 74, 110, 113, 201].contains(&above) {
+                    let (fx, fy) = self.world.frame(sx, sy - 1);
+                    let (t, fx) = alchemy::replant(above, fx, to).unwrap_or((NO_TILE, -1));
+                    self.world.set_tile(sx as u32, (sy - 1) as u32, t, fx, if t == NO_TILE { -1 } else { fy });
+                    self.send_tile(sx as u32, (sy - 1) as u32);
+                }
+            }
+            return;
+        }
         let (plant, spread) = match t {
             alchemy::GRASS_TILE if !underground => alchemy::grass_growth(&self.world, x, y, surface, &mut roll),
             alchemy::MUSHROOM_GRASS_TILE if underground => alchemy::mushroom_growth(&self.world, x, y, &mut roll),
@@ -1512,12 +1577,29 @@ impl Game {
     pub fn music(&self) -> &'static str {
         let (x, y) = self.player.center();
         let column = ((x / 16.0) as usize).min(self.surface.len() - 1);
+        let (day, time) = self.ticks();
+        let w = &self.weather;
         if (y / 16.0) as u32 > self.surface[column] + UNDERGROUND_DEPTH {
             "Music_4"
-        } else if self.time >= DAYTIME {
-            "Music_3"
+        } else if w.storm {
+            if self.env.blood_moon && !day {
+                "Music_2"
+            } else {
+                "Music_52"
+            }
+        } else if day {
+            match (w.cloud_alpha > 0.0, w.windy_day) {
+                (true, _) if time < 10800.0 => "Music_59",
+                (true, _) => "Music_19",
+                (false, true) => "Music_44",
+                _ => "Music_1",
+            }
+        } else if self.env.blood_moon {
+            "Music_2"
+        } else if w.cloud_alpha > 0.0 {
+            "Music_19"
         } else {
-            "Music_1"
+            "Music_3"
         }
     }
 
@@ -1555,6 +1637,7 @@ impl Game {
     pub fn sky(&self) -> ([f32; 3], [f32; 3]) {
         let (day, t) = self.ticks();
         let sky = backdrop::colors(day, t, self.env.blood_moon, self.weather.cloud_alpha).sky;
+        let sky = weather::flash(sky, self.weather.lightning);
         let low = [132.0, 170.0, 248.0];
         (backdrop::tile_light(sky), [0, 1, 2].map(|i| sky[i] * low[i] / (255.0 * 255.0)))
     }
@@ -1581,6 +1664,7 @@ impl Game {
             time,
             ticks,
             cloud: self.weather.cloud_alpha,
+            lightning: self.weather.lightning,
             sheets: &self.scene.mesher.atlas.named,
         };
         let view = backdrop::View { x: center[0] - w / 2.0, y: center[1] - h / 2.0, w, h };
@@ -2305,6 +2389,9 @@ impl Game {
             self.hits.clear(x, y, Target::Tile);
             self.break_tile(x, y, true);
         } else {
+            if t == TREE || t == trees::PALM {
+                self.shake_tree(x, y);
+            }
             let bare = mining::after_failed_hit(t);
             if bare != t {
                 self.world.set_tile(x as u32, y as u32, bare, -1, -1);
@@ -2314,6 +2401,35 @@ impl Game {
         }
         if damage != 0 {
             self.prune_hits();
+        }
+    }
+
+    /// `ShakeTree`: the first axe hit of the day on a tree with a leafy top
+    /// in the open may drop something from it.
+    fn shake_tree(&mut self, x: i64, y: i64) {
+        let (bx, by) = trees::bottom(&self.world, x, y);
+        let Some(kind) = trees::Kind::of(self.world.tile(bx, by)) else { return };
+        if self.shaken.len() >= 500 || self.shaken.contains(&(bx, by)) {
+            return;
+        }
+        self.shaken.push((bx, by));
+        let mut top = by - 1;
+        while top > 10 && [TREE, trees::PALM].contains(&self.world.tile(bx, top)) {
+            top -= 1;
+        }
+        top += 1;
+        let w = &self.world;
+        let boxed = (bx - 2..=bx + 2).any(|i| (top - 2..=top + 2).any(|j| world::tile_sets::SOLID.has(w.tile(i, j))));
+        if !trees::leafy_top(w, bx, top) || boxed {
+            return;
+        }
+        let mut rng = std::mem::take(&mut self.rng);
+        let gift = trees::shake(kind, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
+        self.rng = rng;
+        if let Some((id, count)) = gift {
+            let item = if id == 9 { Item::Block(WOOD) } else { self.item_of_id(id) };
+            let (px, py) = (bx as f32 * 16.0, top as f32 * 16.0);
+            self.drops.push(Drop { x: px, y: py, vx: 0.0, vy: 0.0, item, count, grab_delay: 0.0 });
         }
     }
 
@@ -2358,28 +2474,40 @@ impl Game {
             (vec![(tx, ty)], item.map(|id| (Item::Id(id), 1)))
         } else if t == 80 {
             (vec![(tx, ty)], Some((Item::Id(alchemy::CACTUS), 1)))
-        } else if t == TREE {
-            // `KillTile_GetTreeDrops` for each cell: wood, now and then one
-            // more by the axe's power, and an acorn from half the leafy ones.
+        } else if t == TREE || t == trees::PALM {
+            // `KillTile_GetTreeDrops` for each cell: the wood of the tree's
+            // ground, now and then one more by the axe's power, and an acorn
+            // from half the leafy ones. A palm gives one wood a cell and an
+            // acorn from its top.
             let cells = self.connected(tx, ty, |_, _| true, 512);
-            let bottom = cells.iter().max_by_key(|c| c.1).copied().unwrap();
-            let acorns = trees::drops_acorns(self.world.tile(bottom.0, bottom.1 + 1));
+            let (bx, by) = trees::bottom(&self.world, tx, ty);
+            let kind = trees::Kind::of(self.world.tile(bx, by));
             let axe = self.held_tool().axe as u64;
-            let (mut wood, mut seeds) = (0, 0);
+            let (mut wood, mut seeds) = (0u16, 0u16);
             for &(x, y) in &cells {
-                wood += 1;
-                if self.random() % 35 <= axe || self.random().is_multiple_of(3) {
-                    wood += 1;
-                }
                 let (fx, fy) = self.world.frame(x, y);
-                if acorns && trees::leafy(fx, fy) && self.random().is_multiple_of(2) {
+                if t == trees::PALM {
+                    wood += 1;
+                    seeds += (88..=132).contains(&fx) as u16;
+                    continue;
+                }
+                let mushroom = kind == Some(trees::Kind::Mushroom);
+                if !mushroom || self.random().is_multiple_of(2) {
+                    wood += 1;
+                    if self.random() % 35 <= axe || self.random().is_multiple_of(3) {
+                        wood += 1;
+                    }
+                }
+                if kind.is_some_and(|k| k.acorns()) && trees::leafy(fx, fy) && self.random().is_multiple_of(2) {
                     seeds += 1;
                 }
             }
             if seeds > 0 {
                 extra.push((Item::Id(trees::ACORN), seeds));
             }
-            (cells, Some((Item::Block(WOOD), wood)))
+            let id = kind.map_or(Some(9), |k| k.wood()).unwrap_or(alchemy::GLOWING_MUSHROOM);
+            let item = if id == 9 { Item::Block(WOOD) } else { self.item_of_id(id) };
+            (cells, (wood > 0).then_some((item, wood)))
         } else if t == POT {
             let cells = self.object_cells(tx, ty);
             let (x0, y0) = (cells.iter().map(|c| c.0).min().unwrap(), cells.iter().map(|c| c.1).min().unwrap());
@@ -2452,6 +2580,7 @@ impl Game {
                     1 => HANGING.contains(&n) || n == door::CLOSED || n == door::OPEN,
                     _ => n == TORCH,
                 };
+                let rests = rests || (n == world::draw::CACTUS && !trees::cactus_holds(&self.world, nx, ny));
                 if rests && !(n == TORCH && self.torch_held(nx, ny)) {
                     self.break_tile(nx, ny, drop);
                 }
@@ -3056,6 +3185,10 @@ impl Game {
         for &(x, y) in cells {
             let (xi, yi) = (x as i64, y as i64);
             let (fx, fy) = self.world.frame(xi, yi);
+            if self.world.tile(xi, yi) == trees::PALM {
+                self.palm_top(xi, yi, fx, fy, out);
+                continue;
+            }
             let frame = match fy {
                 220 => 1,
                 242 => 2,
@@ -3106,6 +3239,35 @@ impl Game {
                 let pos = [pivot[0] - origin[0], pivot[1] - origin[1]];
                 out.push(Sprite { rot: k * rot, pivot: origin, ..Sprite::sheet(pos, sheet, src, SPRITE_LIT) });
             }
+        }
+    }
+
+    /// The leaves of a palm's top cell: `Tree_Tops_15`, or 21 for an oasis
+    /// palm, a column per top frame and a row per sand, leaning with the
+    /// wind about their foot, shifted with the trunk's lean.
+    fn palm_top(&self, x: i64, y: i64, fx: i16, lean: i16, out: &mut Vec<Sprite>) {
+        let biome = world::draw::palm_biome(&self.world, x, y);
+        if biome < 0 {
+            return;
+        }
+        let col = ((fx - 88) / 22) as u32;
+        let (sheet, w, h, row, shift, down) = if (4..=7).contains(&biome) {
+            ("Tree_Tops_21", 114u32, 98u32, (biome - 4) as u32 * 98, 48.0, 2.0)
+        } else {
+            ("Tree_Tops_15", 80, 80, biome as u32 * 82, 32.0, 0.0)
+        };
+        let Some(sheet) = self.sheet(sheet) else { return };
+        let k =
+            if self.world.wall(x, y) == 0 { world::draw::wind_cycle(x, y, self.wind.tree, self.env.wind) } else { 0.0 };
+        let foot = [
+            x as f32 * 16.0 - shift + lean as f32 + (w / 2) as f32 + 2.0 * k,
+            y as f32 * 16.0 + 16.0 + down + 2.0 * k.abs(),
+        ];
+        let src = [col * (w + 2), row, w, h];
+        if src[0] + w <= sheet.w && src[1] + h <= sheet.h {
+            let origin = [(w / 2) as f32, h as f32];
+            let pos = [foot[0] - origin[0], foot[1] - origin[1]];
+            out.push(Sprite { rot: k * 0.08, pivot: origin, ..Sprite::sheet(pos, sheet, src, SPRITE_LIT) });
         }
     }
 
@@ -3677,7 +3839,14 @@ fn tree_cells(world: &World, cx: u32, cy: u32) -> Vec<(u32, u32)> {
     let r = Rect::of_chunk(cx, cy, world);
     (r.y0..r.y1)
         .flat_map(|y| (r.x0..r.x1).map(move |x| (x, y)))
-        .filter(|&(x, y)| world.tile(x as i64, y as i64) == TREE && world.frame(x as i64, y as i64).1 >= 198)
+        .filter(|&(x, y)| {
+            let (fx, fy) = world.frame(x as i64, y as i64);
+            match world.tile(x as i64, y as i64) {
+                TREE => fy >= 198,
+                trees::PALM => (88..=132).contains(&fx),
+                _ => false,
+            }
+        })
         .collect()
 }
 
@@ -4309,6 +4478,10 @@ mod tests {
         assert_eq!(g.music(), "Music_1");
         g.time = 0.9;
         assert_eq!(g.music(), "Music_3");
+        g.weather.cloud_alpha = 0.3;
+        assert_eq!(g.music(), "Music_19", "rain");
+        g.weather.storm = true;
+        assert_eq!(g.music(), "Music_52", "storm");
         g.player.y += 60.0 * 16.0;
         assert_eq!(g.music(), "Music_4");
     }
@@ -4595,8 +4768,8 @@ mod tests {
 
     /// Grass at y = 20 over dirt, with a water pool at x 40..44.
     fn garden() -> Game {
-        let mut important = vec![false; 90];
-        for t in [3, 5, 13, 20, 71, alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING] {
+        let mut important = vec![false; 330];
+        for t in [3, 5, 13, 20, 24, 71, 110, 201, 323, alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING] {
             important[t as usize] = true;
         }
         let world = World::parse(&formats::synth::write_world("h", 64, 64, &important, |x, y| match (x, y) {
@@ -4726,6 +4899,79 @@ mod tests {
             assert!((10..=20).contains(&wood));
         }
         assert!((8..=32).contains(&acorns), "{acorns}");
+    }
+
+    #[test]
+    fn palms_cacti_and_corruption_live_too() {
+        let mut g = garden();
+        for x in 25..36 {
+            g.world.set_tile(x, 20, 53, -1, -1);
+        }
+        // A sand sapling grows a leaning palm with leaves on top.
+        g.world.set_tile(30, 18, trees::SAPLING, 18 * 18, 0);
+        g.world.set_tile(30, 19, trees::SAPLING, 18 * 18, 18);
+        for _ in 0..2000 {
+            g.update_tile(30, 19, false);
+            if g.world.tile(30, 19) == trees::PALM {
+                break;
+            }
+        }
+        let height = (0..20).rev().take_while(|&y| g.world.tile(30, y) == trees::PALM).count();
+        assert!((10..=20).contains(&height), "{height}");
+        let top = 20 - height as i64;
+        assert!((88..=132).contains(&g.world.frame(30, top).0));
+        assert!(trees::leafy_top(&g.world, 30, top));
+        g.break_tile(30, 19, true);
+        let count = |g: &Game, item| g.drops.iter().filter(|d| d.item == item).map(|d| d.count).sum::<u16>();
+        assert_eq!(count(&g, Item::Block(322)), height as u16, "palm wood");
+        assert_eq!(count(&g, Item::Id(trees::ACORN)), 1, "an acorn from the top");
+        g.drops.clear();
+
+        // A cactus with an arm: cutting its foot fells it all.
+        for (x, y) in [(32, 19), (32, 18), (32, 17), (33, 18)] {
+            g.world.set_tile(x, y, world::draw::CACTUS, -1, -1);
+        }
+        assert!(trees::cactus_holds(&g.world, 33, 18));
+        assert_eq!(world::draw::cactus_frame(&g.world, 33, 18), (108, 18), "a lone arm tip");
+        g.break_tile(32, 19, true);
+        assert!((17..20).all(|y| g.world.tile(32, y) == NO_TILE) && g.world.tile(33, 18) == NO_TILE);
+        assert_eq!(count(&g, Item::Id(alchemy::CACTUS)), 4);
+
+        // Corrupt grass takes the grass around it, and the plants on it turn.
+        g.world.set_tile(5, 20, 23, -1, -1);
+        g.world.set_tile(6, 19, 3, 36, 0);
+        for _ in 0..200 {
+            g.update_tile(5, 20, false);
+        }
+        assert_eq!((g.world.tile(4, 20), g.world.tile(6, 20)), (23, 23));
+        assert!([24, NO_TILE].contains(&g.world.tile(6, 19)));
+        assert_ne!(g.world.tile(10, 20), 23, "only what touches it");
+    }
+
+    #[test]
+    fn trees_are_shaken_once_a_day() {
+        let mut g = garden();
+        for y in 12..20 {
+            g.world.set_tile(19, y, TREE, 0, 0);
+        }
+        g.world.set_tile(19, 12, TREE, 22, 198);
+        let mut gifts = 0;
+        for _ in 0..400 {
+            g.shaken.clear();
+            g.shake_tree(19, 19);
+            g.shake_tree(19, 19);
+            gifts += g.drops.len();
+            g.drops.clear();
+        }
+        assert!((60..180).contains(&gifts), "{gifts}");
+        // A bare top gives nothing.
+        g.world.set_tile(19, 12, TREE, 0, 198);
+        g.shaken.clear();
+        for _ in 0..100 {
+            g.shaken.clear();
+            g.shake_tree(19, 19);
+        }
+        assert!(g.drops.is_empty());
     }
 
     #[test]
