@@ -118,8 +118,80 @@ pub fn leafy_top(world: &World, x: i64, y: i64) -> bool {
     }
 }
 
-/// `ShakeTree`'s gift from a leafy top, by the game's odds: an item id and how
-/// many, or nothing (critters and the like are left out).
+/// What a shaken tree lets fall.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Gift {
+    /// An item id and how many.
+    Item(u16, u16),
+    /// Critters by `NPCID`, each at a tile offset from the top with a velocity.
+    Critters(Vec<(u16, [i64; 2], [f32; 2])>),
+}
+
+/// The weather a shake looks at for its butterflies and owls.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ShakeSky {
+    pub day: bool,
+    pub raining: bool,
+    /// `TooWindyForButterflies`.
+    pub windy: bool,
+}
+
+/// `ShakeTree`'s gift from a leafy top, by the game's odds, the critters too
+/// (but not the fairies, owls, macaws, bees, crabs and red squirrels, which
+/// take their turn and give nothing here).
+pub fn shake_with(kind: Kind, sky: ShakeSky, r: &mut dyn FnMut(i32) -> i32) -> Option<Gift> {
+    use Kind::*;
+    if let Some((id, n)) = shake(kind, r) {
+        return Some(Gift::Item(id, n));
+    }
+    let leafy = matches!(kind, Forest | Hallowed);
+    if r(15) == 0 && leafy {
+        let id = [74, 297, 298, 299][..].get(r(5) as usize).copied()?;
+        return Some(Gift::Critters(vec![(id, [0, 0], [0.0; 2])]));
+    }
+    // Fairies, owls, macaws, the Halloween raven.
+    let others = [
+        (50, kind == Hallowed && !sky.day),
+        (50, kind == Forest && !sky.day),
+        (50, kind == Jungle && sky.day),
+        (40, false),
+    ];
+    for (n, there) in others {
+        if r(n) == 0 && there {
+            return None;
+        }
+    }
+    if r(50) == 0 && leafy {
+        let flock = (0..5)
+            .map(|_| {
+                let at = [range(r, -2, 2) as i64, -1 + range(r, -2, 2) as i64];
+                let a = r(10_000) as f32 / 10_000.0 * std::f32::consts::TAU;
+                ([74, 297, 298][r(3) as usize], at, [a.cos() * 3.0, a.sin() * 3.0])
+            })
+            .collect();
+        return Some(Gift::Critters(flock));
+    }
+    // Bees, crabs, the evil's monsters, a jungle bat, a beehive.
+    let others = [
+        (40, kind == Jungle),
+        (20, matches!(kind, Palm | PalmCorrupt | PalmCrimson | PalmHallowed)),
+        (30, matches!(kind, Crimson | PalmCrimson)),
+        (30, matches!(kind, Corrupt | PalmCorrupt)),
+        (30, kind == Jungle && !sky.day),
+        (40, kind == Jungle),
+    ];
+    for (n, there) in others {
+        if r(n) == 0 && there {
+            return None;
+        }
+    }
+    if r(20) == 0 && leafy && !sky.raining && !sky.windy && sky.day {
+        return Some(Gift::Critters(vec![(356, [0, 0], [0.0; 2])]));
+    }
+    None
+}
+
+/// `ShakeTree`'s items alone: an item id and how many, or nothing.
 pub fn shake(kind: Kind, r: &mut dyn FnMut(i32) -> i32) -> Option<(u16, u16)> {
     use Kind::*;
     let forest = kind == Forest;
@@ -558,6 +630,35 @@ mod tests {
         // Without the trunk's foot, the rest falls.
         w.set_tile(60, 39, NO_TILE, -1, -1);
         assert!(!cactus_holds(&w, 60, 38));
+    }
+
+    #[test]
+    fn shaken_trees_let_critters_out() {
+        let mut s = 9u64;
+        let mut r = |n: i32| {
+            s ^= s << 13;
+            s ^= s >> 7;
+            s ^= s << 17;
+            (s % n.max(1) as u64) as i32
+        };
+        let day = ShakeSky { day: true, ..ShakeSky::default() };
+        let (mut birds, mut flocks, mut butterflies) = (0, 0, 0);
+        for _ in 0..20_000 {
+            if let Some(Gift::Critters(v)) = shake_with(Kind::Forest, day, &mut r) {
+                match v.len() {
+                    5 => flocks += 1,
+                    _ if v[0].0 == 356 => butterflies += 1,
+                    _ => birds += 1,
+                }
+            }
+        }
+        assert!(birds > 500 && flocks > 100 && butterflies > 200, "{birds} {flocks} {butterflies}");
+        let night = ShakeSky::default();
+        assert!((0..5000).all(|_| !matches!(
+            shake_with(Kind::Forest, night, &mut r),
+            Some(Gift::Critters(v)) if v[0].0 == 356
+        )));
+        assert!((0..5000).all(|_| !matches!(shake_with(Kind::Jungle, day, &mut r), Some(Gift::Critters(_)))));
     }
 
     #[test]

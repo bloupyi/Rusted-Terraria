@@ -7,6 +7,8 @@ use crate::collision::{self, V2};
 use crate::door;
 use crate::World;
 
+mod critter;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     Slime,
@@ -21,10 +23,23 @@ pub enum Kind {
     BlackSlime,
     Skeleton,
     CaveBat,
+    Bunny,
+    Squirrel,
+    Mouse,
+    Bird,
+    BlueJay,
+    Cardinal,
+    Goldfish,
+    Firefly,
+    LightningBug,
+    Butterfly,
+    Worm,
+    Snail,
+    GlowingSnail,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 25] = [
         Kind::Slime,
         Kind::Zombie,
         Kind::DemonEye,
@@ -37,6 +52,19 @@ impl Kind {
         Kind::BlackSlime,
         Kind::Skeleton,
         Kind::CaveBat,
+        Kind::Bunny,
+        Kind::Squirrel,
+        Kind::Mouse,
+        Kind::Bird,
+        Kind::BlueJay,
+        Kind::Cardinal,
+        Kind::Goldfish,
+        Kind::Firefly,
+        Kind::LightningBug,
+        Kind::Butterfly,
+        Kind::Worm,
+        Kind::Snail,
+        Kind::GlowingSnail,
     ];
 
     pub fn from_u8(v: u8) -> Option<Kind> {
@@ -60,6 +88,14 @@ impl Kind {
             Kind::BlackSlime => (25.0, 18.0, 45, 15, 4, 1.0),
             Kind::Skeleton => (18.0, 40.0, 60, 20, 8, 0.5),
             Kind::CaveBat => (22.0, 18.0, 16, 13, 2, 0.8),
+            Kind::Bunny | Kind::Squirrel => (18.0, 20.0, 5, 0, 0, 1.0),
+            Kind::Mouse => (14.0, 12.0, 5, 0, 0, 1.0),
+            Kind::Bird | Kind::BlueJay | Kind::Cardinal => (14.0, 14.0, 5, 0, 0, 0.8),
+            Kind::Goldfish => (20.0, 18.0, 5, 0, 0, 0.5),
+            Kind::Firefly | Kind::Butterfly => (10.0, 10.0, 5, 0, 0, 1.0),
+            Kind::LightningBug | Kind::Snail => (12.0, 12.0, 5, 0, 0, 1.0),
+            Kind::Worm => (10.0, 4.0, 5, 0, 0, 1.0),
+            Kind::GlowingSnail => (14.0, 14.0, 5, 0, 0, 1.0),
         }
     }
 
@@ -137,15 +173,133 @@ impl Kind {
             Kind::BlackSlime => 20.0,
             Kind::Skeleton => 100.0,
             Kind::CaveBat => 90.0,
+            _ => 0.0,
         }
     }
 
+    /// `friendly`: weapons pass through it and it hurts nobody.
     pub fn friendly(self) -> bool {
-        self == Kind::Guide
+        matches!(self, Kind::Guide | Kind::Worm)
     }
 
+    /// `noGravity` as `SetDefaults` leaves it; the AIs change it as they go.
     pub fn flies(self) -> bool {
-        matches!(self, Kind::DemonEye | Kind::EyeBoss | Kind::CaveBat)
+        matches!(
+            self,
+            Kind::DemonEye
+                | Kind::EyeBoss
+                | Kind::CaveBat
+                | Kind::Goldfish
+                | Kind::Firefly
+                | Kind::LightningBug
+                | Kind::Butterfly
+                | Kind::Snail
+                | Kind::GlowingSnail
+        )
+    }
+
+    /// `NPCID.Sets.CountsAsCritter`.
+    pub fn critter(self) -> bool {
+        self.npc_id() >= 46 && !matches!(self, Kind::Skeleton | Kind::CaveBat)
+    }
+
+    /// The game's `NPCID`, which names its `NPC_N` sheet.
+    pub fn npc_id(self) -> u16 {
+        match self {
+            Kind::Slime
+            | Kind::GreenSlime
+            | Kind::PurpleSlime
+            | Kind::RedSlime
+            | Kind::YellowSlime
+            | Kind::BlackSlime => 1,
+            Kind::Zombie => 3,
+            Kind::DemonEye => 2,
+            Kind::Guide => 22,
+            Kind::EyeBoss => 4,
+            Kind::Skeleton => 21,
+            Kind::CaveBat => 49,
+            Kind::Bunny => 46,
+            Kind::Squirrel => 299,
+            Kind::Mouse => 300,
+            Kind::Bird => 74,
+            Kind::BlueJay => 297,
+            Kind::Cardinal => 298,
+            Kind::Goldfish => 55,
+            Kind::Firefly => 355,
+            Kind::LightningBug => 358,
+            Kind::Butterfly => 356,
+            Kind::Worm => 357,
+            Kind::Snail => 359,
+            Kind::GlowingSnail => 360,
+        }
+    }
+
+    pub fn from_npc_id(id: u16) -> Option<Kind> {
+        Kind::ALL.into_iter().find(|k| k.critter() && k.npc_id() == id)
+    }
+
+    /// `Main.npcFrameCount`: frames down its sheet.
+    pub fn frames(self) -> u32 {
+        match self {
+            Kind::Bunny => 7,
+            Kind::Squirrel | Kind::Mouse | Kind::Goldfish | Kind::Snail | Kind::GlowingSnail => 6,
+            Kind::Bird | Kind::BlueJay | Kind::Cardinal | Kind::CaveBat => 5,
+            Kind::Firefly | Kind::LightningBug => 4,
+            Kind::Butterfly => 24,
+            Kind::Worm | Kind::Slime => 2,
+            Kind::Skeleton => 15,
+            _ => 1,
+        }
+    }
+
+    /// `npcSlots`: how much of the spawn cap it takes.
+    pub fn slots(self) -> f32 {
+        match self {
+            Kind::Bird | Kind::BlueJay | Kind::Cardinal => 0.4,
+            Kind::Mouse | Kind::Butterfly => 0.25,
+            Kind::Firefly | Kind::LightningBug => 0.2,
+            Kind::Worm => 0.1,
+            Kind::Snail | Kind::GlowingSnail => 0.5,
+            _ => 1.0,
+        }
+    }
+
+    /// `catchItem`: what the bug net turns it into (the butterfly's depends on its colour).
+    pub fn catch_item(self) -> Option<u16> {
+        Some(match self {
+            Kind::Bunny => 2019,
+            Kind::Squirrel => 2018,
+            Kind::Mouse => 2003,
+            Kind::Bird => 2015,
+            Kind::BlueJay => 2016,
+            Kind::Cardinal => 2017,
+            Kind::Goldfish => 261,
+            Kind::Firefly => 1992,
+            Kind::LightningBug => 2004,
+            Kind::Butterfly => 1994,
+            Kind::Worm => 2002,
+            Kind::Snail => 2006,
+            Kind::GlowingSnail => 2007,
+            _ => return None,
+        })
+    }
+
+    /// `makeNPC` of a caught critter item, and the butterfly's `placeStyle`.
+    pub fn from_item(id: u16) -> Option<(Kind, f32)> {
+        if (1994..=2001).contains(&id) {
+            return Some((Kind::Butterfly, (1 + id - 1994) as f32));
+        }
+        Kind::ALL.into_iter().find(|k| k.catch_item() == Some(id)).map(|k| (k, 0.0))
+    }
+
+    /// `NPCID.Sets.TownCritter`: walks with the town folks' `AI_007`.
+    pub fn town_critter(self) -> bool {
+        matches!(self, Kind::Bunny | Kind::Squirrel | Kind::Mouse)
+    }
+
+    /// `DeathSound` `NPCDeath4` instead of `NPCDeath1`.
+    pub fn squeaks(self) -> bool {
+        self == Kind::Mouse
     }
 }
 
@@ -224,6 +378,13 @@ pub struct Mob {
     /// It has had a target (`oldTarget` valid).
     targeted: bool,
     hidden: bool,
+    pub local_ai: [f32; 4],
+    /// `noGravity`, which some AIs switch.
+    no_gravity: bool,
+    old_y: f32,
+    /// Let go from the player's hands (`releaseOwner`).
+    pub released: bool,
+    rng: u64,
 }
 
 impl Mob {
@@ -260,6 +421,36 @@ impl Mob {
             knock: None,
             targeted: false,
             hidden: false,
+            local_ai: [0.0; 4],
+            no_gravity: kind.flies(),
+            old_y: y - h,
+            released: false,
+            rng: (x.to_bits() as u64) << 32 ^ y.to_bits() as u64 ^ 0x9e37_79b9_7f4a_7c15,
+        }
+    }
+
+    /// `Main.rand.Next(n)`: 0 when `n` is not above 0.
+    fn rand(&mut self, n: i32) -> i32 {
+        if n <= 0 {
+            return 0;
+        }
+        let r = &mut self.rng;
+        *r ^= *r << 13;
+        *r ^= *r >> 7;
+        *r ^= *r << 17;
+        (*r % n as u64) as i32
+    }
+
+    /// `Main.rand.Next(lo, hi)`.
+    fn rand_range(&mut self, lo: i32, hi: i32) -> i32 {
+        lo + self.rand(hi - lo)
+    }
+
+    /// `NPC.scale`: some critters take a size of their own.
+    pub fn scale(&self) -> f32 {
+        match self.kind {
+            Kind::Firefly | Kind::LightningBug | Kind::Butterfly | Kind::Snail if self.ai[3] != 0.0 => self.ai[3],
+            k => k.scale(),
         }
     }
 
@@ -270,6 +461,12 @@ impl Mob {
 
     /// One tick against the player whose box is `target` (x, y, w, h).
     pub fn tick(&mut self, world: &World, target: [f32; 4], sky: Sky) {
+        self.tick_among(world, target, sky, &[]);
+    }
+
+    /// `tick` among the hostile monsters whose boxes are `threats`, which
+    /// critters run from.
+    pub fn tick_among(&mut self, world: &World, target: [f32; 4], sky: Sky, threats: &[[f32; 4]]) {
         self.hidden = sky.hidden;
         self.timer += TICK;
         self.stun = (self.stun - TICK).max(0.0);
@@ -281,13 +478,13 @@ impl Mob {
                 let b = &mut self.body;
                 (b.vx, b.vy) = (b.vx / 60.0, b.vy / 60.0);
             }
-            _ => self.update_npc(world, target, sky),
+            _ => self.update_npc(world, target, sky, threats),
         }
         self.just_hit = false;
     }
 
     /// `NPC.UpdateNPC`: gravity, the AI, movement against tiles, the frame.
-    fn update_npc(&mut self, world: &World, target: [f32; 4], sky: Sky) {
+    fn update_npc(&mut self, world: &World, target: [f32; 4], sky: Sky, threats: &[[f32; 4]]) {
         let (gravity, max_fall) = self.gravity(world, sky);
         let k = (1.0 + self.body.vx.abs() / 3.0) * self.step_speed;
         self.gfx_off_y =
@@ -297,10 +494,17 @@ impl Mob {
             k if k.is_slime() => self.slime(world, target, sky),
             k if k.is_fighter() => self.fighter(world, target, sky),
             Kind::CaveBat => self.bat(world, target),
-            _ => self.floating_eye(target, sky),
+            Kind::DemonEye => self.floating_eye(target, sky),
+            k if k.town_critter() => self.critter(world, target, sky, threats),
+            Kind::Bird | Kind::BlueJay | Kind::Cardinal => self.bird(world, target),
+            Kind::Goldfish => self.fish(world, target),
+            Kind::Firefly | Kind::LightningBug => self.firefly(world, target, sky),
+            Kind::Butterfly => self.butterfly(world, target, threats),
+            Kind::Worm => self.worm(target),
+            _ => self.snail(world, target),
         }
         let b = &mut self.body;
-        if !self.kind.flies() {
+        if !self.no_gravity {
             b.vy = (b.vy + gravity).min(max_fall);
         }
         if b.vx.abs() < 0.005 {
@@ -355,6 +559,7 @@ impl Mob {
         self.collide_x = vel[0] != v[0];
         self.collide_y = vel[1] != v[1];
         self.old_x = self.body.x;
+        self.old_y = self.body.y;
         let b = &mut self.body;
         (b.x, b.y, b.vx, b.vy) = (b.x + step[0], b.y + step[1], vel[0], vel[1]);
 
@@ -902,7 +1107,7 @@ impl Mob {
                     self.frame = 0;
                 }
             }
-            _ => {}
+            _ => self.critter_frame(),
         }
         self.facing_left = self.sprite_dir < 0;
     }
@@ -1215,5 +1420,142 @@ mod tests {
         assert_eq!(Kind::YellowSlime.damage(), 15);
         assert!(Kind::ALL.iter().filter(|k| k.is_slime()).count() == 6);
         assert_eq!(Kind::from_u8(11), Some(Kind::CaveBat));
+    }
+
+    const DAY: Sky = Sky { day: true, surface: 200.0, blood_moon: false, hidden: false };
+
+    /// `world` 300 tiles wide, room for critters to wander.
+    fn wide() -> World {
+        World::parse(&formats::synth::write_world("m", 300, 200, &[], |x, y| Tile {
+            tile: if y >= 100 || ([30, 140].contains(&x) && (98..100).contains(&y)) || (x == 40 && y == 99) {
+                1
+            } else {
+                NO_TILE
+            },
+            ..Tile::default()
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn bunnies_stroll_hop_the_step_and_run_from_monsters() {
+        let w = wide();
+        let mut m = Mob::new(Kind::Bunny, 135.0 * 16.0, 100.0 * 16.0);
+        let far = at(110.0 * 16.0, 99.0 * 16.0);
+        let mut xs = Vec::new();
+        let mut hopped = false;
+        for _ in 0..60 * 120 {
+            m.tick(&w, far, DAY);
+            xs.push(m.body.x);
+            hopped |= m.body.vy < -5.0;
+            assert!(m.body.y + m.body.h <= 100.0 * 16.0 + 0.01, "{:?} {:?}", m.body, m.ai);
+        }
+        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        assert!(hi - lo > 48.0, "it wanders: {lo}..{hi}");
+        assert!(hopped, "it hops over a block, jumps 1.2 times higher");
+        // A zombie to its left: it runs right.
+        let mut m = Mob::new(Kind::Bunny, 20.0 * 16.0, 100.0 * 16.0);
+        let zombie = [17.0 * 16.0, 100.0 * 16.0 - 40.0, 18.0, 40.0];
+        for _ in 0..60 {
+            m.tick_among(&w, far, DAY, &[zombie]);
+        }
+        assert_eq!(m.direction, 1);
+        assert!(m.body.vx > 0.5 && m.body.x > 20.0 * 16.0, "{}", m.body.vx);
+    }
+
+    #[test]
+    fn birds_sit_until_the_player_comes_then_fly_off() {
+        let w = wide();
+        let mut m = Mob::new(Kind::Bird, 20.0 * 16.0, 100.0 * 16.0);
+        run(&mut m, &w, at(50.0 * 16.0, 99.0 * 16.0), DAY, 2.0);
+        assert_eq!(m.ai[0], 0.0, "sits");
+        assert_eq!(m.frame, 4);
+        let y0 = m.body.y;
+        run(&mut m, &w, at(22.0 * 16.0, 99.0 * 16.0), DAY, 2.0);
+        assert_eq!(m.ai[0], 1.0);
+        assert!(m.body.y < y0 - 32.0, "up and away: {} -> {}", y0, m.body.y);
+        assert!(m.body.vx < -2.0, "away from the player: {}", m.body.vx);
+    }
+
+    #[test]
+    fn butterflies_and_fireflies_drift_above_the_ground() {
+        let w = wide();
+        let mut b = Mob::new(Kind::Butterfly, 150.0 * 16.0, 95.0 * 16.0);
+        let mut f = Mob::new(Kind::Firefly, 150.0 * 16.0, 95.0 * 16.0);
+        let me = at(155.0 * 16.0, 99.0 * 16.0);
+        let mut lit = 0;
+        for _ in 0..60 * 30 {
+            b.tick(&w, me, DAY);
+            f.tick(&w, me, NIGHT);
+            lit += f.glow().is_some() as u32;
+            for m in [&b, &f] {
+                assert!(m.body.y + m.body.h <= 100.0 * 16.0 + 0.01, "{:?} {:?} {:?}", m.kind, m.body, m.ai);
+            }
+        }
+        assert!((1.0..=8.0).contains(&b.ai[2]), "a colour");
+        assert!((0.75..=1.1).contains(&b.scale()) && (0.75..=1.1).contains(&f.scale()));
+        assert!(b.frame / 3 == b.ai[2] as u32 - 1, "frames of its colour");
+        assert!(lit > 60, "blinks at night: {lit}");
+        let mut f = Mob::new(Kind::Firefly, 20.0 * 16.0, 95.0 * 16.0);
+        let dark = (0..60 * 30).filter(|_| {
+            f.tick(&w, me, DAY);
+            f.glow().is_none()
+        });
+        assert_eq!(dark.count(), 60 * 30, "dark by day above ground");
+    }
+
+    #[test]
+    fn goldfish_swim_and_flop_on_land() {
+        let w = World::parse(&formats::synth::write_world("m", 64, 200, &[], |x, y| Tile {
+            tile: if y >= 100 || x <= 10 || x >= 40 { 1 } else { NO_TILE },
+            liquid: if y >= 90 && x > 10 && x < 40 { 255 } else { 0 },
+            ..Tile::default()
+        }))
+        .unwrap();
+        let mut m = Mob::new(Kind::Goldfish, 25.0 * 16.0, 98.0 * 16.0);
+        let me = at(5.0 * 16.0, 80.0 * 16.0);
+        let mut xs = Vec::new();
+        for _ in 0..60 * 20 {
+            m.tick(&w, me, DAY);
+            xs.push(m.body.x);
+            assert!(m.body.y > 89.0 * 16.0 - 8.0, "stays in the water: {}", m.body.y);
+        }
+        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        assert!(hi - lo > 100.0, "swims to and fro: {lo}..{hi}");
+        assert!(m.frame < 4);
+        let dry = world();
+        let mut m = Mob::new(Kind::Goldfish, 20.0 * 16.0, 100.0 * 16.0);
+        run(&mut m, &dry, me, DAY, 0.05);
+        assert!(m.body.vy < 0.0, "flops");
+        assert!(m.frame >= 4);
+    }
+
+    #[test]
+    fn worms_crawl_and_snails_climb_walls() {
+        let w = world();
+        let mut m = Mob::new(Kind::Worm, 20.0 * 16.0, 100.0 * 16.0);
+        let x0 = m.body.x;
+        run(&mut m, &w, at(25.0 * 16.0, 99.0 * 16.0), DAY, 60.0);
+        assert!((m.body.x - x0).abs() > 16.0, "crawls: {x0} -> {}", m.body.x);
+        assert_eq!(m.body.vx.abs().max(0.2), 0.2);
+        let mut m = Mob::new(Kind::Snail, 27.0 * 16.0, 100.0 * 16.0);
+        let mut top = f32::MAX;
+        for _ in 0..60 * 30 {
+            m.tick(&w, at(35.0 * 16.0, 99.0 * 16.0), DAY);
+            top = top.min(m.body.y + m.body.h);
+        }
+        assert!(top < 99.0 * 16.0, "up the wall: {top}");
+    }
+
+    #[test]
+    fn caught_critters_name_their_items() {
+        for k in Kind::ALL.into_iter().filter(|k| k.critter()) {
+            let item = k.catch_item().unwrap();
+            assert_eq!(Kind::from_item(item).map(|c| c.0), Some(k));
+            assert_eq!(Kind::from_npc_id(k.npc_id()), Some(k));
+        }
+        assert_eq!(Kind::from_item(1999), Some((Kind::Butterfly, 6.0)));
+        assert_eq!(Kind::Zombie.catch_item(), None);
+        assert!(!Kind::Skeleton.critter() && Kind::Worm.friendly() && !Kind::Bunny.friendly());
     }
 }

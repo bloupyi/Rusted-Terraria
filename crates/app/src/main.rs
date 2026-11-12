@@ -5,6 +5,7 @@ mod backdrop;
 mod cave;
 mod coins;
 mod combat_text;
+mod critters;
 mod equip;
 mod game;
 mod glow;

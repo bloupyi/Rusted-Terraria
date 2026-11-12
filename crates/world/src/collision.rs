@@ -626,6 +626,16 @@ pub fn solid_allow_bottom_slope(world: &World, x: i64, y: i64) -> bool {
     c.active && (c.solid() || c.solid_top()) && !matches!(c.slope, 1 | 2) && !c.half
 }
 
+/// The shape of a present block: 0 flat or half, 1 and 2 sloped on top, 3 and 4 on the bottom.
+pub fn slope(world: &World, x: i64, y: i64) -> u8 {
+    let c = cell(world, x, y);
+    if c.active {
+        c.slope
+    } else {
+        0
+    }
+}
+
 /// The tile queries of the fighters' step-up: present, `tileSolid`,
 /// `tileSolidTop`, half block, sloped on top.
 pub fn shape(world: &World, x: i64, y: i64) -> (bool, bool, bool, bool, bool) {

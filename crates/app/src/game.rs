@@ -13,7 +13,7 @@ use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
 use crate::ranged::{self, Arrow};
-use crate::{alchemy, armor, backdrop, cave, coins, glow, item_ids, pots, trees, weather};
+use crate::{alchemy, armor, backdrop, cave, coins, critters, glow, item_ids, pots, trees, weather};
 use formats::wld::Env;
 use world::door;
 use world::light::{self, Glow, Rect};
@@ -136,6 +136,8 @@ pub fn sprite_sheets() -> Vec<String> {
         ]
         .map(String::from),
     );
+    v.extend(Kind::ALL.iter().filter(|k| k.critter()).map(|k| format!("NPC_{}", k.npc_id())));
+    v.extend(["Firefly", "LightningBug"].map(String::from));
     v.extend(
         [
             "Inventory_Back",
@@ -159,6 +161,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(house::SHEETS.iter().map(|s| s.to_string()));
     v.extend(equip::SHEETS.iter().map(|s| s.to_string()));
     v.extend(alchemy::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(critters::SHEETS.iter().map(|s| s.to_string()));
     v.push(weather::SHEET.to_string());
     v.extend(trees::SHEETS.iter().map(|s| s.to_string()));
     v.push("Tree_Tops_21".to_string());
@@ -296,6 +299,8 @@ pub struct Game {
     /// Trees shaken today, by the cell under them (`treeShakeX/Y`).
     shaken: Vec<(i64, i64)>,
     was_day: bool,
+    /// The night's firefly and butterfly odds.
+    critter_odds: critters::Odds,
 }
 
 impl Game {
@@ -386,6 +391,7 @@ impl Game {
             view_px: [0.0; 4],
             shaken: Vec::new(),
             was_day: false,
+            critter_odds: critters::Odds::default(),
         };
         g.weather = weather::Weather::new(&g.env);
         // The guide lives at the spawn point.
@@ -557,6 +563,10 @@ impl Game {
         if day && !self.was_day {
             // `UpdateTime_StartDay`: trees can be shaken again.
             self.shaken.clear();
+        }
+        if !day && self.was_day {
+            // `UpdateTime_StartNight`.
+            self.critter_odds = critters::Odds::roll(&mut roll);
         }
         self.was_day = day;
         let open_sky = (((self.view_px[1] + self.view_px[3] / 2.0) / 16.0) as f64) < self.env.rock_layer;
@@ -753,8 +763,24 @@ impl Game {
         }
         if fight && !self.client && self.spawn_acc >= every {
             self.spawn_acc = 0.0;
-            if self.mobs.iter().filter(|m| !m.kind.friendly() && m.kind != Kind::EyeBoss).count() < max {
-                self.try_spawn();
+            // `townNPCs`: the guide within the 3840x2400 box around the player.
+            let (px, py) = self.player.center();
+            let town = self.mobs.iter().any(|m| {
+                let (x, y) = m.body.center();
+                m.kind == Kind::Guide && (x - px).abs() < 1920.0 && (y - py).abs() < 1200.0
+            });
+            let friendly = town && self.random() % 3 == 1;
+            if friendly {
+                max = (max as f32 * 0.6) as usize;
+            }
+            let slots: f32 = self
+                .mobs
+                .iter()
+                .filter(|m| m.kind != Kind::Guide && m.kind != Kind::EyeBoss)
+                .map(|m| m.kind.slots())
+                .sum();
+            if slots < max as f32 && (friendly || !town || self.random().is_multiple_of(2)) {
+                self.try_spawn(friendly);
             }
             if self.mobs.iter().any(|m| m.kind == Kind::Zombie) && self.random().is_multiple_of(4) {
                 self.sfx.push(Sfx::Zombie);
@@ -768,7 +794,7 @@ impl Game {
             // The boss leaves at dawn; the guide never leaves.
             let day = self.time < DAYTIME;
             self.mobs.retain(|m| {
-                m.kind.friendly()
+                m.kind == Kind::Guide
                     || (players.iter().any(|p| dist(m, p) < DESPAWN)
                         && m.body.y < height
                         && !(day && m.kind == Kind::EyeBoss))
@@ -795,11 +821,19 @@ impl Game {
             (m.body.center().0 - (p[0] + p[2] / 2.0)).abs() - if i == 0 { aggro } else { 0.0 }
         };
         let mut knocks = Vec::new();
+        // What critters run from: monsters that hurt, as they stand this tick.
+        let threats: Vec<[f32; 4]> = self
+            .mobs
+            .iter()
+            .filter(|m| m.kind.damage() > 0)
+            .map(|m| [m.body.x, m.body.y, m.body.w, m.body.h])
+            .collect();
         for (i, m) in self.mobs.iter_mut().enumerate() {
             let (n, &near) =
                 players.iter().enumerate().min_by(|a, b| dist(m, a.0, a.1).total_cmp(&dist(m, b.0, b.1))).unwrap();
             let hidden = n == 0 && aggro < 0.0 && self.item_animation == 0;
-            m.tick(&self.world, near, Sky { hidden, ..sky });
+            let threats = if m.kind.critter() { &threats[..] } else { &[] };
+            m.tick_among(&self.world, near, Sky { hidden, ..sky }, threats);
             knocks.extend(m.knock.take().map(|k| (i, k)));
         }
         for (i, k) in knocks {
@@ -979,8 +1013,10 @@ impl Game {
         !house::is_chest(self.world.tile(x, y - 1))
     }
 
-    /// A monster on open ground to one side, off screen: slimes by day, zombies too at night.
-    fn try_spawn(&mut self) {
+    /// A monster on open ground to one side, off screen: slimes by day, zombies
+    /// too at night; critters first as `SpawnAnNPC` tries them, and only them
+    /// when `friendly` (`spawnFriendly`, near town).
+    fn try_spawn(&mut self, friendly: bool) {
         let r = self.random();
         let (px, py) = self.player.center();
         let (ptx, pty) = ((px / 16.0) as i64, (py / 16.0) as i64);
@@ -988,12 +1024,57 @@ impl Game {
         let d = SPAWN_DIST.0 + ((r >> 1) % (SPAWN_DIST.1 - SPAWN_DIST.0) as u64) as i64;
         let x = ptx + side * d;
         let w = &self.world;
-        let open = |y: i64| (1..=3).all(|k| w.in_bounds(x, y - k) && !w.solid(x, y - k) && w.liquid(x, y - k) == 0);
+        let open = |y: i64| (1..=3).all(|k| w.in_bounds(x, y - k) && !w.solid(x, y - k));
         let Some(y) = (pty - 25..pty + 25).find(|&y| w.solid(x, y) && open(y)) else { return };
+        let water = (1..=3).any(|k| w.liquid(x, y - k) > 0);
         let night = self.time >= DAYTIME;
         let roll = (r >> 8) % 10;
         let (a, b, c) = ((r >> 16) % 10, (r >> 24) % 5, (r >> 32) % 4);
         let feet = (x as f32 * 16.0 + 8.0, y as f32 * 16.0);
+        let (day, time) = self.ticks();
+        let surface = y as f64 <= self.env.world_surface;
+        let spot = critters::Spot {
+            tile: w.tile(x, y),
+            water,
+            surface,
+            caverns: y as f64 >= self.env.rock_layer,
+            from_spawn: (x - self.spawn_x as i64).abs(),
+            world_width: w.width as i64,
+            day,
+            time,
+            raining: self.weather.raining && surface,
+            windy: self.weather.wind_target.abs() >= 0.4,
+            birds: self.mobs.iter().filter(|m| matches!(m.kind, Kind::Bird | Kind::BlueJay | Kind::Cardinal)).count(),
+        };
+        let deep_half = (y as f64) < (self.env.rock_layer + w.height as f64) / 2.0;
+        let odds = self.critter_odds;
+        let mut rng = std::mem::take(&mut self.rng);
+        let mut roll_n = |n: i32| if n <= 0 { 0 } else { (xorshift(&mut rng) % n as u64) as i32 };
+        let picks = if friendly {
+            critters::friendly(&spot, &odds, &mut roll_n)
+        } else if water {
+            Vec::new()
+        } else if surface && day {
+            let v = critters::mushroom(&spot, &mut roll_n);
+            if v.is_empty() {
+                critters::surface_day(&spot, &odds, &mut roll_n)
+            } else {
+                v
+            }
+        } else if surface {
+            critters::surface_night(&spot, &odds, &mut roll_n)
+        } else if !matches!(spot.tile, 23 | 25 | 112 | 163 | 199 | 200 | 203 | 234 | 60 | 109 | 117 | 147 | 161) {
+            critters::underground(deep_half, &mut roll_n)
+        } else {
+            Vec::new()
+        };
+        self.rng = rng;
+        if friendly || water || !picks.is_empty() {
+            for (kind, dx, dy) in picks {
+                self.mobs.push(Mob::new(kind, feet.0 + dx, feet.1 + dy));
+            }
+            return;
+        }
         if pty as f64 > self.env.rock_layer {
             // The caverns of `SpawnNPC` before hard mode, away from snow and jungle.
             let kind = if a == 0 || c == 0 {
@@ -1363,7 +1444,7 @@ impl Game {
             return;
         }
         let m = self.mobs.swap_remove(i);
-        self.sfx.push(Sfx::MobKilled);
+        self.sfx.push(if m.kind.squeaks() { Sfx::Squeak } else { Sfx::MobKilled });
         let (x, y) = m.body.center();
         let r = self.random();
         let drop = match m.kind {
@@ -1375,7 +1456,7 @@ impl Game {
         if let Some((item, count)) = drop {
             self.drops.push(Drop { x, y, vx: 0.0, vy: -150.0, item, count, grab_delay: 0.0 });
         }
-        if !m.kind.friendly() {
+        if m.kind.damage() > 0 {
             let blood_moon = self.env.blood_moon && self.time >= DAYTIME;
             let coins =
                 coins::money(m.kind.value(), blood_moon, |lo, hi| lo + (self.random() % (hi - lo) as u64) as i32);
@@ -1722,8 +1803,19 @@ impl Game {
     }
 
     fn held_tool(&self) -> ToolStats {
+        let swing = |use_time, use_animation| ToolStats {
+            use_time,
+            use_animation,
+            scale: 1.0,
+            auto_reuse: true,
+            use_turn: true,
+            ..ToolStats::default()
+        };
         match self.inventory.selected().map(|s| s.item) {
             Some(Item::Tool(t)) => t.stats(),
+            Some(Item::Id(critters::BUG_NET)) => swing(25, 25),
+            // `DefaultToCapturedCritter`.
+            Some(Item::Id(id)) if Kind::from_item(id).is_some() => swing(10, 15),
             _ => ToolStats::default(),
         }
     }
@@ -1770,9 +1862,19 @@ impl Game {
             if let Some((wx, _)) = target {
                 self.player.facing_left = wx < self.player.center().0;
             }
-            if s.damage > 0 {
+            if s.damage > 0 || self.holds(critters::BUG_NET) {
                 self.sfx.push(Sfx::Swing);
             }
+        }
+        if let (Some(Stack { item: Item::Id(id), .. }), Some(at)) = (self.inventory.selected(), target) {
+            if self.item_time == 0 && self.item_animation > 0 {
+                if let Some((kind, style)) = Kind::from_item(id) {
+                    self.release(kind, style, at);
+                }
+            }
+        }
+        if self.item_animation > 0 && self.holds(critters::BUG_NET) {
+            self.catch_critters(s);
         }
         if self.item_animation > 0 {
             self.item_animation -= 1;
@@ -1799,10 +1901,50 @@ impl Game {
         }
     }
 
+    fn holds(&self, id: u16) -> bool {
+        self.inventory.selected().is_some_and(|s| s.item == Item::Id(id))
+    }
+
+    /// `ItemCheck_ReleaseCritter`: a caught critter let go at the cursor,
+    /// within reach and off solid blocks (`NPC.ReleaseNPC`).
+    fn release(&mut self, kind: Kind, style: f32, (wx, wy): (f32, f32)) {
+        let (tx, ty) = ((wx / 16.0).floor() as i64, (wy / 16.0).floor() as i64);
+        if !self.in_tool_range(tx, ty, 0) || world::collision::solid_tile(&self.world, tx, ty) {
+            return;
+        }
+        self.item_time = self.held_tool().use_time;
+        let mut m = Mob::new(kind, wx.floor(), wy.floor());
+        m.ai[2] = style;
+        m.released = true;
+        self.mobs.push(m);
+        self.inventory.consume();
+    }
+
+    /// `ItemCheck_CatchCritters`: every critter the net's swing touches
+    /// becomes its item at the player (`NPC.CatchNPC`).
+    fn catch_critters(&mut self, s: ToolStats) {
+        let [x, y, w, h] = self.melee_hitbox(s).map(|v| v as f32);
+        let (px, py) = self.player.center();
+        let mut i = 0;
+        while i < self.mobs.len() {
+            let m = &self.mobs[i];
+            let b = &m.body;
+            let inside = x < b.x + b.w && b.x < x + w && y < b.y + b.h && b.y < y + h;
+            let Some(item) = m.kind.catch_item().filter(|_| inside) else {
+                i += 1;
+                continue;
+            };
+            let item = if m.kind == Kind::Butterfly { item + (m.ai[2] as u16).max(1) - 1 } else { item };
+            self.mobs.swap_remove(i);
+            self.drops.push(Drop { x: px, y: py, vx: 0.0, vy: 0.0, item: Item::Id(item), count: 1, grab_delay: 0.0 });
+        }
+    }
+
     /// Size of the held item's picture, which the swing's reach follows.
     fn held_frame(&self) -> (f32, f32) {
         let sheet = match self.inventory.selected().map(|s| s.item) {
             Some(Item::Tool(t)) => self.sheet(&t.sheet()),
+            Some(Item::Id(critters::BUG_NET)) => self.sheet(&format!("Item_{}", critters::BUG_NET)),
             _ => None,
         };
         sheet.map_or((32.0, 32.0), |s| (s.w as f32, s.h as f32))
@@ -2423,13 +2565,26 @@ impl Game {
         if !trees::leafy_top(w, bx, top) || boxed {
             return;
         }
+        let (day, _) = self.ticks();
+        let sky = trees::ShakeSky { day, raining: self.weather.raining, windy: self.weather.wind_target.abs() >= 0.4 };
         let mut rng = std::mem::take(&mut self.rng);
-        let gift = trees::shake(kind, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
+        let gift = trees::shake_with(kind, sky, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
         self.rng = rng;
-        if let Some((id, count)) = gift {
-            let item = if id == 9 { Item::Block(WOOD) } else { self.item_of_id(id) };
-            let (px, py) = (bx as f32 * 16.0, top as f32 * 16.0);
-            self.drops.push(Drop { x: px, y: py, vx: 0.0, vy: 0.0, item, count, grab_delay: 0.0 });
+        match gift {
+            Some(trees::Gift::Item(id, count)) => {
+                let item = if id == 9 { Item::Block(WOOD) } else { self.item_of_id(id) };
+                let (px, py) = (bx as f32 * 16.0, top as f32 * 16.0);
+                self.drops.push(Drop { x: px, y: py, vx: 0.0, vy: 0.0, item, count, grab_delay: 0.0 });
+            }
+            Some(trees::Gift::Critters(v)) if !self.client => {
+                for (id, [dx, dy], [vx, vy]) in v {
+                    let Some(kind) = Kind::from_npc_id(id) else { continue };
+                    let mut m = Mob::new(kind, ((bx + dx) * 16) as f32, ((top + dy) * 16) as f32);
+                    (m.body.vx, m.body.vy) = (vx, vy);
+                    self.mobs.push(m);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -3293,6 +3448,32 @@ impl Game {
                 [k(c[0]), k(c[1]), k(c[2]), 0.85]
             });
             let frames = |name: &str, n: u32| self.sheet(name).map_or((32, 32), |s| (s.w, s.h / n));
+            if m.kind.critter() {
+                // `DrawNPCDirect`: on its feet 4 px low, turned about its middle.
+                let Some(s) = self.sheet(&format!("NPC_{}", m.kind.npc_id())) else { continue };
+                let (w, h) = (s.w, s.h / m.kind.frames());
+                let k = m.scale();
+                let (dw, dh) = (w as f32 * k, h as f32 * k);
+                let mut sp = Sprite::sheet([cx - dw / 2.0, bottom - dh + 4.0], s, [0, m.frame * h, w, h], flags);
+                sp.size = [dw, dh];
+                (sp.rot, sp.pivot) = (m.rotation, [dw / 2.0, dh / 2.0]);
+                if hurt {
+                    sp.color = [1.0, 0.35, 0.35, 1.0];
+                }
+                out.push(sp);
+                // The fireflies' own glow, drawn unlit and added.
+                let glow = match m.kind {
+                    Kind::Firefly => self.sheet("Firefly"),
+                    Kind::LightningBug => self.sheet("LightningBug"),
+                    _ => None,
+                };
+                if let Some(g) = glow {
+                    let mut gp = Sprite::sheet(sp.pos, g, [0, m.frame * h, w, h], flags & !SPRITE_LIT);
+                    (gp.size, gp.rot, gp.pivot, gp.color) = (sp.size, sp.rot, sp.pivot, [1.0, 1.0, 1.0, 0.0]);
+                    out.push(gp);
+                }
+                continue;
+            }
             let (sheet, w, h, frame, color) = match m.kind {
                 k if k.is_slime() => ("NPC_1", 32, 26, m.frame, tint),
                 Kind::Zombie => ("NPC_3", 38, 48, m.frame, [1.0; 4]),
@@ -3358,6 +3539,12 @@ impl Game {
             ));
         }
         v.extend(self.dust.iter().filter_map(glow::dust));
+        for m in &self.mobs {
+            if let Some(rgb) = m.glow() {
+                let (x, y) = m.body.center();
+                v.extend(glow::at([x, y], rgb));
+            }
+        }
         v.extend(self.bolts.iter().filter_map(glow::bolt));
         v.extend(self.stars.iter().filter_map(glow::star));
         for d in &self.drops {
@@ -3445,9 +3632,13 @@ impl Game {
                 return;
             }
         }
-        let Some(Item::Tool(t)) = self.inventory.selected().map(|s| s.item) else { return };
-        let s = t.stats();
-        let Some(sheet) = self.sheet(&t.sheet()).filter(|_| self.item_animation > 0) else { return };
+        let name = match self.inventory.selected().map(|s| s.item) {
+            Some(Item::Tool(t)) => t.sheet(),
+            Some(Item::Id(critters::BUG_NET)) => format!("Item_{}", critters::BUG_NET),
+            _ => return,
+        };
+        let s = self.held_tool();
+        let Some(sheet) = self.sheet(&name).filter(|_| self.item_animation > 0) else { return };
         let ([x, y], rot) = self.swing_pose(s);
         // Drawn where the player is drawn, between ticks and after a step.
         let [dx, dy] = self.player.drawn(self.tick_acc);
@@ -4949,6 +5140,65 @@ mod tests {
     }
 
     #[test]
+    fn the_bug_net_catches_critters_and_they_are_let_go() {
+        let mut g = garden();
+        select(&mut g, Item::Id(critters::BUG_NET), 1);
+        let (px, py) = g.player.center();
+        g.mobs.push(Mob::new(Kind::Bunny, px + 20.0, 20.0 * 16.0));
+        g.mobs.push(Mob::new(Kind::Zombie, px - 20.0, 20.0 * 16.0));
+        for _ in 0..25 {
+            g.use_item(Some((px + 40.0, py)));
+        }
+        assert_eq!(g.mobs.len(), 1, "the zombie stays");
+        assert!(g.drops.iter().any(|d| d.item == Item::Id(2019)), "a bunny in hand");
+        pick_up(&mut g);
+        assert_eq!(g.inventory.count(Item::Id(2019)), 1);
+        g.mobs.clear();
+        let i = g.inventory.slots.iter().position(|s| s.is_some_and(|s| s.item == Item::Id(2019))).unwrap();
+        (g.inventory.selected, g.item_animation, g.item_time, g.release_use) = (i, 0, 0, true);
+        g.use_item(Some((px + 30.0, 19.0 * 16.0)));
+        assert_eq!(g.mobs.len(), 1);
+        assert_eq!(g.mobs[0].kind, Kind::Bunny);
+        assert!(g.mobs[0].released);
+        assert_eq!(g.inventory.count(Item::Id(2019)), 0);
+        // Not into a block.
+        g.inventory.add(Item::Id(1999), 1);
+        let i = g.inventory.slots.iter().position(|s| s.is_some_and(|s| s.item == Item::Id(1999))).unwrap();
+        (g.inventory.selected, g.item_animation, g.item_time, g.release_use) = (i, 0, 0, true);
+        g.use_item(Some((px + 30.0, 22.0 * 16.0)));
+        assert_eq!(g.mobs.len(), 1);
+        (g.item_animation, g.item_time, g.release_use) = (0, 0, true);
+        g.use_item(Some((px + 30.0, 18.0 * 16.0)));
+        assert_eq!((g.mobs[1].kind, g.mobs[1].ai[2]), (Kind::Butterfly, 6.0), "a tree nymph");
+    }
+
+    #[test]
+    fn critters_come_by_day_and_more_near_town() {
+        let mut g = garden();
+        g.env.world_surface = 40.0;
+        g.env.rock_layer = 50.0;
+        g.player = Player::spawn(&g.world, 5);
+        // Before the first dusk butterflies always win their roll.
+        g.critter_odds = critters::Odds { firefly: 20, firefly_friendly: 5, firefly_multiple: 10, butterfly: 5 };
+        let mut kinds = Vec::new();
+        for _ in 0..3000 {
+            g.mobs.clear();
+            g.try_spawn(true);
+            kinds.extend(g.mobs.iter().map(|m| m.kind));
+        }
+        assert!(kinds.iter().all(|k| k.critter()), "only critters near town");
+        assert!(kinds.contains(&Kind::Bunny) && kinds.contains(&Kind::Butterfly));
+        let near_town = kinds.len();
+        kinds.clear();
+        for _ in 0..3000 {
+            g.mobs.clear();
+            g.try_spawn(false);
+            kinds.extend(g.mobs.iter().map(|m| m.kind).filter(|k| k.critter()));
+        }
+        assert!(!kinds.is_empty() && kinds.len() < near_town, "{} wild, {near_town} in town", kinds.len());
+    }
+
+    #[test]
     fn trees_are_shaken_once_a_day() {
         let mut g = garden();
         for y in 12..20 {
@@ -4960,10 +5210,11 @@ mod tests {
             g.shaken.clear();
             g.shake_tree(19, 19);
             g.shake_tree(19, 19);
-            gifts += g.drops.len();
+            gifts += g.drops.len() + g.mobs.len();
             g.drops.clear();
+            g.mobs.clear();
         }
-        assert!((60..180).contains(&gifts), "{gifts}");
+        assert!((60..200).contains(&gifts), "{gifts}");
         // A bare top gives nothing.
         g.world.set_tile(19, 12, TREE, 0, 198);
         g.shaken.clear();

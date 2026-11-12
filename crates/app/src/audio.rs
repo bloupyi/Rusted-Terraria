@@ -24,6 +24,8 @@ pub enum Sfx {
     PlayerKilled,
     MobHit,
     MobKilled,
+    /// `NPCDeath4`: a mouse.
+    Squeak,
     Zombie,
     Roar,
     MenuTick,
@@ -69,6 +71,7 @@ impl Sfx {
             Sfx::PlayerKilled => ("Player_Killed", 1),
             Sfx::MobHit => ("NPC_Hit_1", 1),
             Sfx::MobKilled => ("NPC_Killed_1", 1),
+            Sfx::Squeak => ("NPC_Killed_4", 1),
             Sfx::Zombie => ("Zombie", 3),
             Sfx::Roar => ("Roar_0", 1),
             Sfx::MenuTick => ("Menu_Tick", 1),

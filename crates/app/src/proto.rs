@@ -494,7 +494,10 @@ pub fn decode(frame: &[u8], important: &[bool]) -> Option<Packet> {
             if f1 & 0x04 != 0 {
                 r.f32()?;
             }
-            let kind = NPC_IDS.iter().position(|&n| n == net_id).map(|k| k as u8);
+            let kind = NPC_IDS.iter().position(|&n| n == net_id).map(|k| k as u8).or_else(|| {
+                let critter = u16::try_from(net_id).ok().and_then(world::mob::Kind::from_npc_id)?;
+                Some(critter as u8)
+            });
             // Life is left out when full.
             let hp = if f0 & 0x80 != 0 {
                 kind.and_then(world::mob::Kind::from_u8).map_or(0, |k| k.max_hp())
@@ -536,7 +539,10 @@ pub fn decode(frame: &[u8], important: &[bool]) -> Option<Packet> {
 pub fn npc(index: u16, m: Option<&MobState>) -> Vec<u8> {
     let mut o = W::new(id::NPC);
     let (x, y, right, hurt, hp, net_id) = match m {
-        Some(m) => (m.x, m.y, !m.facing_left, m.hurt, m.hp, NPC_IDS.get(m.kind as usize).copied().unwrap_or(1)),
+        Some(m) => {
+            let critter = world::mob::Kind::from_u8(m.kind).filter(|k| k.critter()).map(|k| k.npc_id() as i16);
+            (m.x, m.y, !m.facing_left, m.hurt, m.hp, critter.or(NPC_IDS.get(m.kind as usize).copied()).unwrap_or(1))
+        }
         None => (0.0, 0.0, false, false, 0, 0),
     };
     // The first AI value carries the hit flash.
