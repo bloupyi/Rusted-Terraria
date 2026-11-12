@@ -213,7 +213,8 @@ fn build_chunk(world: &World, atlas: &Atlas, cx: u32, cy: u32, liquids_only: boo
                 }
             }
             let t = c.tile[i];
-            if let Some(Some(s)) = atlas.tiles.get(t as usize).filter(|_| t != NO_TILE) {
+            let shown = world::draw::drawn_type(t, c.frame_x[i]);
+            if let Some(Some(s)) = atlas.tiles.get(shown as usize).filter(|_| t != NO_TILE) {
                 let (mut fx, fy, draw) = if is_block(t) {
                     let (fx, fy) = world::frame::block(world, xi, yi, variant(x, y) as usize);
                     (fx, fy, Draw::CELL)
