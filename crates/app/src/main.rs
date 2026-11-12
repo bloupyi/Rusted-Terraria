@@ -19,7 +19,9 @@ mod proto;
 mod ranged;
 mod surface;
 mod tooltip;
+mod trees;
 mod ui;
+mod weather;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -133,6 +135,9 @@ impl App {
     }
 
     fn update(&mut self, dt: f32, size: Vec2) {
+        let half = size / (2.0 * self.camera.zoom);
+        let corner = self.camera.center - half;
+        self.game.view_px = [corner.x, corner.y, half.x * 2.0, half.y * 2.0];
         let open = self.inventory_open;
         for _ in 0..self.hud.update(dt, self.game.inventory.selected, !open) {
             self.hud.tick_buffs(self.game.buffs.len(), self.buff_under_cursor());

@@ -51,6 +51,12 @@ pub struct Env {
     pub tree_bg: [u8; 4],
     /// Wind speed at save time; above 0 blows to the right.
     pub wind: f32,
+    /// `Main.raining`, `rainTime` (ticks left) and `maxRaining` at save time.
+    pub raining: bool,
+    pub rain_time: i32,
+    pub max_raining: f32,
+    /// `Main.numClouds`.
+    pub clouds: i16,
     /// Background styles of corruption, jungle, snow, hallow, crimson,
     /// desert, ocean and mushroom areas.
     pub biome_bg: [u8; 8],
@@ -221,16 +227,20 @@ fn read_env(r: &mut Reader, version: i32) -> Result<Env, Error> {
     skip(r, 8 + 1 + 11 + 7 + 2)?;
     // Orb count, altar count, hard mode, after party.
     skip(r, 1 + 4 + 1 + 1)?;
-    // Invasion delay/size/type/x, slime rain, sundial, rain flag/time/max.
-    skip(r, 12 + 8 + 8 + 1 + 1 + 4 + 4)?;
+    // Invasion delay/size/type/x, slime rain, sundial.
+    skip(r, 12 + 8 + 8 + 1)?;
+    e.raining = bool(r)?;
+    e.rain_time = r.i32()?;
+    e.max_raining = f32::from_bits(r.i32()? as u32);
     // Ore tiers.
     skip(r, 12)?;
     e.tree_bg[0] = r.u8()?;
     for b in &mut e.biome_bg[..7] {
         *b = r.u8()?;
     }
-    // Cloud bg, cloud count.
-    skip(r, 4 + 2)?;
+    // Cloud bg.
+    skip(r, 4)?;
+    e.clouds = r.i16()?;
     e.wind = f32::from_bits(r.i32()? as u32);
     let anglers = r.i32()?;
     for _ in 0..anglers {
@@ -513,6 +523,7 @@ mod tests {
         );
         assert!(env.tree_tops.iter().all(|t| (0..64).contains(t)));
         assert!(env.biome_bg.iter().all(|&b| b < 60) && env.wind.abs() <= 2.0);
+        assert!((0.0..=1.0).contains(&env.max_raining) && env.rain_time >= 0 && (0..=200).contains(&env.clouds));
         let mut cells = 0u64;
         read_tiles(&data, &h, |_, _, n, _| cells += n as u64).unwrap();
         assert_eq!(cells, h.width as u64 * h.height as u64);

@@ -13,7 +13,7 @@ use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
 use crate::ranged::{self, Arrow};
-use crate::{alchemy, armor, backdrop, cave, coins, glow, item_ids, pots};
+use crate::{alchemy, armor, backdrop, cave, coins, glow, item_ids, pots, trees, weather};
 use formats::wld::Env;
 use world::door;
 use world::light::{self, Glow, Rect};
@@ -42,8 +42,9 @@ const LOD_BUDGET: usize = 256;
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
 /// Obsidian from liquids, wood from trees, and the craftable furniture.
-pub const EXTRA_TILES: [u16; 18] = [
+pub const EXTRA_TILES: [u16; 19] = [
     3,
+    trees::SAPLING,
     71,
     alchemy::SAPLING,
     alchemy::GROWN,
@@ -70,7 +71,7 @@ const LIFE_CRYSTAL_TILE: u16 = 12;
 /// `Item.potionDelay`: a minute of potion sickness.
 const POTION_DELAY: i32 = 3600;
 /// Grass, vines and other plants: break without dropping anything.
-const PLANTS: [u16; 13] = [3, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 233];
+const PLANTS: [u16; 14] = [3, trees::SAPLING, 24, 52, 61, 62, 73, 74, 110, 113, 115, 201, 205, 233];
 /// Objects that hang from the tile above them.
 const HANGING: [u16; 8] = [34, 42, 52, 62, 91, 95, 115, 205];
 const MAX_OBJECT: usize = 64;
@@ -152,6 +153,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(house::SHEETS.iter().map(|s| s.to_string()));
     v.extend(equip::SHEETS.iter().map(|s| s.to_string()));
     v.extend(alchemy::SHEETS.iter().map(|s| s.to_string()));
+    v.push(weather::SHEET.to_string());
     v.extend(equip::buff_sheets());
     v.extend(armor::picture_sheets());
     v
@@ -279,6 +281,10 @@ pub struct Game {
     ess: glow::Ess,
     /// Moving lights in the light map now, relit away when they change.
     glows: Vec<Glow>,
+    /// Wind, clouds and rain.
+    pub weather: weather::Weather,
+    /// What the window shows, `[x, y, w, h]` in world pixels: where rain falls.
+    pub view_px: [f32; 4],
 }
 
 impl Game {
@@ -365,7 +371,10 @@ impl Game {
             ticks: 0,
             ess: Default::default(),
             glows: Vec::new(),
+            weather: Default::default(),
+            view_px: [0.0; 4],
         };
+        g.weather = weather::Weather::new(&g.env);
         // The guide lives at the spawn point.
         let (gx, gy) = (g.player.center().0, g.player.y + player::HEIGHT);
         g.mobs.push(Mob::new(Kind::Guide, gx, gy));
@@ -436,6 +445,7 @@ impl Game {
         while self.tick_acc >= 1.0 {
             self.tick_acc -= 1.0;
             self.ticks = self.ticks.wrapping_add(1);
+            self.update_weather(time_scale);
             self.wind.tick(self.env.wind);
             self.ess.tick();
             self.use_item(target);
@@ -515,7 +525,46 @@ impl Game {
 
     fn alchemy_sky(&self) -> alchemy::Sky {
         let (day, time) = self.ticks();
-        alchemy::Sky { day, time, blood_moon: self.env.blood_moon, moon_phase: self.env.moon_phase, raining: false }
+        alchemy::Sky {
+            day,
+            time,
+            blood_moon: self.env.blood_moon,
+            moon_phase: self.env.moon_phase,
+            raining: self.weather.raining,
+        }
+    }
+
+    /// A tick of weather at `time_scale` ticks of game time: wind and rain
+    /// change (on the host), drops fall over the view and splash.
+    fn update_weather(&mut self, time_scale: f32) {
+        let mut rng = std::mem::take(&mut self.rng);
+        let mut roll = |n: i32| (xorshift(&mut rng) % n.max(1) as u64) as i32;
+        let style = self.water_style(self.player.y / 16.0) as u8;
+        let w = &mut self.weather;
+        if !self.client {
+            let strong = self.life_max >= 120;
+            let day_rate = time_scale.round().max(1.0) as i32;
+            for _ in 0..day_rate {
+                w.update_wind(strong, &mut roll);
+            }
+            w.update_rain(day_rate, strong, &mut roll);
+        }
+        self.env.wind = w.wind;
+        let vel = [self.player.vx, self.player.vy];
+        w.make_rain(&self.world, self.view_px, self.env.world_surface, vel, style, &mut roll);
+        let bottom = self.view_px[1] + self.view_px[3];
+        let splashes = w.update_drops(&self.world, bottom);
+        self.rng = rng;
+        for at in splashes {
+            // `Rain.Update`: a small slow water drop that floats a moment.
+            let mut d =
+                Dust::new(weather::SPLASH_DUST, at, 2, 2, [0.0; 2], 1.0, |n| (self.random() % n.max(1) as u64) as i32);
+            d.pos[0] -= 2.0;
+            d.pos[1] += 2.0;
+            d.vel = [d.vel[0] * 0.1, d.vel[1] * 0.1 - 2.0];
+            d.scale = 0.6;
+            self.dust.push(d);
+        }
     }
 
     /// `WorldGen.UpdateWorld`'s random tile updates at the normal world update rate:
@@ -570,6 +619,20 @@ impl Game {
                     self.send_tile(x as u32, y as u32);
                 }
                 None => {}
+            }
+            return;
+        }
+        if t == trees::SAPLING {
+            if !self.random().is_multiple_of(20) {
+                return;
+            }
+            let mut rng = std::mem::take(&mut self.rng);
+            let grown =
+                trees::grow(&self.world, x, y, underground, &mut |n| (xorshift(&mut rng) % n.max(1) as u64) as i32);
+            self.rng = rng;
+            for (cx, cy, fx, fy) in grown.into_iter().flatten() {
+                self.world.set_tile(cx as u32, cy as u32, TREE, fx, fy);
+                self.send_tile(cx as u32, cy as u32);
             }
             return;
         }
@@ -1491,7 +1554,7 @@ impl Game {
     /// Skylight colour and the colour behind everything (the sky's lower tone).
     pub fn sky(&self) -> ([f32; 3], [f32; 3]) {
         let (day, t) = self.ticks();
-        let sky = backdrop::colors(day, t, self.env.blood_moon).sky;
+        let sky = backdrop::colors(day, t, self.env.blood_moon, self.weather.cloud_alpha).sky;
         let low = [132.0, 170.0, 248.0];
         (backdrop::tile_light(sky), [0, 1, 2].map(|i| sky[i] * low[i] / (255.0 * 255.0)))
     }
@@ -1517,6 +1580,7 @@ impl Game {
             day,
             time,
             ticks,
+            cloud: self.weather.cloud_alpha,
             sheets: &self.scene.mesher.atlas.named,
         };
         let view = backdrop::View { x: center[0] - w / 2.0, y: center[1] - h / 2.0, w, h };
@@ -2295,9 +2359,27 @@ impl Game {
         } else if t == 80 {
             (vec![(tx, ty)], Some((Item::Id(alchemy::CACTUS), 1)))
         } else if t == TREE {
+            // `KillTile_GetTreeDrops` for each cell: wood, now and then one
+            // more by the axe's power, and an acorn from half the leafy ones.
             let cells = self.connected(tx, ty, |_, _| true, 512);
-            let n = cells.len() as u16;
-            (cells, Some((Item::Block(WOOD), n)))
+            let bottom = cells.iter().max_by_key(|c| c.1).copied().unwrap();
+            let acorns = trees::drops_acorns(self.world.tile(bottom.0, bottom.1 + 1));
+            let axe = self.held_tool().axe as u64;
+            let (mut wood, mut seeds) = (0, 0);
+            for &(x, y) in &cells {
+                wood += 1;
+                if self.random() % 35 <= axe || self.random().is_multiple_of(3) {
+                    wood += 1;
+                }
+                let (fx, fy) = self.world.frame(x, y);
+                if acorns && trees::leafy(fx, fy) && self.random().is_multiple_of(2) {
+                    seeds += 1;
+                }
+            }
+            if seeds > 0 {
+                extra.push((Item::Id(trees::ACORN), seeds));
+            }
+            (cells, Some((Item::Block(WOOD), wood)))
         } else if t == POT {
             let cells = self.object_cells(tx, ty);
             let (x0, y0) = (cells.iter().map(|c| c.0).min().unwrap(), cells.iter().map(|c| c.1).min().unwrap());
@@ -2576,6 +2658,17 @@ impl Game {
                 self.world.set_tile(x, y, alchemy::SAPLING, style as i16 * 18, 0);
                 self.send_tile(x, y);
             }
+            Item::Id(trees::ACORN) => {
+                let pick = (self.random() % 3) as i16;
+                let Some(cells) = trees::plant(&self.world, tx, ty, pick) else { return };
+                if cells.iter().any(|c| self.player.overlaps(c.0, c.1)) {
+                    return;
+                }
+                for (x, y, fx, fy) in cells {
+                    self.world.set_tile(x as u32, y as u32, trees::SAPLING, fx, fy);
+                }
+                self.send_cells(tx, ty - 1, 1, 2);
+            }
             Item::Id(alchemy::BOTTLE) => {
                 // `PlaceTile` for bottles: on a solid block or a table top.
                 let below = self.world.tile(tx, ty + 1);
@@ -2669,7 +2762,7 @@ impl Game {
             }
         }
         let wall = matches!(stack.item, Item::Id(id) if house::wall_of(id).is_some()
-            || alchemy::seed_style(id).is_some() || id == alchemy::BOTTLE);
+            || alchemy::seed_style(id).is_some() || id == alchemy::BOTTLE || id == trees::ACORN);
         if wall || matches!(stack.item, Item::Block(_) | Item::Object(_) | Item::Id(coins::DOOR)) {
             self.sfx.push(Sfx::Dig);
             if !free {
@@ -3317,12 +3410,23 @@ impl Game {
             }
         }
         self.star_sprites(out);
+        if let Some(sheet) = self.sheet(weather::SHEET) {
+            // `DrawRain`: lit at 85 %, turned about the top corner.
+            for d in &self.weather.drops {
+                let mut s = Sprite::sheet(d.pos, sheet, [d.kind as u32 * 4, 0, 2, 40], SPRITE_LIT);
+                (s.size, s.rot, s.color) = ([2.0 * d.scale, 40.0 * d.scale], d.rot, [0.85; 4]);
+                out.push(s);
+            }
+        }
         let Some(sheet) = self.sheet("Dust") else { return };
         for d in &self.dust {
             let half = 4.0 * d.scale;
-            let mut s = Sprite::sheet([d.pos[0] - half, d.pos[1] - half], sheet, d.frame(), 0);
+            let water = d.kind == weather::SPLASH_DUST;
+            let mut s =
+                Sprite::sheet([d.pos[0] - half, d.pos[1] - half], sheet, d.frame(), if water { SPRITE_LIT } else { 0 });
             (s.size, s.pivot, s.rot) = ([8.0 * d.scale; 2], [half, half], d.rot);
-            s.color = [1.0, 1.0, 1.0, 0.0];
+            // Water is lit and see-through (alpha 38); the rest glows.
+            s.color = if water { [0.85; 4] } else { [1.0, 1.0, 1.0, 0.0] };
             out.push(s);
         }
     }
@@ -4492,7 +4596,7 @@ mod tests {
     /// Grass at y = 20 over dirt, with a water pool at x 40..44.
     fn garden() -> Game {
         let mut important = vec![false; 90];
-        for t in [3, 13, 71, alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING] {
+        for t in [3, 5, 13, 20, 71, alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING] {
             important[t as usize] = true;
         }
         let world = World::parse(&formats::synth::write_world("h", 64, 64, &important, |x, y| match (x, y) {
@@ -4581,5 +4685,73 @@ mod tests {
         assert_eq!(g.world.tile(5, 19), 2, "grass spreads to open dirt");
         let plants = (0..64).filter(|&x| g.world.tile(x, 19) == 3).count();
         assert!(plants > 0, "plants grow on grass");
+    }
+
+    #[test]
+    fn acorns_grow_into_trees_that_give_acorns() {
+        let mut g = garden();
+        select(&mut g, Item::Id(trees::ACORN), 2);
+        g.place(19, 18, false);
+        assert_eq!(g.world.tile(19, 18), NO_TILE, "not in the air");
+        g.place(19, 19, false);
+        assert_eq!((g.world.tile(19, 18), g.world.tile(19, 19)), (trees::SAPLING, trees::SAPLING));
+        assert_eq!(g.world.frame(19, 19).1, 18);
+        assert_eq!(g.inventory.count(Item::Id(trees::ACORN)), 1);
+        g.update_tile(19, 19, true);
+        for _ in 0..2000 {
+            g.update_tile(19, 19, false);
+            if g.world.tile(19, 19) == TREE {
+                break;
+            }
+        }
+        assert_eq!(g.world.tile(19, 19), TREE, "the sapling grows");
+        let height = (0..20).rev().take_while(|&y| g.world.tile(19, y) == TREE).count();
+        assert!((5..=16).contains(&height), "{height}");
+        assert!(g.world.frame(19, 20 - height as i64).1 >= 198, "a top");
+        assert!([18, 20].iter().any(|&x| g.world.tile(x, 19) == TREE), "a root on a side");
+
+        // Many trees: about half the leafy tops give an acorn back.
+        g.break_tile(19, 19, false);
+        assert_eq!(g.world.tile(19, 10), NO_TILE);
+        let mut acorns = 0;
+        for _ in 0..40 {
+            g.drops.clear();
+            for y in 10..20 {
+                g.world.set_tile(19, y, TREE, 0, 0);
+            }
+            g.world.set_tile(19, 10, TREE, 22, 198);
+            g.break_tile(19, 19, true);
+            acorns += g.drops.iter().filter(|d| d.item == Item::Id(trees::ACORN)).map(|d| d.count).sum::<u16>();
+            let wood: u16 = g.drops.iter().filter(|d| d.item == Item::Block(WOOD)).map(|d| d.count).sum();
+            assert!((10..=20).contains(&wood));
+        }
+        assert!((8..=32).contains(&acorns), "{acorns}");
+    }
+
+    #[test]
+    fn rain_falls_over_the_view_and_darkens_the_sky() {
+        let mut g = garden();
+        let (clear, _) = g.sky();
+        g.weather.raining = true;
+        g.weather.rain_time = 100_000;
+        g.weather.max_raining = 0.8;
+        g.weather.cloud_alpha = 0.8;
+        let (dark, _) = g.sky();
+        assert!(dark[0] < clear[0] * 0.5);
+        g.view_px = [0.0, 0.0, 64.0 * 16.0, 200.0];
+        let mut splashed = false;
+        for _ in 0..60 {
+            g.update(None, 1.0 / 60.0, 1.0);
+            splashed |= g.dust.iter().any(|d| d.kind == weather::SPLASH_DUST);
+        }
+        assert!(!g.weather.drops.is_empty());
+        assert!(g.weather.drops.iter().all(|d| d.pos[1] < 20.0 * 16.0 && d.vel[1] > 0.0));
+        assert!(splashed, "drops splash on the grass");
+        assert!(g.alchemy_sky().raining);
+        // Under the ground nothing falls.
+        g.weather.drops.clear();
+        g.view_px = [0.0, 30.0 * 16.0, 64.0 * 16.0, 200.0];
+        g.update(None, 1.0 / 60.0, 1.0);
+        assert!(g.weather.drops.is_empty());
     }
 }
