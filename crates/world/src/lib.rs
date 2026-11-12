@@ -209,6 +209,16 @@ impl World {
         }
     }
 
+    /// Marks every chunk holding tile `t` for drawing again.
+    pub fn touch_tiles_of(&mut self, t: u16) {
+        for ci in 0..self.chunks.len() {
+            if self.chunks[ci].tile.contains(&t) {
+                let (x, y) = ((ci as u32 % self.chunks_x) * CHUNK, (ci as u32 / self.chunks_x) * CHUNK);
+                self.mark(x, y, DIRTY_TILES);
+            }
+        }
+    }
+
     pub fn set_tile(&mut self, x: u32, y: u32, tile: u16, frame_x: i16, frame_y: i16) {
         let (c, i) = self.cell_mut(x, y);
         (c.tile[i], c.frame_x[i], c.frame_y[i]) = (tile, frame_x, frame_y);

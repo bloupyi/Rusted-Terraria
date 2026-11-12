@@ -13,7 +13,7 @@ use crate::items::{self, Furniture, Material, Out, Tool, ToolStats, RECIPES};
 use crate::magic::{self, Bolt, Dust, Star};
 use crate::net::{MobState, Msg};
 use crate::ranged::{self, Arrow};
-use crate::{armor, backdrop, cave, coins, glow, item_ids, pots};
+use crate::{alchemy, armor, backdrop, cave, coins, glow, item_ids, pots};
 use formats::wld::Env;
 use world::door;
 use world::light::{self, Glow, Rect};
@@ -42,7 +42,13 @@ const LOD_BUDGET: usize = 256;
 const MESH_BUDGET: usize = 64;
 /// Tile types edits may create even if the world has none.
 /// Obsidian from liquids, wood from trees, and the craftable furniture.
-pub const EXTRA_TILES: [u16; 12] = [
+pub const EXTRA_TILES: [u16; 18] = [
+    3,
+    71,
+    alchemy::SAPLING,
+    alchemy::GROWN,
+    alchemy::BLOOMING,
+    alchemy::BOTTLE_TILE,
     OBSIDIAN,
     WOOD,
     4,
@@ -145,6 +151,7 @@ pub fn sprite_sheets() -> Vec<String> {
     v.extend(coins::SHEETS.iter().map(|s| s.to_string()));
     v.extend(house::SHEETS.iter().map(|s| s.to_string()));
     v.extend(equip::SHEETS.iter().map(|s| s.to_string()));
+    v.extend(alchemy::SHEETS.iter().map(|s| s.to_string()));
     v.extend(equip::buff_sheets());
     v.extend(armor::picture_sheets());
     v
@@ -466,6 +473,10 @@ impl Game {
             }
             if !self.client {
                 self.tick_mobs();
+                self.update_world();
+            }
+            if world::draw::set_herb_bloom(alchemy::bloom_mask(self.alchemy_sky())) {
+                self.world.touch_tiles_of(alchemy::GROWN);
             }
             self.update_bolts();
             self.update_arrows();
@@ -502,11 +513,103 @@ impl Game {
         }
     }
 
+    fn alchemy_sky(&self) -> alchemy::Sky {
+        let (day, time) = self.ticks();
+        alchemy::Sky { day, time, blood_moon: self.env.blood_moon, moon_phase: self.env.moon_phase, raining: false }
+    }
+
+    /// `WorldGen.UpdateWorld`'s random tile updates at the normal world update rate:
+    /// 3e-5 of the tiles above the surface a tick and 1.5e-5 of those below.
+    fn update_world(&mut self) {
+        let (w, h) = (self.world.width as i64, self.world.height as i64);
+        let surface = self.env.world_surface;
+        let over = (w * h) as f64 * 3e-5;
+        let rare = (151.0 + 151.0 * 1.8 * (w as f64 / 4200.0 - 1.0).clamp(0.0, 1.0)) as u64;
+        let mut i = 0.0;
+        while i < over {
+            i += 1.0;
+            if self.random().is_multiple_of(rare * 100) {
+                self.plant_alch();
+            }
+            let x = 10 + (self.random() % (w - 20) as u64) as i64;
+            let y = 10 + (self.random() % (surface as i64 - 11).max(1) as u64) as i64;
+            self.update_tile(x, y, false);
+        }
+        let under = (w * h) as f64 * 1.5e-5;
+        let mut i = 0.0;
+        while i < under {
+            i += 1.0;
+            let x = 10 + (self.random() % (w - 20) as u64) as i64;
+            let top = surface as i64 - 1;
+            let y = top + (self.random() % (h - 20 - top).max(1) as u64) as i64;
+            self.update_tile(x, y, true);
+        }
+    }
+
+    /// `UpdateWorld_OvergroundTile` and `UpdateWorld_UndergroundTile` for the
+    /// tiles the engine grows: herbs, forest grass and mushroom grass.
+    fn update_tile(&mut self, x: i64, y: i64, underground: bool) {
+        let t = self.world.tile(x, y);
+        let surface = self.env.world_surface;
+        if [alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING].contains(&t) {
+            // `CheckAlch`, which the game runs whenever the cell is framed again.
+            if alchemy::dies(&self.world, x, y) {
+                self.break_tile(x, y, true);
+                return;
+            }
+            let sky = self.alchemy_sky();
+            let mut rng = std::mem::take(&mut self.rng);
+            let mut roll = |n: u64| xorshift(&mut rng) % n;
+            let growth = alchemy::grow(&self.world, x, y, surface, sky, &mut roll);
+            self.rng = rng;
+            match growth {
+                Some(alchemy::Growth::Dies) => self.break_tile(x, y, true),
+                Some(alchemy::Growth::Becomes(n)) => {
+                    let (fx, fy) = self.world.frame(x, y);
+                    self.world.set_tile(x as u32, y as u32, n, fx, fy);
+                    self.send_tile(x as u32, y as u32);
+                }
+                None => {}
+            }
+            return;
+        }
+        if self.world.liquid(x, y) > 32 {
+            return;
+        }
+        let mut rng = std::mem::take(&mut self.rng);
+        let mut roll = |n: u64| xorshift(&mut rng) % n;
+        let (plant, spread) = match t {
+            alchemy::GRASS_TILE if !underground => alchemy::grass_growth(&self.world, x, y, surface, &mut roll),
+            alchemy::MUSHROOM_GRASS_TILE if underground => alchemy::mushroom_growth(&self.world, x, y, &mut roll),
+            _ => (None, Vec::new()),
+        };
+        self.rng = rng;
+        if let Some((px, py, tile, fx)) = plant {
+            self.world.set_tile(px as u32, py as u32, tile, fx, 0);
+            self.send_tile(px as u32, py as u32);
+        }
+        for (sx, sy) in spread {
+            self.world.set_tile(sx as u32, sy as u32, t, -1, -1);
+            self.send_tile(sx as u32, sy as u32);
+        }
+    }
+
+    /// `PlantAlch`: now and then a herb appears on fitting ground.
+    fn plant_alch(&mut self) {
+        let w = self.world.width as i64;
+        let x = 20 + (self.random() % (w - 40) as u64) as i64;
+        let (surface, rock) = (self.env.world_surface, self.env.rock_layer);
+        let mut rng = std::mem::take(&mut self.rng);
+        let start = alchemy::plant_depth(&self.world, surface, rock, |n| xorshift(&mut rng) % n);
+        self.rng = rng;
+        if let Some((x, y, style)) = alchemy::plant_spot(&self.world, x, start) {
+            self.world.set_tile(x as u32, y as u32, alchemy::SAPLING, style as i16 * 18, 0);
+            self.send_tile(x as u32, y as u32);
+        }
+    }
+
     fn random(&mut self) -> u64 {
-        self.rng ^= self.rng << 13;
-        self.rng ^= self.rng >> 7;
-        self.rng ^= self.rng << 17;
-        self.rng
+        xorshift(&mut self.rng)
     }
 
     /// Spawns and despawns monsters; spawns only when `fight`.
@@ -2168,7 +2271,30 @@ impl Game {
         if t == NO_TILE {
             return;
         }
-        let (cells, item) = if t == TREE {
+        let (fx, _) = self.world.frame(tx, ty);
+        let mut extra = Vec::new();
+        let (cells, item) = if [alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING].contains(&t) {
+            let roll = self.random();
+            let sky = self.alchemy_sky();
+            let style = fx.max(0) as u16 / 18;
+            extra = alchemy::harvest(t, style, ty, self.env.world_surface, sky, roll)
+                .into_iter()
+                .map(|(id, n)| (Item::Id(id), n))
+                .collect();
+            (vec![(tx, ty)], None)
+        } else if t == alchemy::BOTTLE_TILE {
+            (vec![(tx, ty)], Some((Item::Id(alchemy::bottle_item(fx / 18)), 1)))
+        } else if t == 3 || t == 71 || t == 72 {
+            // `KillTile_GetItemDrops`: the forest's mushroom, glowing mushrooms half the time.
+            let item = match t {
+                3 => (fx == 144).then_some(alchemy::MUSHROOM),
+                _ if self.random().is_multiple_of(40) => Some(194),
+                _ => self.random().is_multiple_of(2).then_some(alchemy::GLOWING_MUSHROOM),
+            };
+            (vec![(tx, ty)], item.map(|id| (Item::Id(id), 1)))
+        } else if t == 80 {
+            (vec![(tx, ty)], Some((Item::Id(alchemy::CACTUS), 1)))
+        } else if t == TREE {
             let cells = self.connected(tx, ty, |_, _| true, 512);
             let n = cells.len() as u16;
             (cells, Some((Item::Block(WOOD), n)))
@@ -2221,7 +2347,7 @@ impl Game {
         if t == house::PLATFORM {
             self.frame_platforms(tx, ty);
         }
-        if let Some((item, count)) = item.filter(|_| drop) {
+        for (item, count) in item.into_iter().chain(extra).filter(|_| drop) {
             self.drops.push(Drop {
                 x: tx as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
                 y: ty as f32 * 16.0 + (16.0 - DROP_SIZE) / 2.0,
@@ -2351,8 +2477,19 @@ impl Game {
         let mut v: Vec<u16> = (ty - STATION_REACH..=ty + STATION_REACH)
             .flat_map(|y| (tx - STATION_REACH..=tx + STATION_REACH).map(move |x| (x, y)))
             .map(|(x, y)| self.world.tile(x, y))
-            .filter(|t| [items::WORK_BENCH, items::FURNACE, items::ANVIL].contains(t))
+            .filter(|t| [items::WORK_BENCH, items::FURNACE, items::ANVIL, alchemy::BOTTLE_TILE].contains(t))
             .collect();
+        // `AdjTiles`: a water cell more than 200 full in reach counts for bottled water.
+        let water = (ty - STATION_REACH..=ty + STATION_REACH)
+            .flat_map(|y| (tx - STATION_REACH..=tx + STATION_REACH).map(move |x| (x, y)))
+            .filter(|&(x, y)| self.world.in_bounds(x, y))
+            .any(|(x, y)| {
+                let (c, i) = self.world.cell(x as u32, y as u32);
+                c.liquid[i] > 200 && c.liquid_kind[i] == 0
+            });
+        if water {
+            v.push(alchemy::NEAR_WATER);
+        }
         v.sort_unstable();
         v.dedup();
         v
@@ -2429,6 +2566,24 @@ impl Game {
                     return;
                 }
                 self.world.set_wall(x, y, wall);
+                self.send_tile(x, y);
+            }
+            Item::Id(id) if alchemy::seed_style(id).is_some() => {
+                let style = alchemy::seed_style(id).unwrap();
+                if !alchemy::can_plant(&self.world, tx, ty, style) {
+                    return;
+                }
+                self.world.set_tile(x, y, alchemy::SAPLING, style as i16 * 18, 0);
+                self.send_tile(x, y);
+            }
+            Item::Id(alchemy::BOTTLE) => {
+                // `PlaceTile` for bottles: on a solid block or a table top.
+                let below = self.world.tile(tx, ty + 1);
+                let held = self.world.solid(tx, ty + 1) || world::tile_sets::SOLID_TOP.has(below);
+                if self.world.tile(tx, ty) != NO_TILE || !held || self.player.overlaps(tx, ty) {
+                    return;
+                }
+                self.world.set_tile(x, y, alchemy::BOTTLE_TILE, 0, 0);
                 self.send_tile(x, y);
             }
             Item::Tool(_) | Item::Material(_) | Item::Id(_) => return,
@@ -2513,7 +2668,8 @@ impl Game {
                 self.inventory.set_selected(Item::Bucket(Some(kind)));
             }
         }
-        let wall = matches!(stack.item, Item::Id(id) if house::wall_of(id).is_some());
+        let wall = matches!(stack.item, Item::Id(id) if house::wall_of(id).is_some()
+            || alchemy::seed_style(id).is_some() || id == alchemy::BOTTLE);
         if wall || matches!(stack.item, Item::Block(_) | Item::Object(_) | Item::Id(coins::DOOR)) {
             self.sfx.push(Sfx::Dig);
             if !free {
@@ -3435,6 +3591,13 @@ fn surface(world: &World) -> Vec<u32> {
         .collect()
 }
 
+fn xorshift(rng: &mut u64) -> u64 {
+    *rng ^= *rng << 13;
+    *rng ^= *rng >> 7;
+    *rng ^= *rng << 17;
+    *rng
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -4324,5 +4487,99 @@ mod tests {
         assert!(matches!(g.item_of_id(8), Item::Object(t) if g.templates[t as usize].tile == TORCH));
         assert_eq!(g.item_of_id(29), Item::Id(29), "life crystal");
         assert_eq!(Item::Id(280).max_stack(), 1, "a spear stays alone");
+    }
+
+    /// Grass at y = 20 over dirt, with a water pool at x 40..44.
+    fn garden() -> Game {
+        let mut important = vec![false; 90];
+        for t in [3, 13, 71, alchemy::SAPLING, alchemy::GROWN, alchemy::BLOOMING] {
+            important[t as usize] = true;
+        }
+        let world = World::parse(&formats::synth::write_world("h", 64, 64, &important, |x, y| match (x, y) {
+            (_, 20) => Tile { tile: 2, ..Tile::default() },
+            (_, 21..) => Tile { tile: 0, ..Tile::default() },
+            (40..44, 19) => Tile { tile: NO_TILE, liquid: 255, ..Tile::default() },
+            _ => Tile { tile: NO_TILE, ..Tile::default() },
+        }))
+        .unwrap();
+        let scene = Scene::build(&world, None, &EXTRA_TILES, &house::WALLS, &[], Vec::new());
+        let mut g = Game::new(world, scene);
+        g.mobs.clear();
+        g.player = Player::spawn(&g.world, 15);
+        g.time = 0.1;
+        g
+    }
+
+    fn select(g: &mut Game, item: Item, n: u16) {
+        g.inventory.add(item, n);
+        g.inventory.selected = g.inventory.slots.iter().position(|s| s.is_some_and(|s| s.item == item)).unwrap();
+    }
+
+    #[test]
+    fn seeds_grow_into_herbs_that_give_seeds_back() {
+        let mut g = garden();
+        select(&mut g, Item::Id(307), 2);
+        g.place(17, 18, false);
+        assert_eq!(g.world.tile(17, 18), NO_TILE, "not in the air");
+        g.place(17, 19, false);
+        assert_eq!((g.world.tile(17, 19), g.world.frame(17, 19)), (alchemy::SAPLING, (0, 0)));
+        assert_eq!(g.inventory.count(Item::Id(307)), 1);
+        g.break_tile(17, 19, true);
+        assert!(g.drops.is_empty(), "saplings give nothing");
+
+        g.world.set_tile(17, 19, alchemy::GROWN, 0, 0);
+        g.break_tile(17, 19, true);
+        pick_up(&mut g);
+        assert_eq!(g.inventory.count(Item::Id(313)), 1);
+        assert!(g.inventory.count(Item::Id(307)) >= 2, "a daybloom blooms by day");
+
+        // A herb whose ground is dug out goes with it; one in the wrong ground dies.
+        g.world.set_tile(18, 19, alchemy::GROWN, 18, 0);
+        g.time = 0.1;
+        g.update_tile(18, 19, false);
+        assert_eq!(g.world.tile(18, 19), NO_TILE, "moonglow wants jungle grass");
+    }
+
+    #[test]
+    fn potions_are_brewed_at_a_bottle_with_water_near() {
+        let mut g = garden();
+        let glass = RECIPES.iter().position(|r| r.out == Out::Item(Item::Block(54))).unwrap();
+        let water = RECIPES.iter().position(|r| r.out == Out::Item(Item::Id(alchemy::BOTTLED_WATER))).unwrap();
+        let regen = RECIPES.iter().position(|r| r.out == Out::Item(Item::Id(289))).unwrap();
+        g.world.set_tile(14, 19, items::FURNACE, 0, 0);
+        g.inventory.add(Item::Block(53), 2);
+        assert!(g.craft(glass));
+        let bottles = RECIPES.iter().position(|r| r.out == Out::Item(Item::Id(alchemy::BOTTLE))).unwrap();
+        assert!(g.craft(bottles));
+        assert_eq!(g.inventory.count(Item::Id(alchemy::BOTTLE)), 2);
+
+        assert!(!g.craftable().contains(&water), "no water in reach");
+        g.player = Player::spawn(&g.world, 38);
+        assert!(g.craft(water));
+
+        select(&mut g, Item::Id(alchemy::BOTTLE), 1);
+        g.place(37, 19, false);
+        assert_eq!(g.world.tile(37, 19), alchemy::BOTTLE_TILE);
+        g.inventory.add(Item::Id(313), 1);
+        g.inventory.add(Item::Id(alchemy::MUSHROOM), 1);
+        assert!(g.craft(regen));
+        assert_eq!(g.inventory.count(Item::Id(289)), 1);
+        g.break_tile(37, 19, true);
+        assert_eq!(g.drops[0].item, Item::Id(alchemy::BOTTLE));
+    }
+
+    #[test]
+    fn the_world_grows_by_itself() {
+        let mut g = garden();
+        // Bare dirt next to the grass, a dirt column standing in the air.
+        g.world.set_tile(5, 19, 0, -1, -1);
+        g.world.set_tile(5, 18, NO_TILE, -1, -1);
+        for _ in 0..2000 {
+            g.update_tile(4, 20, false);
+            g.update_tile(6, 20, false);
+        }
+        assert_eq!(g.world.tile(5, 19), 2, "grass spreads to open dirt");
+        let plants = (0..64).filter(|&x| g.world.tile(x, 19) == 3).count();
+        assert!(plants > 0, "plants grow on grass");
     }
 }

@@ -91,6 +91,26 @@ pub fn wall_allows_wind(wall: u16) -> bool {
 
 /// `Main.IsTileSpelunkable`: ores, gems, chests, pots and the like, plus
 /// the gem frames of the small and large rubble piles.
+static HERB_BLOOM: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(0);
+
+/// Sets which herb styles are harvestable now (bit per `frameX / 18`); true
+/// when that changed and grown herbs must be drawn again.
+pub fn set_herb_bloom(styles: u8) -> bool {
+    HERB_BLOOM.swap(styles, std::sync::atomic::Ordering::Relaxed) != styles
+}
+
+/// `TileDrawing.GetTileDrawTexture`: a grown herb (83) that can be harvested
+/// now is drawn with the blooming herb's sheet (84).
+pub fn drawn_type(tile: u16, fx: i16) -> u16 {
+    let style = fx / 18;
+    let blooms = (0..8).contains(&style) && HERB_BLOOM.load(std::sync::atomic::Ordering::Relaxed) & 1 << style != 0;
+    if tile == 83 && blooms {
+        84
+    } else {
+        tile
+    }
+}
+
 pub fn spelunkable(tile: u16, fx: i16, fy: i16) -> bool {
     crate::tile_sets::SPELUNKER.has(tile)
         || (tile == 185 && fy == 18 && (576..=882).contains(&fx))

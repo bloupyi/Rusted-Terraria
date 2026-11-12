@@ -1,3 +1,4 @@
+mod alchemy;
 mod armor;
 mod audio;
 mod backdrop;
