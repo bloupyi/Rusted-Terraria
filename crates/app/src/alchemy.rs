@@ -296,7 +296,7 @@ pub fn grass_growth(world: &World, x: i64, y: i64, surface: f64, mut roll: impl 
 }
 
 /// `WallID.Sets.AllowsPlantsToGrow`.
-const PLANT_WALLS: [u16; 27] = [
+pub const PLANT_WALLS: [u16; 27] = [
     0, 150, 138, 145, 107, 152, 140, 139, 141, 106, 245, 315, 317, 63, 64, 65, 66, 67, 68, 69, 81, 70, 264, 268, 265,
     74, 80,
 ];

@@ -82,7 +82,8 @@ pub struct Colors {
     pub moon: [f32; 3],
 }
 
-pub fn colors(day: bool, time: f64, blood_moon: bool) -> Colors {
+/// `SetBackColor`; `cloud` is `cloudAlpha * atmo`, the rain darkening the sky.
+pub fn colors(day: bool, time: f64, blood_moon: bool, cloud: f32) -> Colors {
     let lerp = |t: f64, k: [f64; 3], base: [f64; 3]| [0, 1, 2].map(|i| (t * k[i] + base[i]) as u8 as f32);
     let mut c = Colors { sky: [255.0; 3], sun: [255.0; 3], moon: [255.0; 3] };
     if day {
@@ -113,6 +114,10 @@ pub fn colors(day: bool, time: f64, blood_moon: bool) -> Colors {
             c.sky = lerp(t, [20.0, 30.0, 30.0], [5.0; 3]);
         }
     }
+    if cloud > 0.0 {
+        let k = 1.0 - cloud * 0.9;
+        c.sky = c.sky.map(|v| (v * k) as u8 as f32);
+    }
     c
 }
 
@@ -138,6 +143,8 @@ pub struct Scene<'a> {
     pub time: f64,
     /// Ticks since start, for animated layers.
     pub ticks: u32,
+    /// `Main.cloudAlpha`.
+    pub cloud: f32,
     pub sheets: &'a HashMap<String, SheetRef>,
 }
 
@@ -160,8 +167,8 @@ pub fn sprites(s: &Scene, v: &View, fade: &Fade, holy_tiles: i32) -> Vec<Sprite>
     if v.y >= surface * 16.0 + 16.0 {
         return out;
     }
-    let mut sky = colors(s.day, s.time, s.env.blood_moon && !s.day).sky;
     let atmo = atmosphere(s, v.y + v.h / 2.0);
+    let mut sky = colors(s.day, s.time, s.env.blood_moon && !s.day, s.cloud * atmo).sky;
     sky = if atmo <= 0.01 { [0.0; 3] } else { sky.map(|c| (c * atmo).floor()) };
     let tint = [sky[0] / 255.0, sky[1] / 255.0, sky[2] / 255.0, 1.0];
 
@@ -194,7 +201,7 @@ pub fn sprites(s: &Scene, v: &View, fade: &Fade, holy_tiles: i32) -> Vec<Sprite>
     }
 
     if v.y / 16.0 < surface + 2.0 {
-        sun_and_moon(s, v, top as i32 as f32, &mut put);
+        sun_and_moon(s, v, top as i32 as f32, atmo, &mut put);
     }
 
     surface::layers(s, v, fade, holy_tiles, tint, &mut out);
@@ -216,8 +223,10 @@ pub fn sc_adj(s: &Scene, v: &View) -> f32 {
 type Put<'a> = dyn FnMut(&str, [f32; 2], [u32; 4], [f32; 2], [f32; 4], bool) + 'a;
 
 /// The sun crosses the screen over the day and the moon over the night, highest at noon and midnight.
-fn sun_and_moon(s: &Scene, v: &View, top: f32, put: &mut Put) {
-    let c = colors(s.day, s.time, s.env.blood_moon && !s.day);
+/// Rain dims both: the sun's tinted copy and the moon fade as `1 - 1.5 cloudAlpha atmo`.
+fn sun_and_moon(s: &Scene, v: &View, top: f32, atmo: f32, put: &mut Put) {
+    let c = colors(s.day, s.time, s.env.blood_moon && !s.day, 0.0);
+    let fade = (1.0 - s.cloud * 1.5 * atmo).max(0.0);
     let (len, tex) =
         if s.day { (DAY_TICKS, "Sun".to_string()) } else { (NIGHT_TICKS, format!("Moon_{}", s.env.moon_type.min(8))) };
     let Some(r) = s.sheets.get(&tex) else { return };
@@ -232,18 +241,18 @@ fn sun_and_moon(s: &Scene, v: &View, top: f32, put: &mut Put) {
         let size = [w * scale, h * scale];
         let pos = [x - size[0] / 2.0, y - size[1] / 2.0];
         put(&tex, pos, [0, 0, r.w, r.h], size, [1.0; 4], false);
-        let sun = c.sun.map(|k| k / 255.0);
+        let sun = c.sun.map(|k| (k * fade) as u8 as f32 / 255.0);
         put(&tex, pos, [0, 0, r.w, r.h], size, [sun[0], sun[1], sun[2], sun[2]], false);
     } else {
         let phase = s.env.moon_phase.clamp(0, 7) as u32;
         let size = [w * scale, w * scale];
-        let moon = c.moon.map(|k| k / 255.0);
+        let moon = c.moon.map(|k| k * fade / 255.0);
         put(
             &tex,
             [x - size[0] / 2.0, y - size[1] / 2.0],
             [0, r.w * phase, r.w, r.w],
             size,
-            [moon[0], moon[1], moon[2], 1.0],
+            [moon[0], moon[1], moon[2], fade],
             false,
         );
     }
@@ -262,9 +271,11 @@ mod tests {
 
     #[test]
     fn sky_follows_the_day() {
-        assert_eq!(colors(true, 0.0, false).sky, [25.0, 35.0, 35.0]);
-        assert_eq!(colors(true, 27000.0, false).sky, [255.0; 3]);
-        assert_eq!(colors(false, 16200.0, false).sky, [5.0; 3]);
+        assert_eq!(colors(true, 0.0, false, 0.0).sky, [25.0, 35.0, 35.0]);
+        assert_eq!(colors(true, 27000.0, false, 0.0).sky, [255.0; 3]);
+        assert_eq!(colors(false, 16200.0, false, 0.0).sky, [5.0; 3]);
+        // Heavy rain at noon: a grey sky.
+        assert_eq!(colors(true, 27000.0, false, 0.9).sky, [48.0; 3]);
         assert_eq!(tile_light([255.0; 3]), [1.0; 3]);
     }
 }
