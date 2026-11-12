@@ -89,6 +89,14 @@ pub fn wall_allows_wind(wall: u16) -> bool {
     matches!(wall, 0 | 150 | 138 | 145 | 107 | 152 | 140 | 139 | 141 | 106 | 245 | 315 | 317)
 }
 
+/// `Main.IsTileSpelunkable`: ores, gems, chests, pots and the like, plus
+/// the gem frames of the small and large rubble piles.
+pub fn spelunkable(tile: u16, fx: i16, fy: i16) -> bool {
+    crate::tile_sets::SPELUNKER.has(tile)
+        || (tile == 185 && fy == 18 && (576..=882).contains(&fx))
+        || (tile == 186 && (864..=1170).contains(&fx))
+}
+
 /// Whether a plant cell sways in the wind: a swaying type, above the surface,
 /// out of liquid and not behind a closed wall.
 pub fn sways(world: &World, x: i64, y: i64, tile: u16, fx: i32) -> bool {
@@ -259,6 +267,14 @@ pub fn tree_foliage(world: &World, x: i64, y: i64, dx: i64, frame: i32) -> Optio
 mod tests {
     use super::*;
     use formats::wld::Tile;
+
+    #[test]
+    fn treasure_glows_for_the_spelunker() {
+        // Ores and pots do, dirt and stone do not; only the gem piles of the rubble.
+        assert!(spelunkable(7, 0, 0) && spelunkable(28, 0, 0));
+        assert!(!spelunkable(0, 0, 0) && !spelunkable(1, 0, 0));
+        assert!(spelunkable(185, 576, 18) && !spelunkable(185, 576, 0) && !spelunkable(185, 0, 18));
+    }
 
     #[test]
     fn grass_plants_and_tables() {

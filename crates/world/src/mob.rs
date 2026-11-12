@@ -171,6 +171,8 @@ pub struct Sky {
     /// `Main.worldSurface`, in tiles.
     pub surface: f32,
     pub blood_moon: bool,
+    /// The target is invisible and not using an item (`aggro < 0`, `itemAnimation == 0`).
+    pub hidden: bool,
 }
 
 /// A zombie hitting the door cell `(x, y)` (`KillTile` with `fail`); `open`:
@@ -219,6 +221,9 @@ pub struct Mob {
     pub rotation: f32,
     /// A door hit this tick, for the game to act on.
     pub knock: Option<Knock>,
+    /// It has had a target (`oldTarget` valid).
+    targeted: bool,
+    hidden: bool,
 }
 
 impl Mob {
@@ -253,6 +258,8 @@ impl Mob {
             frame_counter: 0.0,
             rotation: 0.0,
             knock: None,
+            targeted: false,
+            hidden: false,
         }
     }
 
@@ -263,6 +270,7 @@ impl Mob {
 
     /// One tick against the player whose box is `target` (x, y, w, h).
     pub fn tick(&mut self, world: &World, target: [f32; 4], sky: Sky) {
+        self.hidden = sky.hidden;
         self.timer += TICK;
         self.stun = (self.stun - TICK).max(0.0);
         match self.kind {
@@ -353,7 +361,8 @@ impl Mob {
         if fall {
             self.stair_fall = true;
         }
-        let (pos, vel, stair, stair_fall, _) = self.at_box(world).slopes([self.body.vx, self.body.vy], self.stair_fall);
+        let (pos, vel, stair, stair_fall, ..) =
+            self.at_box(world).slopes([self.body.vx, self.body.vy], self.stair_fall);
         if stair_fall {
             self.stair_fall = true;
         } else if !fall {
@@ -368,8 +377,12 @@ impl Mob {
         b.on_ground = b.vy == 0.0;
     }
 
-    /// `TargetClosest`: faces the target's middle.
+    /// `TargetClosest`: faces the target's middle, unless it already had one
+    /// and the target is hidden.
     fn face(&mut self, target: [f32; 4]) {
+        if std::mem::replace(&mut self.targeted, true) && self.hidden {
+            return;
+        }
         let (cx, cy) = self.body.center();
         let (tx, ty) = (target[0] as i32 + target[2] as i32 / 2, target[1] as i32 + target[3] as i32 / 2);
         self.direction = if (tx as f32) < cx { -1 } else { 1 };
@@ -1017,7 +1030,7 @@ mod tests {
     use crate::NO_TILE;
     use formats::wld::Tile;
 
-    const NIGHT: Sky = Sky { day: false, surface: 200.0, blood_moon: false };
+    const NIGHT: Sky = Sky { day: false, surface: 200.0, blood_moon: false, hidden: false };
 
     /// Floor at y = 100, a two-tile wall at x = 30, a step at x = 40.
     fn world() -> World {
@@ -1037,6 +1050,18 @@ mod tests {
         for _ in 0..(secs * 60.0) as u32 {
             m.tick(w, target, sky);
         }
+    }
+
+    #[test]
+    fn a_hidden_target_is_not_turned_to() {
+        let w = world();
+        let mut m = Mob::new(Kind::Zombie, 10.0 * 16.0, 100.0 * 16.0);
+        m.tick(&w, at(25.0 * 16.0, 99.0 * 16.0), NIGHT);
+        assert_eq!(m.direction, 1);
+        run(&mut m, &w, at(2.0 * 16.0, 99.0 * 16.0), Sky { hidden: true, ..NIGHT }, 1.0);
+        assert_eq!(m.direction, 1, "keeps going the old way");
+        run(&mut m, &w, at(2.0 * 16.0, 99.0 * 16.0), NIGHT, 0.1);
+        assert_eq!(m.direction, -1);
     }
 
     #[test]

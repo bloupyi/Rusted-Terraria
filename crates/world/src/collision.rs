@@ -83,6 +83,11 @@ impl Box<'_> {
 
     /// `Collision.TileCollision`: the part of `vel` the tiles allow.
     pub fn tiles(&self, vel: V2, fall_through: bool, fall2: bool) -> Hit {
+        self.tiles_grav(vel, fall_through, fall2, 1)
+    }
+
+    /// `tiles` for a box whose gravity points `grav_dir` (-1: up).
+    pub fn tiles_grav(&self, vel: V2, fall_through: bool, fall2: bool, grav_dir: i32) -> Hit {
         let [px, py] = self.pos;
         let [w, h] = self.size.map(|k| k as f32);
         let next = [px + vel[0], py + vel[1]];
@@ -125,7 +130,7 @@ impl Box<'_> {
                         floor_x = i;
                         floor_y = j + (th < 16.0) as i64;
                         if floor_x != side_x && !sloped {
-                            out.vel[1] = ty - (py + h);
+                            out.vel[1] = ty - (py + h) - if grav_dir == -1 { 0.01 } else { 0.0 };
                             floor = ty;
                         }
                     }
@@ -154,7 +159,7 @@ impl Box<'_> {
                 } else if py >= ty + th && !c.solid_top() {
                     out.up = true;
                     (floor_x, floor_y) = (i, j);
-                    out.vel[1] = ty + th - py + 0.01;
+                    out.vel[1] = ty + th - py + if grav_dir == 1 { 0.01 } else { 0.0 };
                     if floor_y == side_y {
                         out.vel[0] = vel[0];
                     }
@@ -167,24 +172,47 @@ impl Box<'_> {
     /// `Collision.StepUp`: lifts the box onto a one-tile step ahead of it.
     /// Returns the new top and the speed the drawn offset catches up at.
     pub fn step_up(&self, vel: V2) -> Option<(f32, f32)> {
+        self.step_up_grav(vel, 1)
+    }
+
+    /// `step_up` for a box whose gravity points `grav_dir`; with -1 it steps
+    /// along a ceiling and returns its new top, its vertical speed stopped.
+    pub fn step_up_grav(&self, vel: V2, grav_dir: i32) -> Option<(f32, f32)> {
         let [px, py] = self.pos;
         let [w, h] = self.size;
+        let g = grav_dir as i64;
         let dir = (vel[0] > 0.0) as i64 - (vel[0] < 0.0) as i64;
         let nx = px + vel[0];
         let col = ((nx + (w / 2) as f32 + ((w / 2 + 1) as i64 * dir) as f32) / 16.0) as i64;
-        let row = ((py + h as f32 - 1.0) / 16.0) as i64;
+        let row = if g == 1 { ((py + h as f32 - 1.0) / 16.0) as i64 } else { ((py as f64 + 0.1) / 16.0) as i64 };
         let rows = (h / 16 + (h % 16 != 0) as i32) as i64;
         let world = self.world;
         let inner = |x: i64, y: i64| x > 1 && y > 1 && x < world.width as i64 - 2 && y < world.height as i64 - 2;
         if !inner(col, row) || row >= world.height as i64 - 40 {
             return None;
         }
-        if (1..rows + 2).any(|k| !inner(col, row - k)) || !inner(col - dir, row - rows) {
+        if (1..rows + 2).any(|k| !inner(col, row - k * g)) || !inner(col - dir, row - rows * g) {
             return None;
         }
         let open = |c: Cell| !c.active || !c.solid() || c.solid_top();
-        let clear = (2..rows + 1).all(|k| open(cell(world, col, row - k)));
-        let behind = open(cell(world, col - dir, row - rows));
+        let clear = (2..rows + 1).all(|k| open(cell(world, col, row - k * g)));
+        let behind = open(cell(world, col - dir, row - rows * g));
+        if g == -1 {
+            let (near, far) = (cell(world, col, row + 1), cell(world, col, row + rows + 1));
+            let head = open(near) || near.slope != 0 || (near.half && open(far));
+            let (step, below) = (cell(world, col, row), cell(world, col, row + 1));
+            let foot = (step.active && step.solid() && !step.solid_top()) || (below.half && below.active);
+            let (cx, cx1) = (col as f32 * 16.0, col as f32 * 16.0 + 16.0);
+            if !(cx < nx + w as f32 && cx1 > nx) || !(foot && head && clear && behind) {
+                return None;
+            }
+            if step.slope > 2 || below.platform() {
+                return None;
+            }
+            let ceiling = row as f32 * 16.0 + 16.0;
+            let drop = ceiling - py;
+            return (ceiling > py && drop <= 16.1).then_some((ceiling, if drop < 9.0 { 1.0 } else { 2.0 }));
+        }
         let above = cell(world, col, row - 1);
         let over = cell(world, col, row - (rows + 1));
         let mid = px + (w / 2) as f32;
@@ -250,8 +278,8 @@ impl Box<'_> {
 
     /// `Collision.SlopeCollision`: rides the box along sloped tiles it overlaps.
     /// Returns position and velocity, whether it stands on a sloped platform or
-    /// falls through one, and whether a ceiling stopped it.
-    pub fn slopes(&self, vel: V2, fall: bool) -> (V2, V2, bool, bool, bool) {
+    /// falls through one, and whether a ceiling or a floor stopped it.
+    pub fn slopes(&self, vel: V2, fall: bool) -> (V2, V2, bool, bool, bool, bool) {
         let [px, py] = self.pos;
         let [w, h] = self.size.map(|k| k as f32);
         let (mut stair, mut stair_fall) = (false, false);
@@ -350,7 +378,7 @@ impl Box<'_> {
         }
         let want = [pos[0] - px, pos[1] - py];
         let r = self.tiles(want, false, false);
-        let (got, mut up) = (r.vel, r.up);
+        let (got, mut up, down) = (r.vel, r.up, r.down);
         if got[1] > want[1] {
             let d = want[1] - got[1];
             pos[1] = py + got[1];
@@ -373,7 +401,7 @@ impl Box<'_> {
             }
             v = [0.0, 0.0];
         }
-        (pos, v, stair, stair_fall, up)
+        (pos, v, stair, stair_fall, up, down)
     }
 
     /// `Collision.WalkDownSlope`: a box standing on a top slope follows it down.

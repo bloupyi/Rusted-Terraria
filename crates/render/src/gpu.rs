@@ -28,6 +28,11 @@ pub struct Camera {
     pub surface: f32,
     /// Grass wind counter (turns) and wind speed, for swaying plants.
     pub wind: [f32; 2],
+    /// The spelunker potion: treasure tiles lit at least (200, 170, 0).
+    pub spelunker: bool,
+    /// `GameViewMatrix` flipped upside down (the gravitation potion): every
+    /// sprite but `SPRITE_SCREEN` ones mirrors about the centre line.
+    pub flip: bool,
 }
 
 /// A rectangle in world pixels: flat colour, or an atlas region tinted by
@@ -51,6 +56,12 @@ pub struct Sprite {
 pub const SPRITE_LIT: u32 = 1 << 8;
 /// Mirrored horizontally.
 pub const SPRITE_FLIP: u32 = 1 << 9;
+/// With `SPRITE_LIT`, the light under it is at least (255, 50, 50): a hostile monster seen with the hunter potion.
+pub const SPRITE_HUNTER_FOE: u32 = 1 << 10;
+/// With `SPRITE_LIT`, the light is at least (50, 255, 50): a friendly one.
+pub const SPRITE_HUNTER_FRIEND: u32 = 1 << 11;
+/// Kept upright when the camera flips: backdrops and the interface.
+pub const SPRITE_SCREEN: u32 = 1 << 12;
 
 impl Sprite {
     pub fn flat(pos: [f32; 2], size: [f32; 2], color: [f32; 4]) -> Self {
@@ -434,7 +445,7 @@ impl Renderer {
             scale: scale.into(),
             offset: (-cam.center * scale).into(),
             lod_pages_x: self.lod_pages.0,
-            lighting: cam.lighting as u32,
+            lighting: cam.lighting as u32 | (cam.spelunker as u32) << 1 | (cam.flip as u32) << 2,
             world: self.world,
             sky: [cam.sky[0], cam.sky[1], cam.sky[2], cam.time],
             water: self.water,

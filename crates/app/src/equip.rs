@@ -122,6 +122,10 @@ pub struct Effects {
     pub on_fire: bool,
     /// Buff 12: `nightVision`, light carries further.
     pub night_vision: bool,
+    /// Buff 9: `findTreasure`, treasure tiles stand out.
+    pub spelunker: bool,
+    /// Buff 17: `detectCreature`, monsters stand out.
+    pub hunter: bool,
 }
 
 /// `ResetEffects`, then `UpdateBuffs` and `ApplyEquipFunctional` for `worn`
@@ -144,6 +148,8 @@ pub fn effects(worn: impl IntoIterator<Item = u16>, buffs: &[Buff]) -> Effects {
         invis: false,
         on_fire: false,
         night_vision: false,
+        spelunker: false,
+        hunter: false,
     };
     for b in buffs.iter().filter(|b| b.time > 0) {
         match b.kind {
@@ -152,7 +158,10 @@ pub fn effects(worn: impl IntoIterator<Item = u16>, buffs: &[Buff]) -> Effects {
             6 => e.mana_regen = true,
             7 => e.magic_damage += 0.2,
             10 => e.invis = true,
+            9 => e.spelunker = true,
             12 => e.night_vision = true,
+            17 => e.hunter = true,
+            18 => e.moves.grav_control = true,
             13 => e.battle = true,
             14 => e.thorns = e.thorns.max(1.0),
             15 => e.moves.water_walk = true,
@@ -243,6 +252,8 @@ mod tests {
         assert_eq!(e.life_regen, crate::item_ids::stats(49).unwrap().life_regen as i32);
         assert!(e.life_regen > 0);
         assert_eq!(effects([], &[Buff { kind: 104, time: 1 }]).pick_speed, 0.75);
+        let e = effects([], &[9, 10, 17, 18].map(|kind| Buff { kind, time: 1 }));
+        assert!(e.spelunker && e.invis && e.hunter && e.moves.grav_control);
     }
 
     #[test]

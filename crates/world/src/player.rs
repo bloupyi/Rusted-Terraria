@@ -24,6 +24,8 @@ pub struct Input {
     pub jump: bool,
     /// Drops through platforms.
     pub down: bool,
+    /// Flips gravity with `gravControl`.
+    pub up: bool,
 }
 
 /// What equipment and buffs change in the player's movement.
@@ -43,6 +45,8 @@ pub struct Moves {
     pub slow_fall: bool,
     /// `waterWalk`: stands on the top of liquids.
     pub water_walk: bool,
+    /// `gravControl`: up flips gravity.
+    pub grav_control: bool,
 }
 
 impl Default for Moves {
@@ -55,6 +59,7 @@ impl Default for Moves {
             no_fall: false,
             slow_fall: false,
             water_walk: false,
+            grav_control: false,
         }
     }
 }
@@ -92,6 +97,11 @@ pub struct Player {
     fall_start: i32,
     /// Fall damage taken on landing this tick, before defense.
     pub fall_damage: i32,
+    /// `gravDir`: 1 falls down, -1 up.
+    pub grav_dir: f32,
+    release_up: bool,
+    /// Gravity flipped this tick, for its sound.
+    pub flipped: bool,
 }
 
 impl std::ops::Deref for Player {
@@ -127,6 +137,9 @@ impl Player {
             cloud_jumping: false,
             fall_start: (y / 16.0) as i32,
             fall_damage: 0,
+            grav_dir: 1.0,
+            release_up: true,
+            flipped: false,
         }
     }
 
@@ -155,6 +168,7 @@ impl Player {
         self.prev = self.pos();
         self.fall_damage = 0;
         self.cloud_jumped = false;
+        self.flipped = false;
         let (mut gravity, max_fall, mut jump_height, mut jump_speed): (f32, f32, i32, f32) = match self.wet {
             None => (0.4, 10.0, 15, 5.01),
             Some(HONEY) => (0.1, 3.0, 15, 5.01),
@@ -167,11 +181,23 @@ impl Player {
             jump_speed = jump_speed.max(6.51);
         }
         self.horizontal(input);
+        if !self.moves.grav_control {
+            self.grav_dir = 1.0;
+        } else if input.up && self.release_up {
+            self.grav_dir = -self.grav_dir;
+            self.fall_start = (self.y / 16.0) as i32;
+            self.jump = 0;
+            self.flipped = true;
+        }
+        // `UpdateControlHolds`.
+        self.release_up = !input.up;
+        let g = self.grav_dir;
         self.jump_movement(input, jump_height, jump_speed);
         if self.moves.slow_fall && !input.down {
             gravity /= 3.0;
         }
-        self.vy = (self.vy + gravity).min(max_fall + 0.01);
+        self.vy += gravity * g;
+        self.vy = if g == 1.0 { self.vy.min(max_fall + 0.01) } else { self.vy.max(-max_fall - 0.01) };
 
         let wet = collision::wet(world, self.pos(), SIZE);
         if wet.is_none() && self.wet.is_some() {
@@ -179,22 +205,30 @@ impl Player {
         }
         self.wet = wet;
 
-        let v = self.at_box(world).walk_down_slope([self.vx, self.vy], gravity);
+        let v = self.at_box(world).walk_down_slope([self.vx, self.vy], gravity * g);
         (self.vx, self.vy) = (v[0], v[1]);
         if self.vy == gravity {
             if let Some((y, speed)) = self.at_box(world).step_down([self.vx, self.vy]) {
                 self.step_to(y, speed);
             }
         }
-        if self.vy >= gravity && !input.down {
+        if g == -1.0 {
+            if self.vy <= gravity && !input.up {
+                if let Some((y, speed)) = self.at_box(world).step_up_grav([self.vx, self.vy], -1) {
+                    self.step_to(y, speed);
+                    self.vy = 0.0;
+                }
+            }
+        } else if self.vy >= gravity && !input.down {
             if let Some((y, speed)) = self.at_box(world).step_up([self.vx, self.vy]) {
                 self.step_to(y, speed);
             }
         }
 
-        let fall_through = input.down;
+        // Upside down, platforms never hold and liquids are not walked on.
+        let fall_through = input.down || g == -1.0;
         let before = [self.vx, self.vy];
-        let mut hit = self.at_box(world).tiles(before, fall_through, false);
+        let mut hit = self.at_box(world).tiles_grav(before, fall_through, false, g as i32);
         if self.moves.water_walk && !fall_through {
             // `Collision.WaterCollision`: the top of a liquid holds like a platform.
             let vy = collision::water_top(world, self.pos(), hit.vel, SIZE);
@@ -215,16 +249,16 @@ impl Player {
                     moved[a] *= k;
                 }
             }
-        } else if hit.up {
+        } else if hit.up && g == 1.0 {
             self.jump = 0;
         }
         (self.x, self.y) = (self.x + moved[0], self.y + moved[1]);
         (self.vx, self.vy) = (hit.vel[0], hit.vel[1]);
 
-        if input.down {
+        if input.down || g == -1.0 {
             self.stair_fall = true;
         }
-        let (pos, vel, stair, stair_fall, up) = self.at_box(world).slopes([self.vx, self.vy], self.stair_fall);
+        let (pos, vel, stair, stair_fall, up, down) = self.at_box(world).slopes([self.vx, self.vy], self.stair_fall);
         if stair_fall {
             self.stair_fall = true;
         } else if !fall_through {
@@ -235,8 +269,14 @@ impl Player {
             self.step_speed = 4.0;
         }
         (self.x, self.y, self.vx, self.vy) = (pos[0], pos[1], vel[0], vel[1]);
-        if up {
+        if g == -1.0 && self.vy == 0.0101 {
+            self.vy = 0.0;
+        }
+        if g == 1.0 && up {
             self.vy = 0.01;
+            self.jump = 0;
+        } else if g == -1.0 && down {
+            self.vy = -0.01;
             self.jump = 0;
         }
 
@@ -253,7 +293,7 @@ impl Player {
     fn fall(&mut self) {
         let row = (self.y / 16.0) as i32;
         if self.vy == 0.0 {
-            let n = row - self.fall_start;
+            let n = (row - self.fall_start) * self.grav_dir as i32;
             if n > SAFE_FALL && !self.moves.no_fall {
                 self.fall_damage = (n - SAFE_FALL) * 10;
             }
@@ -328,12 +368,12 @@ impl Player {
                 if self.vy == 0.0 {
                     self.jump = 0;
                 } else {
-                    self.vy = -speed;
+                    self.vy = -speed * self.grav_dir;
                     self.jump -= 1;
                 }
             } else if (self.vy == 0.0 || self.cloud_ready) && self.release_jump {
                 let grounded = self.vy == 0.0;
-                self.vy = -speed;
+                self.vy = -speed * self.grav_dir;
                 if grounded {
                     self.jump = height;
                 } else {
@@ -545,5 +585,54 @@ mod tests {
         assert_eq!((p.y + HEIGHT, p.vy, p.wet), (30.0 * 16.0, 0.0, None));
         run(&mut p, &w, Input { down: true, ..Input::default() }, 1.0);
         assert!(p.wet.is_some(), "down sinks in");
+    }
+
+    #[test]
+    fn gravitation_flips_onto_the_ceiling_and_back() {
+        // Ceiling rows 5..10 with a one-tile step down at x >= 20, platform at 20, floor at 50.
+        let w = world(|x, y| match y {
+            5..10 => 1,
+            10 if x >= 20 => 1,
+            20 => PLATFORM,
+            y if y >= 50 => 1,
+            _ => NO_TILE,
+        });
+        let mut p = Player::at(100.0, 0.0);
+        p.y = 49.0 * 16.0 - HEIGHT;
+        p.moves.grav_control = true;
+        run(&mut p, &w, Input::default(), 1.0);
+        assert_eq!(p.y + HEIGHT, 50.0 * 16.0);
+        p.tick(&w, Input { up: true, ..Input::default() });
+        assert!(p.flipped && p.grav_dir == -1.0);
+        run(&mut p, &w, Input { up: true, ..Input::default() }, 3.0);
+        assert_eq!((p.y, p.vy), (10.0 * 16.0, 0.0), "through the platform onto the ceiling");
+        assert!(p.fall_damage == 0 && !p.flipped);
+        run(&mut p, &w, Input { right: true, ..Input::default() }, 3.0);
+        assert_eq!(p.y, 11.0 * 16.0, "stepped along the ceiling");
+        run(&mut p, &w, Input { jump: true, ..Input::default() }, 0.1);
+        assert!(p.y > 11.0 * 16.0, "jumps away from it: {}", p.y);
+        run(&mut p, &w, Input::default(), 1.0);
+        p.tick(&w, Input { up: true, ..Input::default() });
+        run(&mut p, &w, Input::default(), 3.0);
+        assert_eq!((p.grav_dir, p.y + HEIGHT), (1.0, 20.0 * 16.0), "back down onto the platform");
+    }
+
+    #[test]
+    fn falling_up_hurts_too() {
+        let w = world(|_, y| if !(10..50).contains(&y) { 1 } else { NO_TILE });
+        let mut p = Player::at(100.0, 49.0 * 16.0 - HEIGHT);
+        p.moves.grav_control = true;
+        run(&mut p, &w, Input::default(), 0.5);
+        p.tick(&w, Input { up: true, ..Input::default() });
+        let mut damage = 0;
+        for _ in 0..300 {
+            p.tick(&w, Input::default());
+            damage += p.fall_damage;
+        }
+        assert_eq!(p.y, 10.0 * 16.0);
+        assert_eq!(damage, (47 - 10 - SAFE_FALL) * 10);
+        p.moves.grav_control = false;
+        p.tick(&w, Input::default());
+        assert_eq!(p.grav_dir, 1.0, "the buff running out turns it back");
     }
 }
