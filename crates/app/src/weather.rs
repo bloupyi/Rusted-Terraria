@@ -45,6 +45,15 @@ pub struct Weather {
     clouds_temp: i32,
     weather_counter: i32,
     pub drops: Vec<Drop>,
+    /// `_shouldUseStormMusic` and `_shouldUseWindyDayMusic`.
+    pub storm: bool,
+    pub windy_day: bool,
+    /// How white the sky flashes, 0 to 1, and the flash under way.
+    pub lightning: f32,
+    lightning_speed: f32,
+    lightning_decay: f32,
+    /// Ticks until the thunder of the last flash is heard.
+    thunder_delay: i32,
 }
 
 impl Weather {
@@ -127,6 +136,90 @@ impl Weather {
         } else {
             self.cloud_alpha = (self.cloud_alpha - step).max(0.0);
         }
+    }
+
+    /// `UpdateWindyDayState`: storm and windy day, each with a margin so they
+    /// do not flicker on and off.
+    pub fn update_state(&mut self, day: bool, time: f64) {
+        const MIN_WIND: f32 = 0.34;
+        const MAX_WIND: f32 = 0.4;
+        const MIN_RAIN: f32 = 0.4;
+        const MAX_RAIN: f32 = 0.5;
+        let wind = self.wind_target.abs();
+        if self.cloud_alpha == 0.0 {
+            self.storm = false;
+            if !(10800.0..=43200.0).contains(&time) || !day {
+                self.windy_day = false;
+                return;
+            }
+            if wind < MIN_WIND {
+                self.windy_day = false;
+            }
+            if wind >= MAX_WIND {
+                self.windy_day = true;
+            }
+        } else {
+            if self.cloud_alpha < MIN_RAIN || wind < MIN_WIND {
+                self.storm = false;
+            } else if self.cloud_alpha >= MAX_RAIN && wind >= MAX_WIND {
+                self.storm = true;
+            }
+            self.windy_day = false;
+        }
+    }
+
+    /// `NewLightning`: a flash now, its thunder a little later.
+    pub fn new_lightning(&mut self, r: &mut Roll) {
+        self.thunder_delay = if r(3) == 0 {
+            next(r, 1, 31)
+        } else if r(2) == 0 {
+            next(r, 31, 121)
+        } else {
+            next(r, 11, 61)
+        };
+        self.lightning_decay = r(1_000_000) as f32 / 1e6 * 0.05 + 0.008;
+        self.lightning_speed = r(1_000_000) as f32 / 1e6 * 0.05 + 0.05;
+    }
+
+    /// `UpdateWeather`'s storm: the flash grows and fades, and over a view
+    /// above the caverns a storm strikes now and then, more often the
+    /// harder it rains and blows. True when thunder is heard this tick.
+    pub fn update_lightning(&mut self, open_sky: bool, r: &mut Roll) -> bool {
+        let mut thunder = false;
+        if self.thunder_delay > 0 {
+            self.thunder_delay -= 1;
+            thunder = self.thunder_delay == 0;
+        }
+        if self.lightning_speed > 0.0 {
+            self.lightning += self.lightning_speed;
+            if self.lightning >= 1.0 {
+                self.lightning = 1.0;
+                self.lightning_speed = 0.0;
+            }
+        } else if self.lightning > 0.0 {
+            self.lightning = (self.lightning - self.lightning_decay).max(0.0);
+        } else if self.thunder_delay <= 0 && open_sky && self.storm {
+            let (mut lo, mut hi) = (600.0f32, 1600.0f32);
+            for (k, a, b) in [(0.8, 0.6, 0.8), (0.7, 0.7, 0.9), (0.6, 0.8, 0.95)] {
+                if self.max_raining > k {
+                    lo *= a;
+                    hi *= b;
+                }
+            }
+            for (k, a, b) in [(0.7, 0.6, 0.8), (0.6, 0.7, 0.9), (0.5, 0.8, 0.95)] {
+                if self.wind_target.abs() > k {
+                    lo *= a;
+                    hi *= b;
+                }
+            }
+            let mut n = next(r, lo as i32, hi as i32) as f32;
+            n *= (1.0 - self.max_raining + 1.0) / 2.0;
+            n *= (1.0 - self.wind_target + 1.0) / 2.0;
+            if r(n as i32) == 0 {
+                self.new_lightning(r);
+            }
+        }
+        thunder
     }
 
     /// `UpdateWeather`: the wind eases towards a target that drifts and
@@ -293,6 +386,14 @@ impl Weather {
     }
 }
 
+/// The end of `SetBackColor`: lightning whitens the sky colour.
+pub fn flash(c: [f32; 3], lightning: f32) -> [f32; 3] {
+    if lightning <= 0.0 {
+        return c;
+    }
+    c.map(|v| ((v / 255.0 + (1.0 - v / 255.0) * lightning) * 255.0) as u8 as f32)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -341,5 +442,30 @@ mod tests {
         w.wind_counter = 1_000_000;
         w.update_wind(true, &mut r);
         assert!(w.wind > 0.0 && w.wind < 0.01);
+    }
+
+    #[test]
+    fn storms_flash_and_thunder() {
+        let mut r = rng(11);
+        let mut w = Weather { cloud_alpha: 0.9, max_raining: 0.9, wind_target: 0.8, ..Default::default() };
+        w.update_state(true, 20000.0);
+        assert!(w.storm && !w.windy_day);
+        let (mut flashed, mut thunder) = (false, false);
+        for _ in 0..20_000 {
+            thunder |= w.update_lightning(true, &mut r);
+            flashed |= w.lightning >= 1.0;
+        }
+        assert!(flashed && thunder);
+        assert_eq!(flash([0.0, 100.0, 255.0], 1.0), [255.0; 3]);
+        assert_eq!(flash([10.0; 3], 0.0), [10.0; 3]);
+        // A dry windy day, and a calm one.
+        let mut w = Weather { wind_target: 0.45, ..Default::default() };
+        w.update_state(true, 20000.0);
+        assert!(w.windy_day && !w.storm);
+        w.wind_target = 0.36;
+        w.update_state(true, 20000.0);
+        assert!(w.windy_day, "until it drops under 0.34");
+        w.update_state(false, 20000.0);
+        assert!(!w.windy_day);
     }
 }

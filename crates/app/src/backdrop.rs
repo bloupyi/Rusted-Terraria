@@ -145,6 +145,8 @@ pub struct Scene<'a> {
     pub ticks: u32,
     /// `Main.cloudAlpha`.
     pub cloud: f32,
+    /// `Main.lightning`.
+    pub lightning: f32,
     pub sheets: &'a HashMap<String, SheetRef>,
 }
 
@@ -168,7 +170,8 @@ pub fn sprites(s: &Scene, v: &View, fade: &Fade, holy_tiles: i32) -> Vec<Sprite>
         return out;
     }
     let atmo = atmosphere(s, v.y + v.h / 2.0);
-    let mut sky = colors(s.day, s.time, s.env.blood_moon && !s.day, s.cloud * atmo).sky;
+    let sky = colors(s.day, s.time, s.env.blood_moon && !s.day, s.cloud * atmo).sky;
+    let mut sky = crate::weather::flash(sky, s.lightning);
     sky = if atmo <= 0.01 { [0.0; 3] } else { sky.map(|c| (c * atmo).floor()) };
     let tint = [sky[0] / 255.0, sky[1] / 255.0, sky[2] / 255.0, 1.0];
 

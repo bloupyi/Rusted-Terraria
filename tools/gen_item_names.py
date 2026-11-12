@@ -13,10 +13,7 @@ import sys
 from pathlib import Path
 
 CASE_RE = re.compile(r"^(\t+)case (\d+):$")
-TOP_CASE_RE = re.compile(r"^\t\tcase (\d+):$")
 SWITCH_RE = re.compile(r"^(\t+)switch \((.+)\)$")
-CREATE_RE = re.compile(r"\bcreateTile = (\d+);")
-STYLE_RE = re.compile(r"\bplaceStyle = (\d+);")
 PLACE_RE = re.compile(r"DefaultToPlaceableTile\(\(ushort\)(\d+)(?:, (\d+))?\)")
 ID_RE = re.compile(r"public const short (\w+) = (\d+);")
 USED_RE = re.compile(r'"Item_(\d+)"')
@@ -65,6 +62,7 @@ def item_defaults(item_cs):
                 out[m.group(1)] = m.group(2)
             elif (m := PLACE_RE.search(line)):
                 out["createTile"], out["consumable"] = m.group(1), "true"
+                out["placeStyle"] = m.group(2) or "0"
             elif "DefaultToPlaceableWall(" in line:
                 out["createWall"], out["consumable"] = "1", "true"
         return out
@@ -128,33 +126,6 @@ def stats(f, material):
             f"buff_time: {int(num(f, 'buffTime'))}, life_regen: {int(num(f, 'lifeRegen'))}, flags: {bits}")
 
 
-def placing_items(item_cs):
-    """(item id, tile, style) for every `case` of the SetDefaults switches."""
-    out = []
-    labels, body, tile, style = [], False, None, 0
-    for line in item_cs.split("\n"):
-        m = TOP_CASE_RE.match(line)
-        if m:
-            if body:
-                labels, body, tile, style = [], False, None, 0
-            labels.append(int(m.group(1)))
-            continue
-        if not labels:
-            continue
-        body = True
-        if (m := CREATE_RE.search(line)):
-            tile = int(m.group(1))
-        if (m := STYLE_RE.search(line)):
-            style = int(m.group(1))
-        if (m := PLACE_RE.search(line)):
-            tile, style = int(m.group(1)), int(m.group(2) or 0)
-        if line == "\t\t\tbreak;":
-            if tile is not None:
-                out += [(i, tile, style) for i in labels]
-            labels, body, tile, style = [], False, None, 0
-    return out
-
-
 def main():
     src = Path(sys.argv[1])
     root = Path(__file__).resolve().parent.parent
@@ -163,8 +134,10 @@ def main():
     defaults = item_defaults(item_cs)
     material = materials((src / "Terraria/Recipe.cs").read_text())
     tile_item = {}
-    for item, tile, style in sorted(placing_items(item_cs)):
-        if style == 0 and tile not in tile_item and item in names:
+    for item in sorted(names):
+        f = defaults(item)
+        tile = int(num(f, "createTile", -1))
+        if tile >= 0 and int(num(f, "placeStyle")) == 0 and tile not in tile_item:
             tile_item[tile] = item
     used = set()
     for f in (root / "crates/app/src").glob("*.rs"):

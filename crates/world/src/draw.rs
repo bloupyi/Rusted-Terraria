@@ -44,10 +44,12 @@ pub struct Draw {
     /// Pixels down from the top of the cell.
     pub top: i32,
     pub flip: bool,
+    /// Pixels to the right: a palm trunk's lean.
+    pub left: i32,
 }
 
 impl Draw {
-    pub const CELL: Draw = Draw { w: 16, h: 16, top: 0, flip: false };
+    pub const CELL: Draw = Draw { w: 16, h: 16, top: 0, flip: false, left: 0 };
 }
 
 /// Draw of a cell of `tile` at column `x` with frame `(fx, fy)`.
@@ -216,6 +218,129 @@ pub fn tree_biome(world: &World, x: i64, y: i64, fx: i32, fy: i32) -> i32 {
     }
 }
 
+/// `GetPalmTreeVariant` from the sand under the trunk at `(x, y)`: beach sand,
+/// crimson, pearl and ebon sand, 4 more for an oasis palm away from the
+/// beaches; -1 on other ground.
+pub fn palm_biome(world: &World, x: i64, y: i64) -> i32 {
+    const BEACH: i64 = 380;
+    let mut y = y;
+    while world.tile(x, y) == PALM {
+        y += 1;
+    }
+    let n = match world.tile(x, y) {
+        53 => 0,
+        234 => 1,
+        116 => 2,
+        112 => 3,
+        _ => -1,
+    };
+    if (BEACH..=world.width as i64 - BEACH).contains(&x) {
+        n + 4
+    } else {
+        n
+    }
+}
+
+pub const PALM: u16 = 323;
+pub const CACTUS: u16 = 80;
+
+/// The column of the cactus trunk `(x, y)` belongs to and the cell under it,
+/// as `CheckCactus` and `CactusFrame` walk down an arm into the trunk.
+pub fn cactus_base(world: &World, x: i64, y: i64) -> (i64, i64) {
+    let is = |x, y| world.tile(x, y) == CACTUS;
+    let (mut bx, mut by) = (x, y);
+    let mut steps = 0;
+    while is(bx, by) && steps < 512 {
+        steps += 1;
+        by += 1;
+        if !is(bx, by) {
+            if is(bx - 1, by) && is(bx - 1, by - 1) && bx >= x {
+                bx -= 1;
+            }
+            if is(bx + 1, by) && is(bx + 1, by - 1) && bx <= x {
+                bx += 1;
+            }
+        }
+    }
+    (bx, by)
+}
+
+/// `CactusFrame` and `GetCactusType`: the frame of a cactus cell from its
+/// trunk, arms and neighbours, moved down a set for corrupt, hallowed or
+/// crimson sand.
+pub fn cactus_frame(world: &World, x: i64, y: i64) -> (u32, u32) {
+    let at = |dx: i64, dy: i64| world.tile(x + dx, y + dy);
+    let c = CACTUS;
+    // `Main.tileSolid`, which leaves the cactus out.
+    let solid = |x, y| crate::tile_sets::SOLID.has(world.tile(x, y));
+    let side = x - cactus_base(world, x, y).0;
+    let (l2, l, r, up, down, dl, dr) = (at(-2, 0), at(-1, 0), at(1, 0), at(0, -1), at(0, 1), at(-1, 1), at(1, 1));
+    let up = if up == 227 { c } else { up };
+    let (fx, fy) = match side {
+        0 => {
+            let fx = if l == c && r == c && dl != c && dr != c && l2 != c {
+                90
+            } else if l == c && dl != c && l2 != c {
+                72
+            } else if r == c && dr != c {
+                18
+            } else {
+                0
+            };
+            let fy = if up != c {
+                0
+            } else if fx != 0 || solid(x, y + 1) {
+                36
+            } else {
+                18
+            };
+            (fx, fy)
+        }
+        -1 if r == c => match (up != c, down != c) {
+            (true, true) => (108, 36),
+            (_, true) => (54, 36),
+            (true, _) => (54, 0),
+            _ => (54, 18),
+        },
+        -1 => (54, if up != c { 0 } else { 18 }),
+        1 if l == c => match (up != c, down != c) {
+            (true, true) => (108, 18),
+            (_, true) => (36, 36),
+            (true, _) => (36, 0),
+            _ => (36, 18),
+        },
+        1 => (36, if up != c { 0 } else { 18 }),
+        _ => (0, 0),
+    };
+    // `GetCactusType`: the sand under the trunk.
+    let mut col = x;
+    match fx {
+        36 => col -= 1,
+        54 => col += 1,
+        108 if fy == 18 => col -= 1,
+        108 => col += 1,
+        _ => {}
+    }
+    let mut row = y;
+    let mut seen = world.tile(col, row) == c;
+    while !(solid(col, row) && seen) {
+        if world.tile(col, row) == c {
+            seen = true;
+        }
+        row += 1;
+        if row > y + 20 || !world.in_bounds(col, row) {
+            break;
+        }
+    }
+    let set = match world.tile(col, row) {
+        112 => 54,
+        116 => 108,
+        234 => 162,
+        _ => 0,
+    };
+    (fx, fy + set)
+}
+
 fn surface(world: &World) -> f64 {
     world.header.env.as_ref().map_or(world.height as f64 * 0.3, |e| e.world_surface)
 }
@@ -299,8 +424,8 @@ mod tests {
     #[test]
     fn grass_plants_and_tables() {
         // Plants are 20 px tall, mirrored on even columns.
-        assert_eq!(cell(3, 4, 0, 0), Draw { w: 16, h: 20, top: 0, flip: true });
-        assert_eq!(cell(3, 5, 0, 0), Draw { w: 16, h: 20, top: 0, flip: false });
+        assert_eq!(cell(3, 4, 0, 0), Draw { w: 16, h: 20, top: 0, flip: true, left: 0 });
+        assert_eq!(cell(3, 5, 0, 0), Draw { w: 16, h: 20, top: 0, flip: false, left: 0 });
         // Only the bottom row of a table reaches 18 px.
         assert_eq!(cell(14, 0, 0, 0), Draw::CELL);
         assert_eq!(cell(14, 0, 0, 18).h, 18);
